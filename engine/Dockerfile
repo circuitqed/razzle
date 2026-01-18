@@ -1,5 +1,5 @@
-# Razzle Dazzle Engine - GPU Training Image
-FROM pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime
+# Razzle Dazzle Engine
+FROM python:3.12-slim
 
 WORKDIR /app
 
@@ -11,11 +11,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy package files
 COPY pyproject.toml .
 COPY razzle/ razzle/
+COPY server/ server/
 COPY cli/ cli/
 COPY scripts/ scripts/
 
-# Install package
-RUN pip install --no-cache-dir -e ".[training]"
+# Install package with server dependencies
+RUN pip install --no-cache-dir -e ".[server]"
 
-# Default command
-CMD ["python", "-c", "from razzle import __version__; print(f'Razzle Dazzle Engine v{__version__}')"]
+# Expose port
+EXPOSE 8000
+
+# Default command - run server with auto-reload
+CMD ["uvicorn", "server.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
