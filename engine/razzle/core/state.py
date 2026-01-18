@@ -26,7 +26,9 @@ class GameState:
         pieces: Tuple of (p1_pieces, p2_pieces) bitboards
         balls: Tuple of (p1_ball, p2_ball) bitboards (single bit each)
         current_player: 0 for player 1, 1 for player 2
-        touched_mask: Bitboard of pieces that have touched ball this turn
+        touched_mask: Bitboard of pieces that are INELIGIBLE to receive passes.
+                      A piece becomes ineligible when it passes or receives the ball.
+                      Ineligibility persists across turns until the piece moves.
         ply: Number of half-moves played
         history: Stack of (move, captured_state) for undo
     """
@@ -132,9 +134,8 @@ class GameState:
                 self.current_player,
                 self.touched_mask
             ))
-            # Switch player
+            # Switch player - DO NOT reset touched_mask (ineligibility persists!)
             self.current_player = 1 - self.current_player
-            self.touched_mask = 0
             self.ply += 1
             return
 
@@ -178,9 +179,12 @@ class GameState:
             # No - in Razzle Dazzle, the piece with ball CANNOT move
             # So this is a non-ball piece moving
 
+            # Clear ineligibility for the piece that moved (it can receive again)
+            # Note: clear src_bit (where piece was), not dst_bit
+            self.touched_mask &= ~src_bit
+
             # Knight move ends the turn
             self.current_player = 1 - p
-            self.touched_mask = 0
             self.ply += 1
 
     def undo_move(self) -> None:
