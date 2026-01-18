@@ -53,6 +53,7 @@ class GameStateResponse(BaseModel):
     status: str
     winner: Optional[int]
     ply: int
+    touched_mask: int  # Bitboard of ineligible receivers
 
 
 class MakeMoveRequest(BaseModel):
@@ -141,7 +142,8 @@ class Game:
             legal_moves=get_legal_moves(self.state),
             status=status,
             winner=self.state.get_winner(),
-            ply=self.state.ply
+            ply=self.state.ply,
+            touched_mask=self.state.touched_mask
         )
 
 
