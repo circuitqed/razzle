@@ -8,6 +8,9 @@
 - [x] Move generation (knight moves + ball passes)
 - [x] Win/draw detection
 - [x] Move encoding/decoding
+- [x] Persistent ineligibility rule (pieces stay ineligible until they move)
+- [x] End-turn mechanism for multi-pass turns
+- [x] Forced pass rule (when opponent adjacent to ball)
 
 ### AI
 - [x] MCTS implementation with PUCT
@@ -85,7 +88,8 @@
 
 - [x] Monorepo setup
 - [x] Docker Compose configuration
-- [ ] Documentation (rules, API docs)
+- [x] Official rules documentation (engine/docs/RULES.md)
+- [ ] API documentation
 - [ ] Landing page
 - [ ] Deployment (production hosting)
 
