@@ -164,14 +164,14 @@ class MoveGenerator:
         - END_TURN_MOVE (-1): explicitly end turn after passing
 
         Rules:
-        1. If opponent is adjacent to your ball, you MUST pass if possible
-        2. You can chain passes (each is a separate move in atomic encoding)
-        3. After passing, you can move a piece OR continue passing OR end turn
-        4. A knight move ends your turn
+        1. On your turn, you can EITHER move a piece OR pass the ball (not both)
+        2. If you choose to pass, you can chain multiple passes
+        3. After passing, you can only pass more OR end turn (no knight moves)
+        4. If opponent is adjacent to your ball, you MUST pass if possible
         """
         moves = []
 
-        # Check if we must pass
+        # Check if we must pass (opponent adjacent to ball)
         forced_pass = MoveGenerator.must_pass(state)
         pass_moves = list(MoveGenerator.get_pass_moves(state))
 
@@ -179,13 +179,14 @@ class MoveGenerator:
             # Must pass - only return pass moves
             return pass_moves
 
-        # Can do either passes or knight moves
-        moves.extend(pass_moves)
-        moves.extend(MoveGenerator.get_knight_moves(state))
-
-        # If we've made at least one pass this turn, can end turn
-        if state.touched_mask:
+        if state.has_passed:
+            # Already passed this turn - can only pass more or end turn
+            moves.extend(pass_moves)
             moves.append(END_TURN_MOVE)
+        else:
+            # Start of turn - can choose to pass OR move (not both)
+            moves.extend(pass_moves)
+            moves.extend(MoveGenerator.get_knight_moves(state))
 
         return moves
 

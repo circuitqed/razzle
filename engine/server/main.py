@@ -54,6 +54,7 @@ class GameStateResponse(BaseModel):
     winner: Optional[int]
     ply: int
     touched_mask: int  # Bitboard of ineligible receivers
+    has_passed: bool  # Whether a pass has been made this turn
 
 
 class MakeMoveRequest(BaseModel):
@@ -143,7 +144,8 @@ class Game:
             status=status,
             winner=self.state.get_winner(),
             ply=self.state.ply,
-            touched_mask=self.state.touched_mask
+            touched_mask=self.state.touched_mask,
+            has_passed=self.state.has_passed
         )
 
 

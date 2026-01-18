@@ -397,6 +397,56 @@ class TestApplyMoveStateChanges:
         # Now d1's ineligibility should be cleared
         assert not (state.touched_mask & bit(d1_sq))
 
+    def test_no_knight_moves_after_passing(self):
+        """Once you pass, you cannot move a knight - only pass more or end turn."""
+        state = GameState.new_game()
+
+        # At start, both passes and knight moves are available
+        moves_before = get_legal_moves(state)
+        knight_moves_before = [m for m in moves_before if m >= 0 and
+                               not (state.balls[0] & (1 << (m // 56)))]
+        assert len(knight_moves_before) > 0, "Should have knight moves at start"
+
+        # Make a pass
+        state.apply_move(algebraic_to_move('d1-e1'))
+        assert state.has_passed
+
+        # Now only passes and end_turn should be available - NO knight moves
+        moves_after = get_legal_moves(state)
+
+        # Check no knight moves
+        for m in moves_after:
+            if m == END_TURN_MOVE:
+                continue
+            src = m // 56
+            # Source should be the ball position (it's a pass), not a piece
+            assert state.balls[state.current_player] & (1 << src), \
+                f"Move {m} is a knight move but shouldn't be allowed after passing"
+
+        # end_turn should be available
+        assert END_TURN_MOVE in moves_after
+
+    def test_has_passed_resets_after_turn(self):
+        """has_passed should reset to False when turn ends."""
+        state = GameState.new_game()
+        assert not state.has_passed
+
+        # Pass
+        state.apply_move(algebraic_to_move('d1-e1'))
+        assert state.has_passed
+
+        # End turn
+        state.apply_move(END_TURN_MOVE)
+        assert not state.has_passed
+
+    def test_knight_move_does_not_set_has_passed(self):
+        """A knight move should not set has_passed."""
+        state = GameState.new_game()
+        assert not state.has_passed
+
+        state.apply_move(algebraic_to_move('b1-c3'))
+        assert not state.has_passed
+
 
 class TestStateCopy:
     def test_copy_is_independent(self):

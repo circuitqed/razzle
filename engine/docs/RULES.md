@@ -32,9 +32,10 @@ Legend:
 ## Turn Structure
 
 On your turn, you must do ONE of the following:
-1. **Move a piece** (ends your turn), OR
-2. **Pass the ball** one or more times, then optionally move a piece (which ends your turn), OR
-3. **Pass the ball** one or more times, then explicitly end your turn
+1. **Move a piece** - make one knight move, turn ends
+2. **Pass the ball** - pass one or more times, then turn ends
+
+You **cannot** do both in the same turn. It's either moving OR passing, not both.
 
 ## Piece Movement
 
@@ -101,10 +102,11 @@ Moves are written in algebraic notation:
 
 ## Summary of Key Rules
 
-1. ✓ Pieces move like knights to empty squares
-2. ✓ Piece with ball cannot move
-3. ✓ Ball passes in straight lines, blocked by pieces
-4. ✓ Multiple passes allowed per turn
-5. ✓ Passers AND receivers become ineligible until they move
-6. ✓ Forced pass when opponent moves adjacent to your ball
-7. ✓ Win by getting ball to opponent's back row
+1. ✓ On your turn: EITHER move a piece OR pass the ball (not both)
+2. ✓ Pieces move like knights to empty squares
+3. ✓ Piece with ball cannot move
+4. ✓ Ball passes in straight lines, blocked by pieces
+5. ✓ Multiple passes allowed per turn (but no knight move after passing)
+6. ✓ Passers AND receivers become ineligible until they move
+7. ✓ Forced pass when opponent moves adjacent to your ball
+8. ✓ Win by getting ball to opponent's back row
