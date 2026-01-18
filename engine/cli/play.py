@@ -19,6 +19,7 @@ from razzle.core.moves import (
     decode_move, encode_move
 )
 from razzle.core.bitboard import sq_to_algebraic
+from razzle.core.notation import game_to_pgn
 from razzle.ai.mcts import MCTS, MCTSConfig, play_move
 from razzle.ai.network import RazzleNet, create_network
 from razzle.ai.evaluator import BatchedEvaluator, DummyEvaluator
@@ -239,8 +240,8 @@ def watch_ai_vs_ai(
     num_simulations: int = 400,
     device: str = 'cpu',
     delay: float = 1.0
-) -> None:
-    """Watch AI play against itself."""
+) -> GameState:
+    """Watch AI play against itself. Returns final state."""
     import time
 
     state = GameState.new_game()
@@ -278,6 +279,8 @@ def watch_ai_vs_ai(
     winner = state.get_winner()
     print(f"Game over after {move_count} moves. Winner: Player {winner + 1 if winner is not None else 'None (draw)'}")
 
+    return state
+
 
 def main():
     parser = argparse.ArgumentParser(description='Razzle Dazzle Terminal Client')
@@ -287,6 +290,10 @@ def main():
     parser.add_argument('--watch', action='store_true', help='Watch AI vs AI')
     parser.add_argument('--play-as', type=int, choices=[1, 2], default=1,
                         help='Play as player 1 (X) or 2 (O)')
+    parser.add_argument('--pgn', type=str, metavar='FILE',
+                        help='Save game to PGN file (use - for stdout)')
+    parser.add_argument('--delay', type=float, default=1.0,
+                        help='Delay between moves in watch mode (seconds)')
 
     args = parser.parse_args()
 
@@ -298,7 +305,19 @@ def main():
         print(f"Model loaded ({network.num_parameters()} parameters)")
 
     if args.watch:
-        watch_ai_vs_ai(network, args.simulations, args.device)
+        state = watch_ai_vs_ai(network, args.simulations, args.device, args.delay)
+
+        # Output PGN if requested
+        if args.pgn:
+            pgn = game_to_pgn(state, event="AI vs AI", white="AI", black="AI")
+            if args.pgn == '-':
+                print("\n" + "=" * 40)
+                print("PGN:")
+                print(pgn)
+            else:
+                with open(args.pgn, 'w') as f:
+                    f.write(pgn)
+                print(f"\nGame saved to {args.pgn}")
     else:
         play_human_vs_ai(network, args.play_as - 1, args.simulations, args.device)
 
