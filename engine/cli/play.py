@@ -29,11 +29,23 @@ def print_board(state: GameState, highlight_moves: list[int] = None) -> None:
 
     Symbols:
         X = Player 1 piece with ball
-        x = Player 1 piece without ball
+        x = Player 1 piece without ball (eligible)
         O = Player 2 piece with ball
-        o = Player 2 piece without ball
+        o = Player 2 piece without ball (eligible)
+        Dim pieces = ineligible receivers (must move before receiving passes)
     """
+    # ANSI color codes
+    GREEN = '\033[92m'
+    DIM = '\033[2m'
+    RESET = '\033[0m'
+
     symbols = {}
+    ineligible = set()
+
+    # Track ineligible receivers
+    for sq in range(56):
+        if state.touched_mask & (1 << sq):
+            ineligible.add(sq)
 
     # Place pieces - check for ball first (uppercase = has ball)
     for sq in range(56):
@@ -53,8 +65,9 @@ def print_board(state: GameState, highlight_moves: list[int] = None) -> None:
     targets = set()
     if highlight_moves:
         for move in highlight_moves:
-            _, dst = decode_move(move)
-            targets.add(dst)
+            if move >= 0:  # Skip END_TURN_MOVE (-1)
+                _, dst = decode_move(move)
+                targets.add(dst)
 
     print()
     print("  +" + "-" * 15 + "+")
@@ -64,14 +77,16 @@ def print_board(state: GameState, highlight_moves: list[int] = None) -> None:
             sq = row * 7 + col
             sym = symbols.get(sq, '.')
             if sq in targets:
-                line += f" \033[92m{sym}\033[0m"  # Green highlight
+                line += f" {GREEN}{sym}{RESET}"  # Green = move target
+            elif sq in ineligible and sym != '.':
+                line += f" {DIM}{sym}{RESET}"  # Dim = ineligible receiver
             else:
                 line += f" {sym}"
         line += " |"
         print(line)
     print("  +" + "-" * 15 + "+")
     print("    a b c d e f g")
-    print("  X/O = ball, x/o = piece")
+    print(f"  X/O=ball  x/o=piece  {DIM}dim{RESET}=ineligible")
     print()
 
 
