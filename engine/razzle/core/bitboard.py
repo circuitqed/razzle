@@ -103,6 +103,7 @@ def popcount(bb: int) -> int:
 
 def lsb(bb: int) -> int:
     """Return index of least significant bit (or -1 if empty)."""
+    bb = int(bb)  # Handle numpy int64
     if bb == 0:
         return -1
     return (bb & -bb).bit_length() - 1
@@ -110,6 +111,7 @@ def lsb(bb: int) -> int:
 
 def iter_bits(bb: int) -> Iterator[int]:
     """Iterate over indices of set bits."""
+    bb = int(bb)  # Handle numpy int64
     while bb:
         sq = lsb(bb)
         yield sq

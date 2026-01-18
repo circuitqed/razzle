@@ -53,8 +53,10 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
   const handleAIMove = useCallback(async (gameId: string) => {
     setAiThinking(true);
     try {
-      const aiResponse = await api.getAIMove(gameId, { simulations: aiSimulations });
-      const newState = await api.makeMove(gameId, aiResponse.move);
+      // getAIMove already applies the move on the server
+      await api.getAIMove(gameId, { simulations: aiSimulations });
+      // Fetch the updated state
+      const newState = await api.getGameState(gameId);
       setGameState(newState);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'AI move failed');

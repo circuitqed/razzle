@@ -62,6 +62,20 @@ class TestBitOperations:
         bits = list(iter_bits(bb))
         assert bits == [0, 2, 4, 6]
 
+    def test_iter_bits_numpy_int64(self):
+        """Test that iter_bits handles numpy.int64 (from bitboard operations)."""
+        import numpy as np
+        bb = np.int64(0b1010101)
+        bits = list(iter_bits(bb))
+        assert bits == [0, 2, 4, 6]
+
+    def test_lsb_numpy_int64(self):
+        """Test that lsb handles numpy.int64."""
+        import numpy as np
+        from razzle.core.bitboard import lsb
+        assert lsb(np.int64(8)) == 3
+        assert lsb(np.int64(0)) == -1
+
 
 class TestKnightAttacks:
     def test_corner_knight(self):
