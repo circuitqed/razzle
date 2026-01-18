@@ -25,20 +25,27 @@ from razzle.ai.evaluator import BatchedEvaluator, DummyEvaluator
 
 
 def print_board(state: GameState, highlight_moves: list[int] = None) -> None:
-    """Print the board with optional move highlighting."""
+    """Print the board with optional move highlighting.
+
+    Symbols:
+        X = Player 1 piece with ball
+        x = Player 1 piece without ball
+        O = Player 2 piece with ball
+        o = Player 2 piece without ball
+    """
     symbols = {}
 
-    # Place pieces
+    # Place pieces - check for ball first (uppercase = has ball)
     for sq in range(56):
         bit = 1 << sq
-        if state.pieces[0] & bit:
-            symbols[sq] = 'x'
-        elif state.pieces[1] & bit:
-            symbols[sq] = 'o'
-        elif state.balls[0] & bit:
-            symbols[sq] = 'X'
+        if state.balls[0] & bit:
+            symbols[sq] = 'X'  # P1 piece with ball
         elif state.balls[1] & bit:
-            symbols[sq] = 'O'
+            symbols[sq] = 'O'  # P2 piece with ball
+        elif state.pieces[0] & bit:
+            symbols[sq] = 'x'  # P1 piece
+        elif state.pieces[1] & bit:
+            symbols[sq] = 'o'  # P2 piece
         else:
             symbols[sq] = '.'
 
@@ -64,6 +71,7 @@ def print_board(state: GameState, highlight_moves: list[int] = None) -> None:
         print(line)
     print("  +" + "-" * 15 + "+")
     print("    a b c d e f g")
+    print("  X/O = ball, x/o = piece")
     print()
 
 
