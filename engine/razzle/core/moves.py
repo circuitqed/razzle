@@ -16,6 +16,10 @@ from .bitboard import (
 from .state import GameState
 
 
+# Special move values
+END_TURN_MOVE = -1
+
+
 # Move encoding: src * 56 + dst
 def encode_move(src: int, dst: int) -> int:
     """Encode a move as a single integer."""
@@ -29,6 +33,8 @@ def decode_move(move: int) -> tuple[int, int]:
 
 def move_to_algebraic(move: int) -> str:
     """Convert move to algebraic notation."""
+    if move == END_TURN_MOVE:
+        return "end"
     src, dst = decode_move(move)
     return f"{sq_to_algebraic(src)}-{sq_to_algebraic(dst)}"
 
@@ -155,11 +161,12 @@ class MoveGenerator:
         Returns list of encoded moves. Move type is determined by context:
         - If source is ball position: it's a pass
         - Otherwise: it's a knight move
+        - END_TURN_MOVE (-1): explicitly end turn after passing
 
         Rules:
         1. If opponent is adjacent to your ball, you MUST pass if possible
         2. You can chain passes (each is a separate move in atomic encoding)
-        3. After passing, you can move a piece OR continue passing
+        3. After passing, you can move a piece OR continue passing OR end turn
         4. A knight move ends your turn
         """
         moves = []
@@ -175,6 +182,10 @@ class MoveGenerator:
         # Can do either passes or knight moves
         moves.extend(pass_moves)
         moves.extend(MoveGenerator.get_knight_moves(state))
+
+        # If we've made at least one pass this turn, can end turn
+        if state.touched_mask:
+            moves.append(END_TURN_MOVE)
 
         return moves
 

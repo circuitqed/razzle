@@ -99,13 +99,28 @@ python scripts/train_cloud.py --gpu RTX_3090 --max-price 0.30 --data games/
 - [x] Training loop
 - [x] Vast.ai integration
 - [x] Terminal CLI client
-- [ ] FastAPI server
-- [ ] Unit tests
+- [x] FastAPI server (REST + WebSocket)
+- [x] Unit tests (130+ tests)
 - [ ] Trained model
 
 ## Next Steps
 
-1. Write unit tests for core game logic
-2. Implement FastAPI server for webapp integration
-3. Run initial training to verify pipeline works
-4. Optimize batched inference for faster self-play
+1. Run initial training to verify pipeline works
+2. Optimize batched inference for faster self-play
+
+## Multi-Agent Development
+
+This project uses multiple AI agents working in parallel:
+- **Engine agent** (this codebase) - game logic, AI, server API
+- **Webapp agent** - React frontend in `/webapp`
+
+### Communication
+- Agents communicate via **GitHub Issues** for bugs and feature requests
+- Check issues regularly: `gh issue list`
+- After completing tasks, check for new issues from the webapp agent
+
+### Workflow
+1. Complete your task
+2. Run `gh issue list` to check for new issues
+3. Address any bugs or feature requests from the webapp agent
+4. Create issues for the webapp agent if you need frontend changes

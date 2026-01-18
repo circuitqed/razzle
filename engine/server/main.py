@@ -333,8 +333,11 @@ async def get_legal_moves_endpoint(game_id: str):
 
     result = []
     for m in moves:
-        src, dst = decode_move(m)
-        move_type = "pass" if src == ball_sq else "knight"
+        if m == -1:
+            move_type = "end_turn"
+        else:
+            src, dst = decode_move(m)
+            move_type = "pass" if src == ball_sq else "knight"
         result.append(LegalMove(
             move=m,
             algebraic=move_to_algebraic(m),

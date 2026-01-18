@@ -10,7 +10,7 @@ from razzle.core.state import GameState
 from razzle.core.moves import (
     get_legal_moves, encode_move, decode_move,
     move_to_algebraic, algebraic_to_move,
-    MoveGenerator
+    MoveGenerator, END_TURN_MOVE
 )
 from razzle.core.bitboard import (
     bit, algebraic_to_sq, sq_to_algebraic, iter_bits,
@@ -263,8 +263,61 @@ class TestApplyMoveStateChanges:
         move = algebraic_to_move('d1-e1')
         state.apply_move(move)
 
-        # e1 should now be touched
+        # Both d1 (passer) and e1 (receiver) should be touched
+        assert state.touched_mask & bit(algebraic_to_sq('d1'))
         assert state.touched_mask & bit(algebraic_to_sq('e1'))
+
+    def test_cannot_pass_back_to_passer(self):
+        """After d1→e1, cannot pass back to d1 (it already touched ball)."""
+        state = GameState.new_game()
+
+        # Pass d1→e1
+        state.apply_move(algebraic_to_move('d1-e1'))
+
+        # Get available passes from e1
+        passes = list(MoveGenerator.get_pass_moves(state))
+        algebraic = [move_to_algebraic(m) for m in passes]
+
+        # e1→d1 should NOT be available (d1 already touched)
+        assert 'e1-d1' not in algebraic
+
+    def test_end_turn_after_pass(self):
+        """End turn should be available after passing."""
+        state = GameState.new_game()
+        assert END_TURN_MOVE not in get_legal_moves(state)  # Not available at start
+
+        # Make a pass
+        state.apply_move(algebraic_to_move('d1-e1'))
+
+        # End turn should now be available
+        assert END_TURN_MOVE in get_legal_moves(state)
+
+    def test_end_turn_switches_player(self):
+        """End turn should switch current player."""
+        state = GameState.new_game()
+        state.apply_move(algebraic_to_move('d1-e1'))  # Pass
+        assert state.current_player == 0
+
+        state.apply_move(END_TURN_MOVE)  # End turn
+        assert state.current_player == 1
+
+    def test_end_turn_increments_ply(self):
+        """End turn should increment ply."""
+        state = GameState.new_game()
+        state.apply_move(algebraic_to_move('d1-e1'))
+        assert state.ply == 0
+
+        state.apply_move(END_TURN_MOVE)
+        assert state.ply == 1
+
+    def test_end_turn_resets_touched_mask(self):
+        """End turn should reset touched_mask."""
+        state = GameState.new_game()
+        state.apply_move(algebraic_to_move('d1-e1'))
+        assert state.touched_mask != 0
+
+        state.apply_move(END_TURN_MOVE)
+        assert state.touched_mask == 0
 
 
 class TestStateCopy:

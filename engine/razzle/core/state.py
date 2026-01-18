@@ -118,9 +118,26 @@ class GameState:
         Move encoding:
         - Knight move: src * 56 + dst (where piece moves from src to dst)
         - Pass: src * 56 + dst (where ball moves from src to dst)
+        - End turn: -1 (explicitly end turn after passing)
 
         Move type is determined by whether src has the ball or a piece.
         """
+        # Handle end turn
+        if move == -1:
+            # Save state for undo
+            self.history.append((
+                move,
+                self.pieces,
+                self.balls,
+                self.current_player,
+                self.touched_mask
+            ))
+            # Switch player
+            self.current_player = 1 - self.current_player
+            self.touched_mask = 0
+            self.ply += 1
+            return
+
         src = move // NUM_SQUARES
         dst = move % NUM_SQUARES
         src_bit = bit(src)
@@ -144,8 +161,8 @@ class GameState:
             new_balls[p] = dst_bit
             self.balls = tuple(new_balls)
 
-            # Mark destination piece as having touched ball
-            self.touched_mask |= dst_bit
+            # Mark both passer (src) and receiver (dst) as having touched ball
+            self.touched_mask |= src_bit | dst_bit
 
             # Don't switch player - can continue passing or move a piece
             # Actually, in atomic moves, we DO switch if this completes the turn
