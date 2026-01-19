@@ -3,6 +3,7 @@
 Local training script for Razzle Dazzle.
 
 Runs self-play and training on local GPU.
+Logs metrics to training_log.json for monitoring.
 """
 
 import argparse
@@ -15,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from razzle.ai.network import RazzleNet, NetworkConfig, create_network
 from razzle.training.selfplay import SelfPlay, games_to_training_data
 from razzle.training.trainer import Trainer, TrainingConfig
+from razzle.training.logger import TrainingLogger
 
 
 def main():
@@ -33,6 +35,17 @@ def main():
 
     args.output.mkdir(parents=True, exist_ok=True)
 
+    # Initialize logger with training config
+    logger = TrainingLogger(args.output, config={
+        'iterations': args.iterations,
+        'games_per_iter': args.games_per_iter,
+        'simulations': args.simulations,
+        'epochs': args.epochs,
+        'filters': args.filters,
+        'blocks': args.blocks,
+        'device': args.device
+    }, device=args.device)
+
     # Create or load network
     if args.resume:
         print(f"Resuming from {args.resume}")
@@ -45,11 +58,15 @@ def main():
 
     print(f"Network has {network.num_parameters():,} parameters")
     print(f"Device: {args.device}")
+    print(f"Logging to: {args.output / 'training_log.json'}")
 
     for iteration in range(start_iter, start_iter + args.iterations):
         print(f"\n{'='*50}")
         print(f"Iteration {iteration + 1}")
         print(f"{'='*50}")
+
+        # Start iteration timing
+        logger.start_iteration(iteration)
 
         # Self-play
         print(f"\nGenerating {args.games_per_iter} self-play games...")
@@ -62,20 +79,17 @@ def main():
             batch_size=1
         )
 
+        logger.start_selfplay()
         games = selfplay.generate_games(
             args.games_per_iter,
             output_dir=games_dir,
             verbose=False
         )
+        iter_metrics = logger.end_selfplay(games)
 
-        # Analyze games
-        wins_p1 = sum(1 for g in games if g.result == 1.0)
-        wins_p2 = sum(1 for g in games if g.result == -1.0)
-        draws = sum(1 for g in games if g.result == 0.0)
-        avg_length = sum(len(g.moves) for g in games) / len(games)
-
-        print(f"Games: P1 wins {wins_p1}, P2 wins {wins_p2}, Draws {draws}")
-        print(f"Average game length: {avg_length:.1f} moves")
+        print(f"Games: P1 wins {iter_metrics.p1_wins}, P2 wins {iter_metrics.p2_wins}, Draws {iter_metrics.draws}")
+        print(f"Game length: {iter_metrics.avg_game_length:.1f} avg (min={iter_metrics.min_game_length}, max={iter_metrics.max_game_length}, std={iter_metrics.std_game_length:.1f})")
+        print(f"Self-play time: {iter_metrics.selfplay_time_sec:.1f}s")
 
         # Convert to training data
         states, policies, values = games_to_training_data(games)
@@ -88,7 +102,13 @@ def main():
             device=args.device
         )
         trainer = Trainer(network, config)
+
+        logger.start_training()
         history = trainer.train(states, policies, values, verbose=True)
+        logger.end_training(iter_metrics, history)
+
+        print(f"Training time: {iter_metrics.training_time_sec:.1f}s")
+        print(f"Total iteration time: {iter_metrics.total_time_sec:.1f}s")
 
         # Save checkpoint
         checkpoint_path = args.output / f"model_iter_{iteration:03d}.pt"
@@ -96,6 +116,7 @@ def main():
         print(f"Saved checkpoint to {checkpoint_path}")
 
     print("\nTraining complete!")
+    logger.print_status()
 
 
 if __name__ == '__main__':

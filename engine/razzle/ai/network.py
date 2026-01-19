@@ -131,7 +131,9 @@ class RazzleNet(nn.Module):
     @classmethod
     def load(cls, path: str, device: str = 'cpu') -> RazzleNet:
         """Load model from file."""
-        checkpoint = torch.load(path, map_location=device)
+        # Use weights_only=False since we're loading our own checkpoints
+        # which contain NetworkConfig dataclass
+        checkpoint = torch.load(path, map_location=device, weights_only=False)
         model = cls(checkpoint['config'])
         model.load_state_dict(checkpoint['state_dict'])
         return model

@@ -115,15 +115,17 @@ class VastAI:
 
         Args:
             gpu_name: Filter by GPU name (e.g., 'RTX_3090', 'RTX_4090')
-            min_gpu_ram: Minimum GPU RAM in GB
+            min_gpu_ram: Minimum GPU RAM in GB (used for post-filtering only,
+                         as Vast.ai API doesn't support gpu_ram filter)
             max_dph: Maximum price per hour
             min_reliability: Minimum reliability score
             order_by: Sort field ('dph_total', 'dlperf', etc.)
 
         Returns list of GPUOffer objects.
         """
+        # Note: gpu_ram filter doesn't work in Vast.ai's search API,
+        # so we filter by GPU name and post-filter by RAM if needed
         query_parts = [
-            f'gpu_ram>={min_gpu_ram * 1024}',  # API expects MB
             f'dph_total<={max_dph}',
             f'reliability2>={min_reliability}',
             'rentable=true'
@@ -138,6 +140,9 @@ class VastAI:
         try:
             data = json.loads(output)
             offers = [GPUOffer.from_json(o) for o in data]
+            # Post-filter by GPU RAM since API doesn't support it
+            if min_gpu_ram > 0:
+                offers = [o for o in offers if o.gpu_ram >= min_gpu_ram]
             # Sort by specified field
             offers.sort(key=lambda o: getattr(o, order_by, 0))
             return offers

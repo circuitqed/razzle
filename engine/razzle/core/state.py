@@ -31,6 +31,9 @@ class GameState:
                       Ineligibility persists across turns until the piece moves.
         has_passed: Whether a pass has been made this turn. If True, only more
                     passes or end_turn are allowed (no knight moves).
+        last_knight_dst: Destination square of opponent's last knight move, or -1.
+                         Used to check forced pass rule (must pass if opponent
+                         just moved adjacent to your ball).
         ply: Number of half-moves played
         history: Stack of (move, captured_state) for undo
     """
@@ -39,6 +42,7 @@ class GameState:
     current_player: int = 0
     touched_mask: int = 0
     has_passed: bool = False
+    last_knight_dst: int = -1
     ply: int = 0
     history: list = field(default_factory=list)
 
@@ -113,6 +117,7 @@ class GameState:
             current_player=self.current_player,
             touched_mask=self.touched_mask,
             has_passed=self.has_passed,
+            last_knight_dst=self.last_knight_dst,
             ply=self.ply,
             history=[]  # Fresh history for copy
         )
@@ -137,11 +142,13 @@ class GameState:
                 self.balls,
                 self.current_player,
                 self.touched_mask,
-                self.has_passed
+                self.has_passed,
+                self.last_knight_dst
             ))
             # Switch player - DO NOT reset touched_mask (ineligibility persists!)
             self.current_player = 1 - self.current_player
             self.has_passed = False
+            self.last_knight_dst = -1  # No knight move this turn (was a pass)
             self.ply += 1
             return
 
@@ -157,7 +164,8 @@ class GameState:
             self.balls,
             self.current_player,
             self.touched_mask,
-            self.has_passed
+            self.has_passed,
+            self.last_knight_dst
         ))
 
         p = self.current_player
@@ -184,7 +192,8 @@ class GameState:
             # Clear ineligibility for the piece that moved (it can receive again)
             self.touched_mask &= ~src_bit
 
-            # Knight move ends the turn
+            # Knight move ends the turn - record destination for forced pass check
+            self.last_knight_dst = dst
             self.current_player = 1 - p
             self.has_passed = False
             self.ply += 1
@@ -195,7 +204,7 @@ class GameState:
             raise ValueError("No moves to undo")
 
         entry = self.history.pop()
-        _, self.pieces, self.balls, self.current_player, self.touched_mask, self.has_passed = entry
+        _, self.pieces, self.balls, self.current_player, self.touched_mask, self.has_passed, self.last_knight_dst = entry
         # Note: ply is decremented based on whether current_player changed,
         # but that logic was broken. For now we don't track ply precisely on undo.
 

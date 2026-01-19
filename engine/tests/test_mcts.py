@@ -310,3 +310,105 @@ class TestMCTSWithNetwork:
 
         legal_moves = get_legal_moves(state)
         assert move in legal_moves
+
+
+class TestMCTSBatched:
+    """Tests for batched MCTS search."""
+
+    def test_batched_search_returns_root(self):
+        """Batched search returns valid root node."""
+        evaluator = DummyEvaluator()
+        config = MCTSConfig(num_simulations=20, batch_size=4)
+        mcts = MCTS(evaluator, config)
+
+        state = GameState.new_game()
+        root = mcts.search_batched(state)
+
+        assert root is not None
+        assert root.is_expanded
+        assert root.visit_count > 0
+
+    def test_batched_search_visits_correct_count(self):
+        """Batched search does approximately correct number of simulations."""
+        evaluator = DummyEvaluator()
+        config = MCTSConfig(num_simulations=100, batch_size=8)
+        mcts = MCTS(evaluator, config)
+
+        state = GameState.new_game()
+        root = mcts.search_batched(state)
+
+        # Visit count should be approximately num_simulations
+        # Root is visited each simulation plus initial expansion
+        total_child_visits = sum(c.visit_count for c in root.children.values())
+        assert total_child_visits >= 90  # Allow some margin
+
+    def test_batched_select_move_returns_legal(self):
+        """Batched search produces legal move selection."""
+        evaluator = DummyEvaluator()
+        config = MCTSConfig(num_simulations=50, batch_size=8, temperature=0)
+        mcts = MCTS(evaluator, config)
+
+        state = GameState.new_game()
+        root = mcts.search_batched(state)
+        move = mcts.select_move(root)
+
+        legal_moves = get_legal_moves(state)
+        assert move in legal_moves
+
+    def test_batched_virtual_loss_clears(self):
+        """Virtual loss is properly cleared after search."""
+        evaluator = DummyEvaluator()
+        config = MCTSConfig(num_simulations=50, batch_size=8, virtual_loss=3)
+        mcts = MCTS(evaluator, config)
+
+        state = GameState.new_game()
+        root = mcts.search_batched(state)
+
+        # Check no virtual loss remains
+        def check_no_virtual_loss(node):
+            assert node.virtual_loss == 0, f"Node has virtual_loss={node.virtual_loss}"
+            for child in node.children.values():
+                check_no_virtual_loss(child)
+
+        check_no_virtual_loss(root)
+
+    def test_batched_with_network(self):
+        """Batched search works with neural network evaluator."""
+        net = RazzleNet()
+        evaluator = BatchedEvaluator(net)
+        config = MCTSConfig(num_simulations=32, batch_size=8)
+        mcts = MCTS(evaluator, config)
+
+        state = GameState.new_game()
+        root = mcts.search_batched(state)
+        move = mcts.select_move(root)
+
+        legal_moves = get_legal_moves(state)
+        assert move in legal_moves
+
+    def test_batched_different_batch_sizes(self):
+        """Batched search works with various batch sizes."""
+        evaluator = DummyEvaluator()
+        state = GameState.new_game()
+
+        for batch_size in [1, 4, 8, 16]:
+            config = MCTSConfig(num_simulations=32, batch_size=batch_size)
+            mcts = MCTS(evaluator, config)
+            root = mcts.search_batched(state)
+
+            assert root.is_expanded
+            move = mcts.select_move(root)
+            assert move in get_legal_moves(state)
+
+    def test_batched_policy_valid(self):
+        """Batched search produces valid policy output."""
+        evaluator = DummyEvaluator()
+        config = MCTSConfig(num_simulations=50, batch_size=8, temperature=1.0)
+        mcts = MCTS(evaluator, config)
+
+        state = GameState.new_game()
+        root = mcts.search_batched(state)
+        policy = mcts.get_policy(root)
+
+        assert policy.shape == (NUM_ACTIONS,)
+        assert policy.sum() == pytest.approx(1.0)

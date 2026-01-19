@@ -188,6 +188,46 @@ def benchmark_mcts(simulations: list[int] = [100, 400, 800], use_network: bool =
     return results
 
 
+def benchmark_mcts_batched(
+    simulations: int = 400,
+    batch_sizes: list[int] = [1, 4, 8, 16, 32],
+    device: str = 'cpu'
+) -> list[dict]:
+    """Benchmark batched MCTS search with different batch sizes."""
+    state = GameState.new_game()
+    net = RazzleNet()
+    evaluator = BatchedEvaluator(net, device=device)
+
+    results = []
+    for batch_size in batch_sizes:
+        config = MCTSConfig(
+            num_simulations=simulations,
+            batch_size=batch_size,
+            virtual_loss=3
+        )
+        mcts = MCTS(evaluator, config)
+
+        # Run multiple times for stability
+        times = []
+        for _ in range(3):
+            start = time.perf_counter()
+            root = mcts.search_batched(state)
+            elapsed = time.perf_counter() - start
+            times.append(elapsed)
+
+        avg_time = np.mean(times)
+
+        results.append({
+            "name": f"Batched MCTS (batch={batch_size})",
+            "simulations": simulations,
+            "batch_size": batch_size,
+            "avg_time_ms": avg_time * 1000,
+            "sims_per_sec": simulations / avg_time,
+        })
+
+    return results
+
+
 def benchmark_full_game(max_moves: int = 50, simulations: int = 100, use_network: bool = False) -> dict:
     """Benchmark a full game with AI moves."""
     state = GameState.new_game()
@@ -279,8 +319,12 @@ def main():
         for result in benchmark_mcts(use_network=False):
             print_result(result)
 
-        print("\n### MCTS (Neural Network) ###")
+        print("\n### MCTS (Neural Network - Sequential) ###")
         for result in benchmark_mcts(simulations=[50, 100, 200], use_network=True, device=args.device):
+            print_result(result)
+
+        print("\n### MCTS (Neural Network - Batched) ###")
+        for result in benchmark_mcts_batched(simulations=400, device=args.device):
             print_result(result)
 
     if args.all or args.game:

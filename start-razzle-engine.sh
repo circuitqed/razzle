@@ -24,7 +24,7 @@ kill_session() {
 start_or_attach() {
     if screen -list | grep -q "$SESSION_NAME"; then
         echo "Attaching to existing session '$SESSION_NAME'..."
-        screen -r "$SESSION_NAME"
+        screen -x "$SESSION_NAME"
     else
         echo "Starting new session '$SESSION_NAME'..."
         screen -S "$SESSION_NAME" -c /dev/null bash -c "cd '$PROJECT_DIR' && claude --dangerously-skip-permissions; exec bash"

@@ -125,11 +125,18 @@ class MoveGenerator:
     @staticmethod
     def must_pass(state: GameState) -> bool:
         """
-        Check if current player MUST pass (opponent adjacent to ball).
+        Check if current player MUST pass (opponent JUST moved adjacent to ball).
 
         "If your opponent's previous move results in one of her pieces
         being adjacent to your ball, you must pass if you can."
+
+        This only applies when the opponent's most recent move was a knight move
+        that landed adjacent to the current player's ball.
         """
+        # Only check if opponent's last move was a knight move
+        if state.last_knight_dst < 0:
+            return False
+
         p = state.current_player
         ball_pos = state.balls[p]
         if not ball_pos:
@@ -138,20 +145,13 @@ class MoveGenerator:
         ball_sq = next(iter_bits(ball_pos))
         ball_row, ball_col = sq_to_rowcol(ball_sq)
 
-        opp_pieces = state.pieces[1 - p]
+        # Check if the opponent's last knight move destination is adjacent to our ball
+        dst_row, dst_col = sq_to_rowcol(state.last_knight_dst)
+        row_diff = abs(ball_row - dst_row)
+        col_diff = abs(ball_col - dst_col)
 
-        # Check all 8 adjacent squares
-        for dr in [-1, 0, 1]:
-            for dc in [-1, 0, 1]:
-                if dr == 0 and dc == 0:
-                    continue
-                r, c = ball_row + dr, ball_col + dc
-                if is_valid_sq(r, c):
-                    adj_sq = rowcol_to_sq(r, c)
-                    if opp_pieces & bit(adj_sq):
-                        return True
-
-        return False
+        # Adjacent means within 1 square in both directions (including diagonals)
+        return row_diff <= 1 and col_diff <= 1 and (row_diff > 0 or col_diff > 0)
 
     @staticmethod
     def get_legal_moves(state: GameState) -> list[int]:

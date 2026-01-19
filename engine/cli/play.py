@@ -163,7 +163,7 @@ def play_human_vs_ai(
         print("No network loaded. Using random policy.")
         evaluator = DummyEvaluator()
 
-    mcts_config = MCTSConfig(num_simulations=num_simulations, temperature=0.0)
+    mcts_config = MCTSConfig(num_simulations=num_simulations, temperature=0.0, batch_size=16)
 
     print("\n=== Razzle Dazzle ===")
     print("You are", "X (player 1)" if human_player == 0 else "O (player 2)")
@@ -207,10 +207,10 @@ def play_human_vs_ai(
                     print(f"You played: {move_to_algebraic(result)}")
                     break
         else:
-            # AI's turn
+            # AI's turn - use batched search for better performance
             print(f"AI thinking ({num_simulations} simulations)...")
             mcts = MCTS(evaluator, mcts_config)
-            root = mcts.search(state, add_noise=False)
+            root = mcts.search_batched(state, add_noise=False)
             move = mcts.select_move(root)
 
             # Show analysis
@@ -251,7 +251,7 @@ def watch_ai_vs_ai(
     else:
         evaluator = DummyEvaluator()
 
-    mcts_config = MCTSConfig(num_simulations=num_simulations, temperature=0.1)
+    mcts_config = MCTSConfig(num_simulations=num_simulations, temperature=0.1, batch_size=16)
 
     print("\n=== AI vs AI ===")
     print(f"Simulations per move: {num_simulations}")
@@ -262,7 +262,7 @@ def watch_ai_vs_ai(
         print(f"Move {move_count + 1}, Player {state.current_player + 1}")
 
         mcts = MCTS(evaluator, mcts_config)
-        root = mcts.search(state)
+        root = mcts.search_batched(state)
         move = mcts.select_move(root)
 
         analysis = mcts.analyze(root, top_k=3)

@@ -6,8 +6,11 @@ Provides REST and WebSocket APIs for game management and AI play.
 
 from __future__ import annotations
 import asyncio
+import logging
 import time
 import uuid
+from datetime import datetime
+from pathlib import Path
 from typing import Optional
 from contextlib import asynccontextmanager
 
@@ -104,6 +107,56 @@ class MoveConversionResponse(BaseModel):
 class HealthResponse(BaseModel):
     status: str
     version: str
+
+
+class TrainingIterationData(BaseModel):
+    iteration: int
+    timestamp: str
+    num_games: int
+    p1_wins: int
+    p2_wins: int
+    draws: int
+    avg_game_length: float
+    min_game_length: int = 0
+    max_game_length: int = 0
+    std_game_length: float = 0.0
+    training_examples: int
+    selfplay_time_sec: float = 0.0
+    training_time_sec: float = 0.0
+    total_time_sec: float = 0.0
+    final_loss: float = 0.0
+    final_policy_loss: float = 0.0
+    final_value_loss: float = 0.0
+    gpu_memory_used_mb: float = 0.0
+    gpu_memory_total_mb: float = 0.0
+    gpu_utilization_pct: float = 0.0
+    cpu_percent: float = 0.0
+    device: str = "cpu"
+    win_rate_vs_random: Optional[float] = None
+    elo_rating: Optional[float] = None
+
+
+class TrainingStatusResponse(BaseModel):
+    status: str  # "no_training", "training", "completed"
+    run_id: Optional[str] = None
+    start_time: Optional[str] = None
+    total_games: int = 0
+    total_examples: int = 0
+    total_time_sec: float = 0.0
+    iterations: list[TrainingIterationData] = []
+    config: dict = {}
+
+
+class LogEntry(BaseModel):
+    timestamp: str
+    level: str
+    message: str
+    data: Optional[dict] = None
+
+
+class LogRequest(BaseModel):
+    entries: list[LogEntry]
+    session_id: Optional[str] = None
 
 
 # --- Game Storage ---
@@ -206,6 +259,102 @@ async def health_check():
     return HealthResponse(status="ok", version="0.1.0")
 
 
+# Training output directories to check
+TRAINING_OUTPUT_DIRS = [
+    Path("output"),
+    Path("output_shaped"),
+    Path("/home/projects/razzle/engine/output"),
+]
+
+
+@app.get("/training/status", response_model=TrainingStatusResponse)
+async def get_training_status():
+    """Get current training status and metrics for live dashboard."""
+    import json
+
+    # Find the training log
+    log_path = None
+    for output_dir in TRAINING_OUTPUT_DIRS:
+        candidate = output_dir / "training_log.json"
+        if candidate.exists():
+            log_path = candidate
+            break
+
+    if log_path is None:
+        return TrainingStatusResponse(status="no_training")
+
+    try:
+        with open(log_path, 'r') as f:
+            log = json.load(f)
+    except (json.JSONDecodeError, IOError):
+        return TrainingStatusResponse(status="no_training")
+
+    # Convert iterations to response format
+    iterations = []
+    for it in log.get('iterations', []):
+        iterations.append(TrainingIterationData(
+            iteration=it['iteration'],
+            timestamp=it.get('timestamp', ''),
+            num_games=it['num_games'],
+            p1_wins=it['p1_wins'],
+            p2_wins=it['p2_wins'],
+            draws=it['draws'],
+            avg_game_length=it['avg_game_length'],
+            min_game_length=it.get('min_game_length', 0),
+            max_game_length=it.get('max_game_length', 0),
+            std_game_length=it.get('std_game_length', 0.0),
+            training_examples=it['training_examples'],
+            selfplay_time_sec=it.get('selfplay_time_sec', 0.0),
+            training_time_sec=it.get('training_time_sec', 0.0),
+            total_time_sec=it.get('total_time_sec', 0.0),
+            final_loss=it.get('final_loss', 0.0),
+            final_policy_loss=it.get('final_policy_loss', 0.0),
+            final_value_loss=it.get('final_value_loss', 0.0),
+            gpu_memory_used_mb=it.get('gpu_memory_used_mb', 0.0),
+            gpu_memory_total_mb=it.get('gpu_memory_total_mb', 0.0),
+            gpu_utilization_pct=it.get('gpu_utilization_pct', 0.0),
+            cpu_percent=it.get('cpu_percent', 0.0),
+            device=it.get('device', 'cpu'),
+            win_rate_vs_random=it.get('win_rate_vs_random'),
+            elo_rating=it.get('elo_rating')
+        ))
+
+    return TrainingStatusResponse(
+        status="training" if iterations else "no_training",
+        run_id=log.get('run_id'),
+        start_time=log.get('start_time'),
+        total_games=log.get('total_games', 0),
+        total_examples=log.get('total_examples', 0),
+        total_time_sec=log.get('total_time_sec', 0.0),
+        iterations=iterations,
+        config=log.get('config', {})
+    )
+
+
+# Setup client logging
+LOG_DIR = Path("/tmp/razzle-logs")
+LOG_DIR.mkdir(exist_ok=True)
+
+# Configure file logger for client logs
+client_logger = logging.getLogger("razzle.client")
+client_logger.setLevel(logging.DEBUG)
+client_log_handler = logging.FileHandler(LOG_DIR / "client.log")
+client_log_handler.setFormatter(logging.Formatter("%(message)s"))
+client_logger.addHandler(client_log_handler)
+
+
+@app.post("/logs")
+async def receive_logs(request: LogRequest):
+    """Receive logs from the client."""
+    session_id = request.session_id or "unknown"
+    for entry in request.entries:
+        log_line = f"[{entry.timestamp}] [{session_id}] [{entry.level.upper()}] {entry.message}"
+        if entry.data:
+            log_line += f" | {entry.data}"
+        client_logger.info(log_line)
+    return {"received": len(request.entries)}
+
+
 @app.post("/games", response_model=CreateGameResponse)
 async def create_game(request: CreateGameRequest = None):
     """Create a new game."""
@@ -271,18 +420,19 @@ async def get_ai_move(game_id: str, request: AIMoveRequest = None):
     if game.state.is_terminal():
         raise HTTPException(status_code=409, detail="Game already finished")
 
-    # Run MCTS
+    # Run MCTS with batched search for better performance
     start_time = time.time()
 
     ev = get_evaluator()
     config = MCTSConfig(
         num_simulations=request.simulations,
-        temperature=request.temperature
+        temperature=request.temperature,
+        batch_size=16  # Use batched inference
     )
     mcts = MCTS(ev, config)
 
-    # Run search (blocking for now, could be async)
-    root = mcts.search(game.state, add_noise=False)
+    # Run batched search for better GPU utilization
+    root = mcts.search_batched(game.state, add_noise=False)
     move = mcts.select_move(root)
     policy = mcts.get_policy(root)
 
@@ -499,11 +649,11 @@ async def websocket_endpoint(websocket: WebSocket, game_id: str):
                     await send_error(websocket, "Game already finished", "GAME_FINISHED")
                     continue
 
-                # Run AI
+                # Run AI with batched search
                 ev = get_evaluator()
-                config = MCTSConfig(num_simulations=simulations, temperature=0.0)
+                config = MCTSConfig(num_simulations=simulations, temperature=0.0, batch_size=16)
                 mcts = MCTS(ev, config)
-                root = mcts.search(game.state, add_noise=False)
+                root = mcts.search_batched(game.state, add_noise=False)
                 move = mcts.select_move(root)
 
                 game.state.apply_move(move)
