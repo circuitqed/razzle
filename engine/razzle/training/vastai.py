@@ -220,44 +220,122 @@ class VastAI:
 
         raise TimeoutError(f"Instance {instance_id} not ready after {timeout}s")
 
-    def execute(self, instance_id: int, command: str) -> str:
-        """Execute a command on an instance."""
-        output = self._run('execute', str(instance_id), command)
-        return output
+    def execute(self, instance_id: int, command: str, timeout: int = 3600) -> str:
+        """Execute a command on an instance via SSH."""
+        instance = self.get_instance(instance_id)
+        if not instance or not instance.ssh_host:
+            raise RuntimeError("Instance not ready")
+
+        # SSH options for non-interactive execution
+        ssh_opts = [
+            '-o', 'StrictHostKeyChecking=no',
+            '-o', 'UserKnownHostsFile=/dev/null',
+            '-o', 'ConnectTimeout=60',
+            '-o', 'ServerAliveInterval=30',
+            '-o', 'ServerAliveCountMax=10',
+        ]
+
+        # Retry SSH connection a few times
+        for attempt in range(5):
+            result = subprocess.run(
+                ['ssh'] + ssh_opts + [
+                    '-p', str(instance.ssh_port),
+                    f'root@{instance.ssh_host}',
+                    command
+                ],
+                capture_output=True,
+                text=True,
+                timeout=timeout
+            )
+            if result.returncode == 0:
+                return result.stdout
+            if 'Connection refused' in result.stderr:
+                time.sleep(10)
+                continue
+            # Other error - don't retry
+            break
+
+        if result.returncode != 0:
+            raise RuntimeError(f"Command failed: {result.stderr}")
+        return result.stdout
 
     def copy_to(
         self,
         instance_id: int,
         local_path: Path,
-        remote_path: str
+        remote_path: str,
+        retries: int = 5,
+        retry_delay: int = 10
     ) -> None:
-        """Copy file to instance."""
+        """Copy file to instance using SCP."""
         instance = self.get_instance(instance_id)
         if not instance or not instance.ssh_host:
             raise RuntimeError("Instance not ready")
 
-        subprocess.run([
-            'scp', '-P', str(instance.ssh_port),
-            str(local_path),
-            f'root@{instance.ssh_host}:{remote_path}'
-        ], check=True)
+        ssh_opts = [
+            '-o', 'StrictHostKeyChecking=no',
+            '-o', 'UserKnownHostsFile=/dev/null',
+            '-o', 'ConnectTimeout=30',
+        ]
+
+        for attempt in range(retries):
+            result = subprocess.run(
+                ['scp'] + ssh_opts + [
+                    '-P', str(instance.ssh_port),
+                    str(local_path),
+                    f'root@{instance.ssh_host}:{remote_path}'
+                ],
+                capture_output=True,
+                text=True
+            )
+            if result.returncode == 0:
+                return
+            if 'Connection refused' in result.stderr or 'Connection closed' in result.stderr:
+                time.sleep(retry_delay)
+                continue
+            # Other error
+            break
+
+        raise RuntimeError(f"Failed to copy {local_path}: {result.stderr}")
 
     def copy_from(
         self,
         instance_id: int,
         remote_path: str,
-        local_path: Path
+        local_path: Path,
+        retries: int = 5,
+        retry_delay: int = 10
     ) -> None:
-        """Copy file from instance."""
+        """Copy file from instance using SCP."""
         instance = self.get_instance(instance_id)
         if not instance or not instance.ssh_host:
             raise RuntimeError("Instance not ready")
 
-        subprocess.run([
-            'scp', '-P', str(instance.ssh_port),
-            f'root@{instance.ssh_host}:{remote_path}',
-            str(local_path)
-        ], check=True)
+        ssh_opts = [
+            '-o', 'StrictHostKeyChecking=no',
+            '-o', 'UserKnownHostsFile=/dev/null',
+            '-o', 'ConnectTimeout=30',
+        ]
+
+        for attempt in range(retries):
+            result = subprocess.run(
+                ['scp'] + ssh_opts + [
+                    '-P', str(instance.ssh_port),
+                    f'root@{instance.ssh_host}:{remote_path}',
+                    str(local_path)
+                ],
+                capture_output=True,
+                text=True
+            )
+            if result.returncode == 0:
+                return
+            if 'Connection refused' in result.stderr or 'Connection closed' in result.stderr:
+                time.sleep(retry_delay)
+                continue
+            # Other error
+            break
+
+        raise RuntimeError(f"Failed to copy {remote_path}: {result.stderr}")
 
 
 def find_best_offer(

@@ -48,9 +48,13 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from razzle.training.vastai import VastAI, GPUOffer
 
 
-def create_package(output_dir: Path) -> Path:
+def create_package(output_dir: Path, train_script_content: str = None) -> Path:
     """
     Create a tarball with the razzle package and training scripts.
+
+    Args:
+        output_dir: Directory to save the tarball
+        train_script_content: Optional training script content to include as train.sh
     """
     package_path = output_dir / "razzle_package.tar.gz"
 
@@ -72,6 +76,15 @@ def create_package(output_dir: Path) -> Path:
         if requirements.exists():
             tar.add(requirements, arcname="requirements.txt")
 
+        # Add the training script if provided
+        if train_script_content:
+            import io
+            script_data = train_script_content.encode('utf-8')
+            info = tarfile.TarInfo(name='train.sh')
+            info.size = len(script_data)
+            info.mode = 0o755  # Make executable
+            tar.addfile(info, io.BytesIO(script_data))
+
     print(f"Created package: {package_path} ({package_path.stat().st_size / 1024 / 1024:.1f} MB)")
     return package_path
 
@@ -92,6 +105,90 @@ def create_data_package(games_dirs: list[Path], output_dir: Path) -> Path:
     return data_path
 
 
+def generate_setup_script() -> str:
+    """Generate script to set up the remote environment."""
+    return '''#!/bin/bash
+set -e
+
+echo "=== Razzle Dazzle Cloud Training Setup ==="
+echo "GPU: $(nvidia-smi --query-gpu=name --format=csv,noheader)"
+nvidia-smi
+
+cd /workspace
+
+# Install dependencies
+pip install torch numpy --quiet
+
+# Extract package
+tar -xzf razzle_package.tar.gz
+
+echo "Setup complete!"
+'''
+
+
+def generate_iteration_script(
+    iteration: int,
+    games_per_iter: int,
+    simulations: int,
+    epochs: int,
+    filters: int,
+    blocks: int,
+    resume_model: str = None
+) -> str:
+    """Generate script to run a single training iteration."""
+    resume_arg = f"--resume {resume_model}" if resume_model else ""
+
+    return f'''#!/bin/bash
+set -e
+
+cd /workspace
+
+echo "=== Iteration {iteration} ==="
+
+python train_local.py \\
+    --iterations 1 \\
+    --games-per-iter {games_per_iter} \\
+    --simulations {simulations} \\
+    --epochs {epochs} \\
+    --filters {filters} \\
+    --blocks {blocks} \\
+    --device cuda \\
+    --output output/ \\
+    {resume_arg}
+
+echo "Iteration {iteration} complete!"
+ls -la output/model_iter_*.pt
+'''
+
+
+def generate_benchmark_script() -> str:
+    """Generate benchmark-only script."""
+    return '''#!/bin/bash
+set -e
+
+echo "=== Razzle Dazzle GPU Benchmark ==="
+echo "GPU: $(nvidia-smi --query-gpu=name --format=csv,noheader)"
+nvidia-smi
+
+cd /workspace
+
+# Install dependencies
+pip install torch numpy --quiet
+
+# Extract package
+tar -xzf razzle_package.tar.gz
+
+# Run benchmarks
+echo ""
+echo "=========================================="
+echo "Running GPU Benchmarks"
+echo "=========================================="
+python benchmark.py --compare
+
+echo "Benchmark complete!"
+'''
+
+
 def generate_remote_script(
     iterations: int,
     games_per_iter: int,
@@ -105,53 +202,20 @@ def generate_remote_script(
 ) -> str:
     """
     Generate the training script to run on the remote machine.
+    (Legacy - used for benchmark-only mode)
     """
-    resume_arg = f"--resume {resume_model}" if resume_model else ""
-
-    benchmark_section = ""
-    if run_benchmark or benchmark_only:
-        benchmark_section = '''
-# Run benchmarks
-echo ""
-echo "=========================================="
-echo "Running GPU Benchmarks"
-echo "=========================================="
-python benchmark.py --compare
-
-echo ""
-echo "=========================================="
-echo "Benchmark complete"
-echo "=========================================="
-echo ""
-'''
-
     if benchmark_only:
-        script = f'''#!/bin/bash
-set -e
+        return generate_benchmark_script()
 
-echo "=== Razzle Dazzle GPU Benchmark ==="
-echo "GPU: $(nvidia-smi --query-gpu=name --format=csv,noheader)"
-echo "CUDA: $(nvcc --version | grep release | awk '{{print $6}}')"
-nvidia-smi
-
-cd /workspace
-
-# Install dependencies
-pip install torch numpy --quiet
-
-# Extract package
-tar -xzf razzle_package.tar.gz
-{benchmark_section}
-echo "Benchmark-only mode complete"
-'''
-        return script
+    # For full training, we now use iteration-by-iteration approach
+    # This is kept for backwards compatibility
+    resume_arg = f"--resume {resume_model}" if resume_model else ""
 
     script = f'''#!/bin/bash
 set -e
 
 echo "=== Razzle Dazzle Cloud Training ==="
 echo "GPU: $(nvidia-smi --query-gpu=name --format=csv,noheader)"
-echo "CUDA: $(nvcc --version | grep release | awk '{{print $6}}')"
 nvidia-smi
 
 cd /workspace
@@ -162,12 +226,6 @@ pip install torch numpy --quiet
 # Extract package
 tar -xzf razzle_package.tar.gz
 
-# Extract data if present
-if [ -f training_data.tar.gz ]; then
-    echo "Extracting training data..."
-    tar -xzf training_data.tar.gz -C output/
-fi
-{benchmark_section}
 # Run training
 echo "Starting training..."
 python train_local.py \\
@@ -292,16 +350,7 @@ def main():
             print(f"  Benchmark: Yes (CPU vs GPU comparison)")
         return
 
-    # Create package
-    print("\nPreparing packages...")
-    package_path = create_package(args.output)
-
-    # Create data package if we have game data
-    data_path = None
-    if args.games_dir:
-        data_path = create_data_package(args.games_dir, args.output)
-
-    # Create remote training script
+    # Generate remote training script first
     resume_model = "model_resume.pt" if args.model else None
     train_script = generate_remote_script(
         iterations=args.iterations,
@@ -315,9 +364,19 @@ def main():
         benchmark_only=args.benchmark_only
     )
 
+    # Save locally for reference
     script_path = args.output / "train_remote.sh"
     with open(script_path, 'w') as f:
         f.write(train_script)
+
+    # Create package (includes train.sh)
+    print("\nPreparing packages...")
+    package_path = create_package(args.output, train_script_content=train_script)
+
+    # Create data package if we have game data
+    data_path = None
+    if args.games_dir:
+        data_path = create_data_package(args.games_dir, args.output)
 
     # Create instance
     print("\nCreating instance...")
@@ -334,11 +393,25 @@ def main():
         instance = wait_with_progress(vast, instance_id, timeout=300)
         print(f"Instance ready: {instance.ssh_host}:{instance.ssh_port}")
 
+        # Wait for SSH to be truly available
+        print("Waiting for SSH to be available...")
+        for i in range(12):  # Up to 2 minutes
+            try:
+                vast.execute(instance_id, "echo 'SSH ready'")
+                print("SSH connection established!")
+                break
+            except RuntimeError:
+                print(".", end="", flush=True)
+                time.sleep(10)
+        else:
+            raise RuntimeError("SSH not available after 2 minutes")
+        print()
+
         # Create output directory on remote
-        print("\nSetting up remote environment...")
+        print("Setting up remote environment...")
         vast.execute(instance_id, "mkdir -p /workspace/output")
 
-        # Upload files
+        # Upload files using vastai copy (handles retries internally)
         print("Uploading package...")
         vast.copy_to(instance_id, package_path, "/workspace/razzle_package.tar.gz")
 
@@ -350,31 +423,97 @@ def main():
             print("Uploading starting model...")
             vast.copy_to(instance_id, args.model, "/workspace/output/model_resume.pt")
 
-        # Upload and run training script
-        print("Uploading training script...")
-        vast.copy_to(instance_id, script_path, "/workspace/train.sh")
-
         print("\n" + "=" * 60)
         if args.benchmark_only:
             print("Running benchmarks on cloud GPU...")
+            # Extract package and run benchmark
+            run_cmd = "cd /workspace && tar -xzf razzle_package.tar.gz && chmod +x train.sh && ./train.sh"
+            output = vast.execute(instance_id, run_cmd, timeout=1800)
+            print(output)
         else:
             print("Starting training on cloud GPU...")
-        print("=" * 60)
+            print(f"Running {args.iterations} iterations, downloading after each")
+            print("=" * 60)
 
-        # Run training/benchmark (this will take a while)
-        output = vast.execute(instance_id, "chmod +x /workspace/train.sh && /workspace/train.sh")
-        print(output)
+            # Setup: extract package and install dependencies
+            print("\nSetting up environment...")
+            setup_cmd = """cd /workspace && tar -xzf razzle_package.tar.gz && pip install torch numpy --quiet && echo 'Setup complete!'"""
+            output = vast.execute(instance_id, setup_cmd, timeout=600)
+            print(output)
 
-        # Download results (skip for benchmark-only mode)
+            # Create local output dir for this run
+            run_output = args.output / "cloud_run"
+            run_output.mkdir(parents=True, exist_ok=True)
+
+            # Run iteration by iteration
+            for iteration in range(args.iterations):
+                print(f"\n{'='*60}")
+                print(f"Iteration {iteration + 1}/{args.iterations}")
+                print("=" * 60)
+
+                # Determine resume model
+                if iteration == 0 and args.model:
+                    resume_arg = "--resume output/model_resume.pt"
+                elif iteration > 0:
+                    resume_arg = f"--resume output/model_iter_{iteration-1:03d}.pt"
+                else:
+                    resume_arg = ""
+
+                # Run one iteration
+                iter_cmd = f"""cd /workspace && python train_local.py \\
+                    --iterations 1 \\
+                    --games-per-iter {args.games_per_iter} \\
+                    --simulations {args.simulations} \\
+                    --epochs {args.epochs} \\
+                    --filters {args.filters} \\
+                    --blocks {args.blocks} \\
+                    --device cuda \\
+                    --output output/ \\
+                    {resume_arg}"""
+
+                try:
+                    output = vast.execute(instance_id, iter_cmd, timeout=3600)
+                    print(output)
+                except Exception as e:
+                    print(f"Error in iteration {iteration + 1}: {e}")
+                    break
+
+                # Download checkpoint after each iteration
+                checkpoint_name = f"model_iter_{iteration:03d}.pt"
+                local_checkpoint = run_output / checkpoint_name
+                try:
+                    print(f"Downloading {checkpoint_name}...")
+                    vast.copy_from(instance_id, f"/workspace/output/{checkpoint_name}", local_checkpoint)
+                    print(f"  Saved to {local_checkpoint}")
+                except Exception as e:
+                    print(f"  Warning: Could not download checkpoint: {e}")
+
+                # Also download training log
+                try:
+                    vast.copy_from(instance_id, "/workspace/output/training_log.json", run_output / "training_log.json")
+                except:
+                    pass
+
+            print("\n" + "=" * 60)
+            print("Training complete!")
+            print("=" * 60)
+
+        # Download final results (skip for benchmark-only mode)
         if not args.benchmark_only:
-            print("\nDownloading results...")
-            results_path = args.output / "cloud_results.tar.gz"
-            vast.copy_from(instance_id, "/workspace/results.tar.gz", results_path)
+            print("\nDownloading final results...")
+            try:
+                # Package all results on remote
+                vast.execute(instance_id, "cd /workspace && tar -czf results.tar.gz output/model_iter_*.pt output/training_log.json", timeout=300)
+                results_path = args.output / "cloud_results.tar.gz"
+                vast.copy_from(instance_id, "/workspace/results.tar.gz", results_path)
 
-            # Extract results
-            print("Extracting results...")
-            with tarfile.open(results_path, "r:gz") as tar:
-                tar.extractall(args.output)
+                # Extract results
+                print("Extracting results...")
+                with tarfile.open(results_path, "r:gz") as tar:
+                    tar.extractall(args.output)
+            except Exception as e:
+                print(f"Warning: Could not download final bundle: {e}")
+                print("Individual checkpoints should be in output/cloud_run/")
 
             print(f"\nResults saved to {args.output}/")
             print("  - Model checkpoints: model_iter_*.pt")

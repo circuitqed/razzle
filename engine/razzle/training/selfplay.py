@@ -23,7 +23,7 @@ class GameRecord:
     """Record of a self-play game for training."""
     states: list[np.ndarray]  # State tensors
     policies: list[np.ndarray]  # MCTS policies
-    result: float  # Final result: 1.0 = player 0 wins, -1.0 = player 1 wins, 0 = draw
+    result: float  # Final result: 1.0 = player 0 wins, -1.0 = player 1 wins
     moves: list[int] = field(default_factory=list)  # Move history
     ball_progress: list[tuple[float, float]] = field(default_factory=list)  # Ball advancement per state
 
