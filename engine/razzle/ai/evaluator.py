@@ -162,7 +162,10 @@ class DummyEvaluator:
         if legal_moves:
             prob = 1.0 / len(legal_moves)
             for move in legal_moves:
-                policy[move] = prob
+                # Skip END_TURN (-1) as it doesn't have a policy slot
+                # MCTS handles it specially
+                if move >= 0:
+                    policy[move] = prob
 
         return policy, 0.0
 

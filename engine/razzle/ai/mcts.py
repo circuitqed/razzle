@@ -30,6 +30,8 @@ class MCTSConfig:
     dirichlet_alpha: float = 0.3  # Noise for root exploration
     dirichlet_epsilon: float = 0.25  # Weight of noise at root
     temperature: float = 1.0  # Temperature for move selection
+    batch_size: int = 8  # Number of parallel simulations for batched search
+    virtual_loss: int = 3  # Virtual loss to encourage exploration in parallel search
 
 
 @dataclass
@@ -94,13 +96,20 @@ class Node:
 
         legal_moves = get_legal_moves(self.state)
 
+        # Helper to get prior for a move, handling END_TURN (-1) specially
+        def get_prior(move: int) -> float:
+            if move == -1:  # END_TURN_MOVE
+                # End turn gets a small fixed prior - MCTS will adjust via visits
+                return 0.1
+            return policy[move]
+
         # Mask and renormalize policy
-        policy_sum = sum(policy[m] for m in legal_moves)
+        policy_sum = sum(get_prior(m) for m in legal_moves)
         if policy_sum > 0:
             for move in legal_moves:
                 child_state = self.state.copy()
                 child_state.apply_move(move)
-                prior = policy[move] / policy_sum
+                prior = get_prior(move) / policy_sum
                 self.children[move] = Node(
                     state=child_state,
                     parent=self,
@@ -210,26 +219,29 @@ class MCTS:
         Get move probabilities based on visit counts.
 
         Returns array of shape (3136,) with probabilities.
+        Note: END_TURN (-1) is not included in the policy array.
         """
         policy = np.zeros(NUM_ACTIONS, dtype=np.float32)
 
-        total_visits = sum(c.visit_count for c in root.children.values())
+        # Filter out END_TURN for policy array (it has no slot)
+        valid_children = {a: c for a, c in root.children.items() if a >= 0}
+        total_visits = sum(c.visit_count for c in valid_children.values())
 
         if total_visits > 0 and self.config.temperature > 0:
             if self.config.temperature == 1.0:
                 # Standard proportional to visits
-                for action, child in root.children.items():
+                for action, child in valid_children.items():
                     policy[action] = child.visit_count / total_visits
             else:
                 # Apply temperature
-                visits = np.array([c.visit_count for c in root.children.values()], dtype=np.float32)
+                visits = np.array([c.visit_count for c in valid_children.values()], dtype=np.float32)
                 visits = np.power(visits, 1.0 / self.config.temperature)
                 visits_sum = visits.sum()
-                for i, (action, child) in enumerate(root.children.items()):
+                for i, (action, child) in enumerate(valid_children.items()):
                     policy[action] = visits[i] / visits_sum
-        elif root.children:
+        elif valid_children:
             # Greedy (temperature = 0)
-            best_action = max(root.children.keys(), key=lambda a: root.children[a].visit_count)
+            best_action = max(valid_children.keys(), key=lambda a: valid_children[a].visit_count)
             policy[best_action] = 1.0
 
         return policy
@@ -255,6 +267,96 @@ class MCTS:
         root = self.search(state, add_noise=add_noise)
         return self.select_move(root)
 
+    def search_batched(self, state: GameState, add_noise: bool = True) -> Node:
+        """
+        Run batched MCTS from given state.
+
+        Uses virtual loss to select multiple leaves in parallel,
+        then batch evaluates them for better GPU utilization.
+
+        Returns the root node with visit statistics.
+        """
+        root = Node(state=state.copy())
+
+        # Evaluate and expand root
+        policy, value = self.evaluator.evaluate(root.state)
+        root.expand(policy)
+
+        if add_noise and self.config.dirichlet_epsilon > 0:
+            root.add_dirichlet_noise(
+                self.config.dirichlet_alpha,
+                self.config.dirichlet_epsilon
+            )
+
+        # Run simulations in batches
+        remaining = self.config.num_simulations
+        batch_size = self.config.batch_size
+
+        while remaining > 0:
+            current_batch = min(batch_size, remaining)
+            self._simulate_batch(root, current_batch)
+            remaining -= current_batch
+
+        return root
+
+    def _simulate_batch(self, root: Node, batch_size: int) -> None:
+        """Run a batch of MCTS simulations with virtual loss."""
+        paths: list[list[Node]] = []
+        leaves: list[Node] = []
+        terminal_paths: list[tuple[list[Node], float]] = []
+
+        # SELECT: traverse tree to find multiple leaves
+        for _ in range(batch_size):
+            node = root
+            path = [node]
+
+            # Apply virtual loss as we descend
+            while node.is_expanded and node.children:
+                if node.state.is_terminal():
+                    break
+                node.virtual_loss += self.config.virtual_loss
+                _, node = node.select_child(self.config.c_puct)
+                path.append(node)
+
+            # Apply virtual loss to leaf
+            node.virtual_loss += self.config.virtual_loss
+
+            if node.state.is_terminal():
+                # Terminal node - record for later backup
+                value = node.state.get_result(node.state.current_player)
+                value = 2 * value - 1  # Convert from [0,1] to [-1,1]
+                terminal_paths.append((path, value))
+            else:
+                paths.append(path)
+                leaves.append(node)
+
+        # EVALUATE: batch evaluate all non-terminal leaves
+        if leaves:
+            states = [leaf.state for leaf in leaves]
+            results = self.evaluator.evaluate_batch(states)
+
+            # EXPAND and BACKUP for each leaf
+            for path, leaf, (policy, value) in zip(paths, leaves, results):
+                # Expand leaf
+                if not leaf.is_expanded:
+                    leaf.expand(policy)
+
+                # Backup value and remove virtual loss
+                for i, n in enumerate(reversed(path)):
+                    n.visit_count += 1
+                    n.virtual_loss -= self.config.virtual_loss
+                    # Flip value at each level
+                    sign = 1 if (i % 2 == 0) else -1
+                    n.value_sum += sign * value
+
+        # BACKUP terminal paths
+        for path, value in terminal_paths:
+            for i, n in enumerate(reversed(path)):
+                n.visit_count += 1
+                n.virtual_loss -= self.config.virtual_loss
+                sign = 1 if (i % 2 == 0) else -1
+                n.value_sum += sign * value
+
     def analyze(self, root: Node, top_k: int = 5) -> list[dict]:
         """
         Analyze search results.
@@ -279,18 +381,34 @@ def play_move(
     state: GameState,
     evaluator: Evaluator,
     num_simulations: int = 800,
-    temperature: float = 0.0
+    temperature: float = 0.0,
+    batched: bool = False,
+    batch_size: int = 8
 ) -> tuple[int, Node]:
     """
     Play a single move using MCTS.
+
+    Args:
+        state: Current game state
+        evaluator: Position evaluator (neural network or dummy)
+        num_simulations: Number of MCTS simulations
+        temperature: Temperature for move selection (0 = greedy)
+        batched: Use batched search for better GPU utilization
+        batch_size: Number of parallel simulations per batch
 
     Returns (move, root_node).
     """
     config = MCTSConfig(
         num_simulations=num_simulations,
-        temperature=temperature
+        temperature=temperature,
+        batch_size=batch_size
     )
     mcts = MCTS(evaluator, config)
-    root = mcts.search(state, add_noise=False)
+
+    if batched:
+        root = mcts.search_batched(state, add_noise=False)
+    else:
+        root = mcts.search(state, add_noise=False)
+
     move = mcts.select_move(root)
     return move, root
