@@ -28,6 +28,8 @@ from razzle.ai.mcts import MCTS, MCTSConfig
 from razzle.ai.evaluator import BatchedEvaluator, DummyEvaluator
 from razzle.ai.network import RazzleNet
 
+from . import persistence
+
 
 # --- Pydantic Models ---
 
@@ -227,10 +229,30 @@ def get_evaluator() -> BatchedEvaluator:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """App lifespan handler."""
-    # Startup: pre-load evaluator
+    # Startup: initialize database and load existing games
+    persistence.init_db()
+    persistence.cleanup_old_games(max_age_days=7)  # Clean up stale games
+
+    # Load persisted games into memory
+    for game_data in persistence.load_all_games():
+        game = Game(
+            game_id=game_data["game_id"],
+            player1_type=game_data["player1_type"],
+            player2_type=game_data["player2_type"],
+            ai_simulations=game_data["ai_simulations"]
+        )
+        game.state = game_data["state"]
+        games[game.game_id] = game
+        logging.info(f"Loaded game {game.game_id} from database")
+
+    logging.info(f"Loaded {len(games)} games from database")
+
+    # Pre-load evaluator
     get_evaluator()
+
     yield
-    # Shutdown: cleanup
+
+    # Shutdown: nothing to do (games are persisted on each change)
     games.clear()
 
 
@@ -370,6 +392,15 @@ async def create_game(request: CreateGameRequest = None):
     )
     games[game_id] = game
 
+    # Persist to database
+    persistence.save_game(
+        game_id=game_id,
+        state=game.state,
+        player1_type=request.player1_type,
+        player2_type=request.player2_type,
+        ai_simulations=request.ai_simulations
+    )
+
     return CreateGameResponse(game_id=game_id)
 
 
@@ -398,6 +429,9 @@ async def make_move(game_id: str, request: MakeMoveRequest):
         raise HTTPException(status_code=400, detail="Invalid move")
 
     game.state.apply_move(request.move)
+
+    # Persist to database
+    persistence.save_game(game_id, game.state)
 
     # Notify WebSocket clients
     response = game.to_response()
@@ -452,6 +486,9 @@ async def get_ai_move(game_id: str, request: AIMoveRequest = None):
 
     # Apply the move
     game.state.apply_move(move)
+
+    # Persist to database
+    persistence.save_game(game_id, game.state)
 
     # Notify WebSocket clients
     game_response = game.to_response()
@@ -513,6 +550,9 @@ async def undo_move(game_id: str):
         raise HTTPException(status_code=400, detail="Nothing to undo")
 
     game.state.undo_move()
+
+    # Persist to database
+    persistence.save_game(game_id, game.state)
 
     response = game.to_response()
     await broadcast_state(game, response)
@@ -630,6 +670,7 @@ async def websocket_endpoint(websocket: WebSocket, game_id: str):
                     continue
 
                 game.state.apply_move(move)
+                persistence.save_game(game_id, game.state)  # Persist
                 response = game.to_response()
                 await broadcast_state(game, response)
 
@@ -657,6 +698,7 @@ async def websocket_endpoint(websocket: WebSocket, game_id: str):
                 move = mcts.select_move(root)
 
                 game.state.apply_move(move)
+                persistence.save_game(game_id, game.state)  # Persist
                 response = game.to_response()
                 await broadcast_state(game, response)
 
@@ -675,6 +717,7 @@ async def websocket_endpoint(websocket: WebSocket, game_id: str):
                     continue
 
                 game.state.undo_move()
+                persistence.save_game(game_id, game.state)  # Persist
                 response = game.to_response()
                 await broadcast_state(game, response)
 

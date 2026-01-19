@@ -251,15 +251,24 @@ class MCTS:
         if not root.children:
             raise ValueError("No legal moves")
 
+        actions = list(root.children.keys())
+        visits = np.array([root.children[a].visit_count for a in actions], dtype=np.float32)
+
         if self.config.temperature == 0:
-            # Greedy
-            return max(root.children.keys(), key=lambda a: root.children[a].visit_count)
+            # Greedy - pick highest visit count
+            return actions[np.argmax(visits)]
         else:
-            # Sample according to policy
-            policy = self.get_policy(root)
-            actions = list(root.children.keys())
-            probs = np.array([policy[a] for a in actions])
-            probs = probs / probs.sum()  # Normalize to handle floating point errors
+            # Sample proportional to visit counts (with temperature)
+            if visits.sum() == 0:
+                # No visits yet - uniform random
+                probs = np.ones(len(actions)) / len(actions)
+            elif self.config.temperature == 1.0:
+                probs = visits / visits.sum()
+            else:
+                # Apply temperature
+                visits_temp = np.power(visits, 1.0 / self.config.temperature)
+                probs = visits_temp / visits_temp.sum()
+
             return np.random.choice(actions, p=probs)
 
     def get_best_move(self, state: GameState, add_noise: bool = False) -> int:
