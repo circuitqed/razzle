@@ -50,6 +50,8 @@ models/
 checkpoints/
 games/
 logs/
+output/
+output_shaped/
 *.pt
 *.pth
 *.onnx
