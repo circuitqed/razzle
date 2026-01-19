@@ -6,9 +6,10 @@ This script:
 1. Packages the razzle code and training data
 2. Rents a GPU on Vast.ai
 3. Uploads code and data
-4. Runs training
-5. Downloads the trained model
-6. Cleans up
+4. Optionally runs GPU benchmarks
+5. Runs training
+6. Downloads the trained model
+7. Cleans up
 
 Requirements:
     pip install vastai
@@ -17,6 +18,12 @@ Requirements:
 Usage:
     # Full training run on cloud
     python scripts/train_cloud.py --gpu RTX_3090 --iterations 10
+
+    # Run benchmarks before training to verify GPU performance
+    python scripts/train_cloud.py --gpu RTX_3090 --iterations 10 --benchmark
+
+    # Only run benchmarks (no training) - useful to test GPU before committing
+    python scripts/train_cloud.py --gpu RTX_3090 --benchmark-only
 
     # Use specific model as starting point
     python scripts/train_cloud.py --model output/model_iter_007.pt --iterations 5
@@ -57,6 +64,9 @@ def create_package(output_dir: Path) -> Path:
         # Add training script
         tar.add(engine_dir / "scripts" / "train_local.py", arcname="train_local.py")
 
+        # Add benchmark script
+        tar.add(engine_dir / "scripts" / "benchmark.py", arcname="benchmark.py")
+
         # Add requirements
         requirements = engine_dir / "requirements.txt"
         if requirements.exists():
@@ -89,12 +99,52 @@ def generate_remote_script(
     epochs: int,
     filters: int,
     blocks: int,
-    resume_model: str = None
+    resume_model: str = None,
+    run_benchmark: bool = False,
+    benchmark_only: bool = False
 ) -> str:
     """
     Generate the training script to run on the remote machine.
     """
     resume_arg = f"--resume {resume_model}" if resume_model else ""
+
+    benchmark_section = ""
+    if run_benchmark or benchmark_only:
+        benchmark_section = '''
+# Run benchmarks
+echo ""
+echo "=========================================="
+echo "Running GPU Benchmarks"
+echo "=========================================="
+python benchmark.py --compare
+
+echo ""
+echo "=========================================="
+echo "Benchmark complete"
+echo "=========================================="
+echo ""
+'''
+
+    if benchmark_only:
+        script = f'''#!/bin/bash
+set -e
+
+echo "=== Razzle Dazzle GPU Benchmark ==="
+echo "GPU: $(nvidia-smi --query-gpu=name --format=csv,noheader)"
+echo "CUDA: $(nvcc --version | grep release | awk '{{print $6}}')"
+nvidia-smi
+
+cd /workspace
+
+# Install dependencies
+pip install torch numpy --quiet
+
+# Extract package
+tar -xzf razzle_package.tar.gz
+{benchmark_section}
+echo "Benchmark-only mode complete"
+'''
+        return script
 
     script = f'''#!/bin/bash
 set -e
@@ -102,6 +152,7 @@ set -e
 echo "=== Razzle Dazzle Cloud Training ==="
 echo "GPU: $(nvidia-smi --query-gpu=name --format=csv,noheader)"
 echo "CUDA: $(nvcc --version | grep release | awk '{{print $6}}')"
+nvidia-smi
 
 cd /workspace
 
@@ -116,7 +167,7 @@ if [ -f training_data.tar.gz ]; then
     echo "Extracting training data..."
     tar -xzf training_data.tar.gz -C output/
 fi
-
+{benchmark_section}
 # Run training
 echo "Starting training..."
 python train_local.py \\
@@ -182,6 +233,8 @@ def main():
     # Options
     parser.add_argument('--dry-run', action='store_true', help='Show what would be done without executing')
     parser.add_argument('--keep-instance', action='store_true', help='Keep instance running after training')
+    parser.add_argument('--benchmark', action='store_true', help='Run GPU benchmarks before training')
+    parser.add_argument('--benchmark-only', action='store_true', help='Only run benchmarks, no training')
 
     args = parser.parse_args()
 
@@ -227,11 +280,16 @@ def main():
     print(f"\nSelected: {offer.gpu_name} @ ${offer.dph_total:.3f}/hr")
 
     if args.dry_run:
-        print("\n[DRY RUN] Would create instance and run training")
-        print(f"  Iterations: {args.iterations}")
-        print(f"  Games/iter: {args.games_per_iter}")
-        print(f"  MCTS sims: {args.simulations}")
-        print(f"  Epochs: {args.epochs}")
+        if args.benchmark_only:
+            print("\n[DRY RUN] Would create instance and run benchmarks only")
+        else:
+            print("\n[DRY RUN] Would create instance and run training")
+            print(f"  Iterations: {args.iterations}")
+            print(f"  Games/iter: {args.games_per_iter}")
+            print(f"  MCTS sims: {args.simulations}")
+            print(f"  Epochs: {args.epochs}")
+        if args.benchmark or args.benchmark_only:
+            print(f"  Benchmark: Yes (CPU vs GPU comparison)")
         return
 
     # Create package
@@ -252,7 +310,9 @@ def main():
         epochs=args.epochs,
         filters=args.filters,
         blocks=args.blocks,
-        resume_model=resume_model
+        resume_model=resume_model,
+        run_benchmark=args.benchmark,
+        benchmark_only=args.benchmark_only
     )
 
     script_path = args.output / "train_remote.sh"
@@ -295,40 +355,44 @@ def main():
         vast.copy_to(instance_id, script_path, "/workspace/train.sh")
 
         print("\n" + "=" * 60)
-        print("Starting training on cloud GPU...")
+        if args.benchmark_only:
+            print("Running benchmarks on cloud GPU...")
+        else:
+            print("Starting training on cloud GPU...")
         print("=" * 60)
 
-        # Run training (this will take a while)
+        # Run training/benchmark (this will take a while)
         output = vast.execute(instance_id, "chmod +x /workspace/train.sh && /workspace/train.sh")
         print(output)
 
-        # Download results
-        print("\nDownloading results...")
-        results_path = args.output / "cloud_results.tar.gz"
-        vast.copy_from(instance_id, "/workspace/results.tar.gz", results_path)
+        # Download results (skip for benchmark-only mode)
+        if not args.benchmark_only:
+            print("\nDownloading results...")
+            results_path = args.output / "cloud_results.tar.gz"
+            vast.copy_from(instance_id, "/workspace/results.tar.gz", results_path)
 
-        # Extract results
-        print("Extracting results...")
-        with tarfile.open(results_path, "r:gz") as tar:
-            tar.extractall(args.output)
+            # Extract results
+            print("Extracting results...")
+            with tarfile.open(results_path, "r:gz") as tar:
+                tar.extractall(args.output)
 
-        print(f"\nResults saved to {args.output}/")
-        print("  - Model checkpoints: model_iter_*.pt")
-        print("  - Training log: training_log.json")
+            print(f"\nResults saved to {args.output}/")
+            print("  - Model checkpoints: model_iter_*.pt")
+            print("  - Training log: training_log.json")
 
-        # Show final status
-        training_log = args.output / "output" / "training_log.json"
-        if training_log.exists():
-            import json
-            with open(training_log) as f:
-                log = json.load(f)
-            print(f"\nTraining completed:")
-            print(f"  Iterations: {len(log.get('iterations', []))}")
-            print(f"  Total games: {log.get('total_games', 0)}")
-            print(f"  Total time: {log.get('total_time_sec', 0)/60:.1f} min")
+            # Show final status
+            training_log = args.output / "output" / "training_log.json"
+            if training_log.exists():
+                import json
+                with open(training_log) as f:
+                    log = json.load(f)
+                print(f"\nTraining completed:")
+                print(f"  Iterations: {len(log.get('iterations', []))}")
+                print(f"  Total games: {log.get('total_games', 0)}")
+                print(f"  Total time: {log.get('total_time_sec', 0)/60:.1f} min")
 
     except Exception as e:
-        print(f"\nError during training: {e}")
+        print(f"\nError during {'benchmark' if args.benchmark_only else 'training'}: {e}")
         raise
 
     finally:
@@ -341,7 +405,10 @@ def main():
             print(f"  SSH: ssh -p {instance.ssh_port} root@{instance.ssh_host}")
             print(f"  To destroy: vastai destroy instance {instance_id}")
 
-    print("\nCloud training complete!")
+    if args.benchmark_only:
+        print("\nBenchmark complete!")
+    else:
+        print("\nCloud training complete!")
 
 
 if __name__ == '__main__':
