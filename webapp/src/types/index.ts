@@ -7,7 +7,7 @@ export interface BoardState {
 }
 
 // Game status
-export type GameStatus = 'playing' | 'won' | 'draw';
+export type GameStatus = 'playing' | 'finished' | 'won' | 'draw';
 
 // Player number
 export type Player = 0 | 1;
@@ -21,6 +21,11 @@ export interface GameState {
   status: GameStatus;
   winner: Player | null;
   ply: number;
+  // Bitboard of pieces that are ineligible to receive passes
+  // A piece becomes ineligible when it passes or receives the ball
+  touched_mask: number;
+  // Whether the current player has passed this turn (can only pass more or end turn)
+  has_passed: boolean;
 }
 
 // AI move response
@@ -32,6 +37,7 @@ export interface AIMoveResponse {
   visits: number;
   time_ms: number;
   top_moves: TopMove[];
+  game_state: GameState;
 }
 
 export interface TopMove {

@@ -15,6 +15,8 @@ export const mockInitialGameState: GameState = {
   status: 'playing',
   winner: null,
   ply: 0,
+  touched_mask: 0,
+  has_passed: false,
 }
 
 export const mockGameStateAfterMove: GameState = {
@@ -33,6 +35,11 @@ export const mockAIMoveResponse: AIMoveResponse = {
   top_moves: [
     { move: 3080, algebraic: 'd8-c6', visits: 400, value: 0.15 },
   ],
+  game_state: {
+    ...mockInitialGameState,
+    current_player: 0,  // After AI move, it's player 0's turn
+    ply: 2,
+  },
 }
 
 // Create mock API module
