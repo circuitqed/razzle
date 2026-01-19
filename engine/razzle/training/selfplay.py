@@ -25,25 +25,44 @@ class GameRecord:
     policies: list[np.ndarray]  # MCTS policies
     result: float  # Final result: 1.0 = player 0 wins, -1.0 = player 1 wins, 0 = draw
     moves: list[int] = field(default_factory=list)  # Move history
+    ball_progress: list[tuple[float, float]] = field(default_factory=list)  # Ball advancement per state
 
-    def training_examples(self) -> list[tuple[np.ndarray, np.ndarray, float]]:
+    def training_examples(self, use_ball_shaping: bool = True) -> list[tuple[np.ndarray, np.ndarray, float]]:
         """
         Convert game record to training examples.
 
         Returns list of (state, policy, value) tuples.
         Value is from the perspective of the player to move in that state.
+
+        If use_ball_shaping is True, adds a small bonus based on ball advancement.
         """
         examples = []
         for i, (state, policy) in enumerate(zip(self.states, self.policies)):
             # Player to move alternates (player 0 moves on even indices)
             player_to_move = i % 2
-            # Value from perspective of player to move
+
+            # Base value from game result
             if self.result == 0:
-                value = 0.0
+                base_value = 0.0
             elif player_to_move == 0:
-                value = self.result
+                base_value = self.result
             else:
-                value = -self.result
+                base_value = -self.result
+
+            # Add ball advancement shaping (small bonus for progress)
+            if use_ball_shaping and self.ball_progress and i < len(self.ball_progress):
+                p0_progress, p1_progress = self.ball_progress[i]
+                # p0_progress is 0-1 (how far P0's ball has advanced toward row 8)
+                # p1_progress is 0-1 (how far P1's ball has advanced toward row 1)
+                # Small bonus: 0.1 * (my_progress - opponent_progress)
+                if player_to_move == 0:
+                    shaping = 0.1 * (p0_progress - p1_progress)
+                else:
+                    shaping = 0.1 * (p1_progress - p0_progress)
+                value = 0.9 * base_value + 0.1 * shaping
+            else:
+                value = base_value
+
             examples.append((state, policy, value))
         return examples
 
@@ -81,20 +100,32 @@ class SelfPlay:
         states = []
         policies = []
         moves = []
+        ball_progress = []
 
         move_count = 0
 
         while not state.is_terminal():
+            # Track ball positions for reward shaping
+            # P0 wants ball to reach row 8 (index 7), starts at row 1 (index 0)
+            # P1 wants ball to reach row 1 (index 0), starts at row 8 (index 7)
+            p0_ball_row = self._get_ball_row(state, 0)
+            p1_ball_row = self._get_ball_row(state, 1)
+            # Normalize progress to 0-1 range
+            p0_progress = p0_ball_row / 7.0  # 0 = start, 1 = goal
+            p1_progress = (7 - p1_ball_row) / 7.0  # 7 = start, 0 = goal -> inverted
+            ball_progress.append((p0_progress, p1_progress))
+
             # Configure MCTS
             temp = self.temperature if move_count < self.temperature_moves else 0.0
             config = MCTSConfig(
                 num_simulations=self.num_simulations,
-                temperature=temp
+                temperature=temp,
+                batch_size=16  # Use batched search for efficiency
             )
             mcts = MCTS(self.evaluator, config)
 
-            # Search
-            root = mcts.search(state, add_noise=True)
+            # Search with batching for better performance
+            root = mcts.search_batched(state, add_noise=True)
 
             # Record state and policy
             states.append(state.to_tensor())
@@ -112,8 +143,8 @@ class SelfPlay:
             state.apply_move(move)
             move_count += 1
 
-            # Safety limit
-            if move_count > 500:
+            # Safety limit - reduced since games should be shorter
+            if move_count > 300:
                 break
 
         # Determine result
@@ -133,8 +164,16 @@ class SelfPlay:
             states=states,
             policies=policies,
             result=result,
-            moves=moves
+            moves=moves,
+            ball_progress=ball_progress
         )
+
+    def _get_ball_row(self, state: GameState, player: int) -> int:
+        """Get the row (0-7) of the specified player's ball."""
+        for sq in range(56):
+            if state.balls[player] & (1 << sq):
+                return sq // 7
+        return 0  # Fallback
 
     def generate_games(
         self,
@@ -175,16 +214,21 @@ def load_games(directory: Path) -> list[GameRecord]:
 
 
 def games_to_training_data(
-    games: list[GameRecord]
+    games: list[GameRecord],
+    use_ball_shaping: bool = True
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Convert list of games to training arrays.
+
+    Args:
+        games: List of game records
+        use_ball_shaping: Add small reward for ball advancement
 
     Returns (states, policies, values) arrays.
     """
     all_examples = []
     for game in games:
-        all_examples.extend(game.training_examples())
+        all_examples.extend(game.training_examples(use_ball_shaping=use_ball_shaping))
 
     states = np.stack([e[0] for e in all_examples])
     policies = np.stack([e[1] for e in all_examples])
