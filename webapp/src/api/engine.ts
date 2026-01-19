@@ -75,7 +75,7 @@ export async function undoMove(gameId: string): Promise<GameState> {
 }
 
 // Health check
-export async function healthCheck(): Promise<{ status: string; version: string }> {
+export async function healthCheck(): Promise<{ status: string; version: string; model?: string }> {
   return request('/health');
 }
 

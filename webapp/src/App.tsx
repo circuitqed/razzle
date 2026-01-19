@@ -6,6 +6,7 @@ import RulesModal from './components/RulesModal';
 import TrainingDashboard from './components/TrainingDashboard';
 import { useGame } from './hooks/useGame';
 import { setSoundEnabled, isSoundEnabled } from './utils/sounds';
+import { healthCheck } from './api/engine';
 
 type GameMode = 'ai' | 'pvp';
 
@@ -16,6 +17,7 @@ export default function App() {
   const [showNewGameConfirm, setShowNewGameConfirm] = useState(false);
   const [showRules, setShowRules] = useState(false);
   const [showTraining, setShowTraining] = useState(false);
+  const [currentModel, setCurrentModel] = useState<string | null>(null);
 
   const toggleSound = () => {
     const newValue = !soundOn;
@@ -40,9 +42,24 @@ export default function App() {
     undoMove,
   } = useGame({ vsAI: gameMode === 'ai', aiSimulations: 800 });
 
+  // Fetch model info from server
+  const fetchModelInfo = async () => {
+    try {
+      const health = await healthCheck();
+      if (health.model) {
+        // Extract just the filename from the path
+        const modelName = health.model.split('/').pop() || health.model;
+        setCurrentModel(modelName);
+      }
+    } catch (e) {
+      console.error('Failed to fetch model info:', e);
+    }
+  };
+
   // Start a game on mount and when mode changes
   useEffect(() => {
     startNewGame();
+    fetchModelInfo();
   }, [gameMode]);
 
   // Auto-flip board in PvP mode based on current player
@@ -72,12 +89,14 @@ export default function App() {
       setShowNewGameConfirm(true);
     } else {
       startNewGame();
+      fetchModelInfo();  // Check for new model on new game
     }
   };
 
   const confirmNewGame = () => {
     setShowNewGameConfirm(false);
     startNewGame();
+    fetchModelInfo();  // Check for new model on new game
   };
 
   const cancelNewGame = () => {
@@ -290,8 +309,11 @@ export default function App() {
           </div>
 
           {/* Game info */}
-          <div className="mt-4 text-sm text-gray-400">
-            Ply: {gameState.ply}
+          <div className="mt-4 text-sm text-gray-400 text-center">
+            <span>Ply: {gameState.ply}</span>
+            {currentModel && gameMode === 'ai' && (
+              <span className="ml-4 text-gray-500">Model: {currentModel}</span>
+            )}
           </div>
         </>
       )}
