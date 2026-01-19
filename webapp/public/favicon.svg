@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- Diamond piece shape -->
+  <polygon points="16,4 28,16 16,28 4,16" fill="#3b82f6" stroke="#1e40af" stroke-width="1.5"/>
+
+  <!-- Ball in center -->
+  <circle cx="16" cy="16" r="5" fill="#fbbf24" stroke="#92400e" stroke-width="1"/>
+</svg>
