@@ -198,21 +198,26 @@ class MCTS:
         # EVALUATE
         if node.state.is_terminal():
             # Terminal node - use actual game result
-            value = node.state.get_result(node.state.current_player)
+            # Value from perspective of leaf's current player
+            leaf_player = node.state.current_player
+            value = node.state.get_result(leaf_player)
             value = 2 * value - 1  # Convert from [0,1] to [-1,1]
         else:
             # Expand and evaluate with neural network
             policy, value = self.evaluator.evaluate(node.state)
             node.expand(policy)
+            leaf_player = node.state.current_player
 
         # BACKUP: propagate value up the tree
-        # Value is from perspective of node's current player
-        # As we go up, we flip perspective
-        for i, n in enumerate(reversed(path)):
+        # Value is from perspective of leaf's current player
+        # Only flip sign when the player actually changes between nodes
+        for n in reversed(path):
             n.visit_count += 1
-            # Flip value at each level (my good = parent bad)
-            sign = 1 if (i % 2 == 0) else -1
-            n.value_sum += sign * value
+            # Value sign depends on whether this node's player matches leaf's player
+            if n.state.current_player == leaf_player:
+                n.value_sum += value
+            else:
+                n.value_sum -= value
 
     def get_policy(self, root: Node) -> np.ndarray:
         """
@@ -312,7 +317,8 @@ class MCTS:
         """Run a batch of MCTS simulations with virtual loss."""
         paths: list[list[Node]] = []
         leaves: list[Node] = []
-        terminal_paths: list[tuple[list[Node], float]] = []
+        leaf_players: list[int] = []
+        terminal_paths: list[tuple[list[Node], float, int]] = []  # (path, value, leaf_player)
 
         # SELECT: traverse tree to find multiple leaves
         for _ in range(batch_size):
@@ -332,12 +338,14 @@ class MCTS:
 
             if node.state.is_terminal():
                 # Terminal node - record for later backup
-                value = node.state.get_result(node.state.current_player)
+                leaf_player = node.state.current_player
+                value = node.state.get_result(leaf_player)
                 value = 2 * value - 1  # Convert from [0,1] to [-1,1]
-                terminal_paths.append((path, value))
+                terminal_paths.append((path, value, leaf_player))
             else:
                 paths.append(path)
                 leaves.append(node)
+                leaf_players.append(node.state.current_player)
 
         # EVALUATE: batch evaluate all non-terminal leaves
         if leaves:
@@ -345,26 +353,30 @@ class MCTS:
             results = self.evaluator.evaluate_batch(states)
 
             # EXPAND and BACKUP for each leaf
-            for path, leaf, (policy, value) in zip(paths, leaves, results):
+            for path, leaf, leaf_player, (policy, value) in zip(paths, leaves, leaf_players, results):
                 # Expand leaf
                 if not leaf.is_expanded:
                     leaf.expand(policy)
 
                 # Backup value and remove virtual loss
-                for i, n in enumerate(reversed(path)):
+                # Only flip sign when player changes, not at every level
+                for n in reversed(path):
                     n.visit_count += 1
                     n.virtual_loss -= self.config.virtual_loss
-                    # Flip value at each level
-                    sign = 1 if (i % 2 == 0) else -1
-                    n.value_sum += sign * value
+                    if n.state.current_player == leaf_player:
+                        n.value_sum += value
+                    else:
+                        n.value_sum -= value
 
         # BACKUP terminal paths
-        for path, value in terminal_paths:
-            for i, n in enumerate(reversed(path)):
+        for path, value, leaf_player in terminal_paths:
+            for n in reversed(path):
                 n.visit_count += 1
                 n.virtual_loss -= self.config.virtual_loss
-                sign = 1 if (i % 2 == 0) else -1
-                n.value_sum += sign * value
+                if n.state.current_player == leaf_player:
+                    n.value_sum += value
+                else:
+                    n.value_sum -= value
 
     def analyze(self, root: Node, top_k: int = 5) -> list[dict]:
         """
