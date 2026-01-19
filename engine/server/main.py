@@ -567,8 +567,9 @@ async def make_move(game_id: str, request: MakeMoveRequest):
 
     game.state.apply_move(request.move)
 
-    # Persist to database
+    # Persist state and record move
     persistence.save_game(game_id, game.state)
+    persistence.append_move(game_id, request.move)
 
     # Notify WebSocket clients
     response = game.to_response()
@@ -624,8 +625,9 @@ async def get_ai_move(game_id: str, request: AIMoveRequest = None):
     # Apply the move
     game.state.apply_move(move)
 
-    # Persist to database
+    # Persist state and record move
     persistence.save_game(game_id, game.state)
+    persistence.append_move(game_id, move)
 
     # Notify WebSocket clients
     game_response = game.to_response()
@@ -688,8 +690,9 @@ async def undo_move(game_id: str):
 
     game.state.undo_move()
 
-    # Persist to database
+    # Persist state and remove move from history
     persistence.save_game(game_id, game.state)
+    persistence.pop_move(game_id)
 
     response = game.to_response()
     await broadcast_state(game, response)
@@ -807,7 +810,8 @@ async def websocket_endpoint(websocket: WebSocket, game_id: str):
                     continue
 
                 game.state.apply_move(move)
-                persistence.save_game(game_id, game.state)  # Persist
+                persistence.save_game(game_id, game.state)  # Persist state
+                persistence.append_move(game_id, move)  # Record move
                 response = game.to_response()
                 await broadcast_state(game, response)
 
@@ -835,7 +839,8 @@ async def websocket_endpoint(websocket: WebSocket, game_id: str):
                 move = mcts.select_move(root)
 
                 game.state.apply_move(move)
-                persistence.save_game(game_id, game.state)  # Persist
+                persistence.save_game(game_id, game.state)  # Persist state
+                persistence.append_move(game_id, move)  # Record move
                 response = game.to_response()
                 await broadcast_state(game, response)
 
@@ -854,7 +859,8 @@ async def websocket_endpoint(websocket: WebSocket, game_id: str):
                     continue
 
                 game.state.undo_move()
-                persistence.save_game(game_id, game.state)  # Persist
+                persistence.save_game(game_id, game.state)  # Persist state
+                persistence.pop_move(game_id)  # Remove move from history
                 response = game.to_response()
                 await broadcast_state(game, response)
 
