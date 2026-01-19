@@ -281,6 +281,159 @@ def print_result(result: dict) -> None:
             print(f"  {key}: {value}")
 
 
+def benchmark_cpu_vs_gpu(batch_sizes: list[int] = [1, 8, 16, 32, 64]) -> dict:
+    """
+    Compare CPU vs GPU performance across different batch sizes.
+
+    Returns dict with comparison data.
+    """
+    import torch
+
+    if not torch.cuda.is_available():
+        print("CUDA not available - cannot compare CPU vs GPU")
+        return None
+
+    print(f"\nGPU: {torch.cuda.get_device_name(0)}")
+    print(f"CUDA Version: {torch.version.cuda}")
+
+    # Create networks for each device
+    net_cpu = RazzleNet()
+    net_cpu.eval()
+
+    net_gpu = RazzleNet()
+    net_gpu.to('cuda')
+    net_gpu.eval()
+
+    state = GameState.new_game()
+    tensor_np = state.to_tensor()
+
+    results = []
+
+    for batch_size in batch_sizes:
+        iterations = max(20, 200 // batch_size)
+
+        # Prepare batches
+        batch_cpu = torch.from_numpy(tensor_np).unsqueeze(0).expand(batch_size, -1, -1, -1).contiguous()
+        batch_gpu = batch_cpu.to('cuda')
+
+        # Warmup CPU
+        with torch.no_grad():
+            for _ in range(5):
+                net_cpu(batch_cpu)
+
+        # Benchmark CPU
+        start = time.perf_counter()
+        with torch.no_grad():
+            for _ in range(iterations):
+                net_cpu(batch_cpu)
+        cpu_time = time.perf_counter() - start
+        cpu_evals_per_sec = (iterations * batch_size) / cpu_time
+
+        # Warmup GPU (important for accurate timing)
+        with torch.no_grad():
+            for _ in range(10):
+                net_gpu(batch_gpu)
+        torch.cuda.synchronize()
+
+        # Benchmark GPU
+        start = time.perf_counter()
+        with torch.no_grad():
+            for _ in range(iterations):
+                net_gpu(batch_gpu)
+        torch.cuda.synchronize()  # Wait for GPU to finish
+        gpu_time = time.perf_counter() - start
+        gpu_evals_per_sec = (iterations * batch_size) / gpu_time
+
+        speedup = gpu_evals_per_sec / cpu_evals_per_sec
+
+        results.append({
+            'batch_size': batch_size,
+            'cpu_evals_per_sec': cpu_evals_per_sec,
+            'gpu_evals_per_sec': gpu_evals_per_sec,
+            'speedup': speedup,
+            'cpu_ms_per_eval': 1000 / cpu_evals_per_sec,
+            'gpu_ms_per_eval': 1000 / gpu_evals_per_sec,
+        })
+
+    return results
+
+
+def benchmark_mcts_cpu_vs_gpu(simulations: int = 400, batch_size: int = 16) -> dict:
+    """Compare MCTS performance between CPU and GPU."""
+    import torch
+
+    if not torch.cuda.is_available():
+        print("CUDA not available - cannot compare CPU vs GPU")
+        return None
+
+    state = GameState.new_game()
+
+    # CPU MCTS
+    net_cpu = RazzleNet()
+    eval_cpu = BatchedEvaluator(net_cpu, device='cpu')
+    config = MCTSConfig(num_simulations=simulations, batch_size=batch_size)
+    mcts_cpu = MCTS(eval_cpu, config)
+
+    # Warmup
+    mcts_cpu.search_batched(state)
+
+    cpu_times = []
+    for _ in range(3):
+        start = time.perf_counter()
+        mcts_cpu.search_batched(state)
+        cpu_times.append(time.perf_counter() - start)
+    cpu_avg = np.mean(cpu_times)
+
+    # GPU MCTS
+    net_gpu = RazzleNet()
+    net_gpu.to('cuda')
+    eval_gpu = BatchedEvaluator(net_gpu, device='cuda')
+    mcts_gpu = MCTS(eval_gpu, config)
+
+    # Warmup
+    import torch
+    mcts_gpu.search_batched(state)
+    torch.cuda.synchronize()
+
+    gpu_times = []
+    for _ in range(3):
+        start = time.perf_counter()
+        mcts_gpu.search_batched(state)
+        torch.cuda.synchronize()
+        gpu_times.append(time.perf_counter() - start)
+    gpu_avg = np.mean(gpu_times)
+
+    return {
+        'simulations': simulations,
+        'batch_size': batch_size,
+        'cpu_time_ms': cpu_avg * 1000,
+        'gpu_time_ms': gpu_avg * 1000,
+        'cpu_sims_per_sec': simulations / cpu_avg,
+        'gpu_sims_per_sec': simulations / gpu_avg,
+        'speedup': cpu_avg / gpu_avg,
+    }
+
+
+def print_comparison_table(results: list[dict]) -> None:
+    """Print a formatted comparison table."""
+    print("\n" + "=" * 75)
+    print("CPU vs GPU Inference Comparison")
+    print("=" * 75)
+    print(f"{'Batch':<8} {'CPU (eval/s)':<14} {'GPU (eval/s)':<14} {'Speedup':<10} {'GPU ms/eval':<12}")
+    print("-" * 75)
+
+    for r in results:
+        print(f"{r['batch_size']:<8} {r['cpu_evals_per_sec']:<14.1f} {r['gpu_evals_per_sec']:<14.1f} "
+              f"{r['speedup']:<10.2f}x {r['gpu_ms_per_eval']:<12.3f}")
+
+    print("-" * 75)
+
+    # Find optimal batch size for GPU
+    best = max(results, key=lambda x: x['gpu_evals_per_sec'])
+    print(f"\nOptimal GPU batch size: {best['batch_size']} ({best['gpu_evals_per_sec']:.0f} evals/sec)")
+    print(f"Peak GPU speedup: {best['speedup']:.1f}x over CPU")
+
+
 def main():
     parser = argparse.ArgumentParser(description='Razzle Dazzle Engine Benchmarks')
     parser.add_argument('--all', action='store_true', help='Run all benchmarks')
@@ -288,17 +441,50 @@ def main():
     parser.add_argument('--network', action='store_true', help='Run neural network benchmarks')
     parser.add_argument('--mcts', action='store_true', help='Run MCTS benchmarks')
     parser.add_argument('--game', action='store_true', help='Run full game benchmark')
+    parser.add_argument('--compare', action='store_true', help='Compare CPU vs GPU performance')
     parser.add_argument('--device', type=str, default='cpu', help='Device for neural network (cpu/cuda)')
 
     args = parser.parse_args()
 
     # Default to all if nothing specified
-    if not any([args.all, args.core, args.network, args.mcts, args.game]):
+    if not any([args.all, args.core, args.network, args.mcts, args.game, args.compare]):
         args.all = True
 
     print("=" * 50)
     print("Razzle Dazzle Engine Benchmarks")
     print("=" * 50)
+
+    # CPU vs GPU comparison mode
+    if args.compare:
+        import torch
+        print(f"\nPyTorch version: {torch.__version__}")
+        print(f"CUDA available: {torch.cuda.is_available()}")
+
+        if torch.cuda.is_available():
+            # Network inference comparison
+            results = benchmark_cpu_vs_gpu(batch_sizes=[1, 4, 8, 16, 32, 64, 128])
+            if results:
+                print_comparison_table(results)
+
+            # MCTS comparison
+            print("\n" + "=" * 75)
+            print("CPU vs GPU MCTS Comparison")
+            print("=" * 75)
+
+            for sims in [200, 400, 800]:
+                mcts_result = benchmark_mcts_cpu_vs_gpu(simulations=sims, batch_size=16)
+                if mcts_result:
+                    print(f"\n{sims} simulations (batch_size=16):")
+                    print(f"  CPU: {mcts_result['cpu_time_ms']:.1f}ms ({mcts_result['cpu_sims_per_sec']:.0f} sims/sec)")
+                    print(f"  GPU: {mcts_result['gpu_time_ms']:.1f}ms ({mcts_result['gpu_sims_per_sec']:.0f} sims/sec)")
+                    print(f"  Speedup: {mcts_result['speedup']:.2f}x")
+        else:
+            print("\nCUDA not available. Install PyTorch with CUDA support to compare.")
+            print("  pip install torch --index-url https://download.pytorch.org/whl/cu121")
+
+        print("\n" + "=" * 50)
+        print("Comparison complete")
+        return
 
     if args.all or args.core:
         print("\n### Core Engine ###")
