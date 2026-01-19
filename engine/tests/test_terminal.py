@@ -74,16 +74,17 @@ class TestP2WinCondition:
         assert state.get_winner() is None
 
 
-class TestDrawCondition:
-    """Draw by excessive game length."""
+class TestMoveLimitCondition:
+    """Move limit: current player loses if ply > 200."""
 
-    def test_draw_at_ply_201(self):
+    def test_current_player_loses_at_ply_201(self):
         state = GameState.new_game()
         state.ply = 201
+        # Player 0 (current player) loses, player 1 wins
         assert state.is_terminal()
-        assert state.get_winner() is None
-        assert state.get_result(0) == 0.5
-        assert state.get_result(1) == 0.5
+        assert state.get_winner() == 1  # Opponent of current player wins
+        assert state.get_result(0) == 0.0  # Player 0 loses
+        assert state.get_result(1) == 1.0  # Player 1 wins
 
     def test_not_draw_at_ply_200(self):
         state = GameState.new_game()

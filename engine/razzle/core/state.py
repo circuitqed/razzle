@@ -89,7 +89,7 @@ class GameState:
         # Player 2 wins by getting ball to row 1
         if self.balls[1] & ROW_1_MASK:
             return True
-        # Draw by excessive length (optional)
+        # Move limit: current player loses if exceeded
         if self.ply > 200:
             return True
         return False
@@ -100,13 +100,16 @@ class GameState:
             return 0
         if self.balls[1] & ROW_1_MASK:
             return 1
+        # Move limit exceeded: current player loses (couldn't win in time)
+        if self.ply > 200:
+            return 1 - self.current_player  # Opponent wins
         return None
 
     def get_result(self, player: int) -> float:
-        """Get game result from player's perspective: 1.0=win, 0.0=loss, 0.5=draw."""
+        """Get game result from player's perspective: 1.0=win, 0.0=loss."""
         winner = self.get_winner()
         if winner is None:
-            return 0.5  # Draw or ongoing
+            return 0.5  # Game still ongoing
         return 1.0 if winner == player else 0.0
 
     def copy(self) -> GameState:
