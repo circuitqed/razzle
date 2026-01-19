@@ -16,6 +16,8 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from razzle.core.state import GameState
@@ -109,6 +111,7 @@ class MoveConversionResponse(BaseModel):
 class HealthResponse(BaseModel):
     status: str
     version: str
+    model: Optional[str] = None
 
 
 class TrainingIterationData(BaseModel):
@@ -209,19 +212,115 @@ games: dict[str, Game] = {}
 
 # Global AI evaluator (lazy loaded)
 evaluator: Optional[BatchedEvaluator] = None
+_model_path_used: Optional[str] = None  # Track which model is loaded
+_model_mtime: float = 0  # Track model file modification time
+
+# Directories to search for models (in priority order)
+MODEL_SEARCH_DIRS = [
+    Path("/home/projects/razzle/engine/output/new_rules_500"),
+    Path("output/new_rules_500"),
+    Path("/home/projects/razzle/engine/output/output"),
+    Path("output/output"),
+    Path("/home/projects/razzle/engine/output"),
+    Path("output"),
+]
 
 
-def get_evaluator() -> BatchedEvaluator:
-    """Get or create the AI evaluator."""
-    global evaluator
+def find_latest_model() -> Optional[tuple[Path, float]]:
+    """Find the latest model file by modification time.
+
+    Returns tuple of (path, mtime) or None if no model found.
+    """
+    latest_model = None
+    latest_mtime = 0
+
+    for search_dir in MODEL_SEARCH_DIRS:
+        if not search_dir.exists():
+            continue
+        # Look for model files (model_iter_*.pt or trained_model.pt)
+        for pattern in ["model_iter_*.pt", "trained_model.pt"]:
+            for model_path in search_dir.glob(pattern):
+                try:
+                    mtime = model_path.stat().st_mtime
+                    if mtime > latest_mtime:
+                        latest_mtime = mtime
+                        latest_model = model_path
+                except OSError:
+                    continue
+
+    if latest_model:
+        return (latest_model, latest_mtime)
+    return None
+
+
+def load_model(model_path: Path) -> Optional[RazzleNet]:
+    """Load a model from the given path."""
+    try:
+        net = RazzleNet.load(model_path, device='cpu')
+        logging.info(f"Loaded trained model from {model_path}")
+        return net
+    except Exception as e:
+        logging.warning(f"Failed to load model from {model_path}: {e}")
+        return None
+
+
+def get_evaluator(check_for_updates: bool = False) -> BatchedEvaluator:
+    """Get or create the AI evaluator.
+
+    Args:
+        check_for_updates: If True, check if a newer model is available and reload if so.
+    """
+    global evaluator, _model_path_used, _model_mtime
+
+    # Check for newer model if requested
+    if check_for_updates and evaluator is not None:
+        latest = find_latest_model()
+        if latest:
+            latest_path, latest_mtime = latest
+            if latest_mtime > _model_mtime:
+                logging.info(f"Newer model found: {latest_path} (mtime: {latest_mtime} > {_model_mtime})")
+                net = load_model(latest_path)
+                if net:
+                    _model_path_used = str(latest_path)
+                    _model_mtime = latest_mtime
+                    try:
+                        evaluator = BatchedEvaluator(net, device='cpu')
+                        logging.info(f"Reloaded evaluator with new model: {latest_path}")
+                    except Exception as e:
+                        logging.error(f"Failed to create evaluator: {e}")
+
+    # Initial load
     if evaluator is None:
-        # Try to load trained model, fall back to random
-        try:
+        latest = find_latest_model()
+        net = None
+
+        if latest:
+            latest_path, latest_mtime = latest
+            net = load_model(latest_path)
+            if net:
+                _model_path_used = str(latest_path)
+                _model_mtime = latest_mtime
+
+        if net is None:
+            logging.info("No trained model found, using random weights")
+            _model_path_used = "random_weights"
+            _model_mtime = 0
             net = RazzleNet()
+
+        try:
             evaluator = BatchedEvaluator(net, device='cpu')
         except Exception:
             evaluator = DummyEvaluator()
+
     return evaluator
+
+
+def get_model_info() -> str:
+    """Get info about which model is loaded."""
+    global _model_path_used
+    if _model_path_used is None:
+        return "not_loaded"
+    return _model_path_used
 
 
 # --- App Setup ---
@@ -278,15 +377,50 @@ app.add_middleware(
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
     """Health check endpoint."""
-    return HealthResponse(status="ok", version="0.1.0")
+    return HealthResponse(status="ok", version="0.1.0", model=get_model_info())
 
 
 # Training output directories to check
 TRAINING_OUTPUT_DIRS = [
+    Path("output/new_rules_500"),  # Latest parallel training with no-draw rules
+    Path("/home/projects/razzle/engine/output/new_rules_500"),
     Path("output"),
+    Path("output/output"),  # Cloud training extracts here
+    Path("output/cloud_run"),
     Path("output_shaped"),
     Path("/home/projects/razzle/engine/output"),
+    Path("/home/projects/razzle/engine/output/output"),
+    Path("/home/projects/razzle/engine/output/cloud_run"),
 ]
+
+# Plot directories
+PLOTS_DIRS = [
+    Path("output/plots"),
+    Path("/home/projects/razzle/engine/output/plots"),
+]
+
+
+@app.get("/training/plots/{filename}")
+async def get_training_plot(filename: str):
+    """Serve training plot images."""
+    # Only allow specific filenames for security
+    allowed_files = [
+        "training_summary.png",
+        "loss_curves.png",
+        "win_rates.png",
+        "game_lengths.png",
+        "training_metrics.json",
+    ]
+    if filename not in allowed_files:
+        raise HTTPException(status_code=404, detail="Plot not found")
+
+    for plots_dir in PLOTS_DIRS:
+        file_path = plots_dir / filename
+        if file_path.exists():
+            media_type = "application/json" if filename.endswith(".json") else "image/png"
+            return FileResponse(file_path, media_type=media_type)
+
+    raise HTTPException(status_code=404, detail="Plot not found")
 
 
 @app.get("/training/status", response_model=TrainingStatusResponse)
@@ -382,6 +516,9 @@ async def create_game(request: CreateGameRequest = None):
     """Create a new game."""
     if request is None:
         request = CreateGameRequest()
+
+    # Check for newer model on game creation
+    get_evaluator(check_for_updates=True)
 
     game_id = str(uuid.uuid4())[:8]
     game = Game(
