@@ -4,25 +4,20 @@ Distributed self-play worker for Razzle Dazzle training.
 
 This script runs on cloud GPU instances (Vast.ai) and:
 1. Plays games continuously using MCTS + neural network
-2. Saves completed games to a pending/ directory for collection
+2. Submits completed games to the training API
 3. Writes status updates to status.json for monitoring
-4. Periodically checks for new model weights and hot-reloads
-
-The local collector (collector.py) polls workers via SCP to:
-- Download games from pending/
-- Upload new model weights to model/
+4. Periodically checks for new model weights via API and hot-reloads
 
 Usage:
-    python worker_selfplay.py --worker-id 0 --simulations 400
+    python worker_selfplay.py --worker-id 0 --api-url http://server:8000 --simulations 400
 
 Status file (status.json):
     {
         "worker_id": 0,
         "status": "running",
         "games_completed": 42,
-        "games_pending": 5,
         "current_game_moves": 73,
-        "model_version": "model_iter_002.pt",
+        "model_version": "iter_002",
         "last_update": "2024-01-20T15:30:45",
         "uptime_sec": 3600,
         "games_per_hour": 12.5
@@ -32,7 +27,6 @@ Status file (status.json):
 import argparse
 import json
 import os
-import pickle
 import signal
 import sys
 import time
@@ -42,6 +36,8 @@ from pathlib import Path
 from threading import Thread, Event
 from typing import Optional
 
+import numpy as np
+
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -49,7 +45,7 @@ from razzle.ai.network import RazzleNet, create_network
 from razzle.ai.mcts import MCTS, MCTSConfig
 from razzle.ai.evaluator import BatchedEvaluator
 from razzle.core.state import GameState
-from razzle.training.selfplay import GameRecord
+from razzle.training.api_client import TrainingAPIClient
 
 
 @dataclass
@@ -58,7 +54,7 @@ class WorkerStatus:
     worker_id: int
     status: str  # starting, running, paused, stopped, error
     games_completed: int
-    games_pending: int
+    games_submitted: int
     current_game_moves: int
     model_version: str
     last_update: str
@@ -68,18 +64,20 @@ class WorkerStatus:
     error_message: Optional[str] = None
     gpu_name: str = ""
     simulations: int = 0
+    api_url: str = ""
 
 
 class SelfPlayWorker:
     """
-    Continuous self-play worker.
+    Continuous self-play worker that submits games via API.
 
-    Generates games independently and saves them for collection.
+    Generates games independently and submits them to the training server.
     """
 
     def __init__(
         self,
         worker_id: int,
+        api_url: str,
         workspace: Path,
         device: str = 'cuda',
         simulations: int = 400,
@@ -90,6 +88,7 @@ class SelfPlayWorker:
         model_check_interval: int = 5,  # Check for new model every N games
     ):
         self.worker_id = worker_id
+        self.api_url = api_url
         self.workspace = Path(workspace)
         self.device = device
         self.simulations = simulations
@@ -100,19 +99,21 @@ class SelfPlayWorker:
         self.model_check_interval = model_check_interval
 
         # Directories
-        self.pending_dir = self.workspace / "pending"
         self.model_dir = self.workspace / "model"
         self.status_file = self.workspace / "status.json"
 
         # Create directories
-        self.pending_dir.mkdir(parents=True, exist_ok=True)
         self.model_dir.mkdir(parents=True, exist_ok=True)
+
+        # API client
+        self.api_client = TrainingAPIClient(base_url=api_url)
 
         # State
         self.network: Optional[RazzleNet] = None
         self.evaluator = None
         self.model_version = "none"
         self.games_completed = 0
+        self.games_submitted = 0
         self.start_time = datetime.now()
         self.current_game_moves = 0
         self.shutdown_event = Event()
@@ -135,18 +136,50 @@ class SelfPlayWorker:
             pass
         return "unknown"
 
-    def _load_or_create_network(self) -> bool:
-        """Load model from model_dir or create new one."""
+    def _download_latest_model(self) -> bool:
+        """Download the latest model from the API."""
         try:
-            # Look for model files
-            model_files = sorted(self.model_dir.glob("*.pt"))
+            model_info = self.api_client.get_latest_model()
+            if model_info is None:
+                return False
 
+            if model_info.version == self.model_version:
+                return False  # Already have this version
+
+            # Download model
+            model_path = self.model_dir / f"{model_info.version}.pt"
+            print(f"[Worker {self.worker_id}] Downloading model: {model_info.version}")
+            self.api_client.download_model(model_info.version, model_path)
+
+            # Load model
+            self.network = RazzleNet.load(model_path, device=self.device)
+            self.evaluator = BatchedEvaluator(
+                self.network,
+                batch_size=self.batch_size,
+                device=self.device
+            )
+            self.model_version = model_info.version
+            print(f"[Worker {self.worker_id}] Loaded model: {self.model_version}")
+            return True
+
+        except Exception as e:
+            print(f"[Worker {self.worker_id}] Error downloading model: {e}")
+            return False
+
+    def _load_or_create_network(self) -> bool:
+        """Load model from API or create new one."""
+        try:
+            # First try to download from API
+            if self._download_latest_model():
+                return True
+
+            # Check local model directory
+            model_files = sorted(self.model_dir.glob("*.pt"))
             if model_files:
-                # Load latest model
                 latest = model_files[-1]
                 self.network = RazzleNet.load(latest, device=self.device)
-                self.model_version = latest.name
-                print(f"[Worker {self.worker_id}] Loaded model: {self.model_version}")
+                self.model_version = latest.stem
+                print(f"[Worker {self.worker_id}] Loaded local model: {self.model_version}")
             else:
                 # Create new network
                 self.network = create_network(self.filters, self.blocks, self.device)
@@ -167,33 +200,19 @@ class SelfPlayWorker:
             return False
 
     def _check_for_new_model(self) -> bool:
-        """Check if a new model is available and load it."""
+        """Check if a new model is available via API."""
         try:
-            model_files = sorted(self.model_dir.glob("*.pt"))
-            if not model_files:
+            model_info = self.api_client.get_latest_model()
+            if model_info is None:
                 return False
 
-            latest = model_files[-1]
-            if latest.name != self.model_version:
-                print(f"[Worker {self.worker_id}] New model detected: {latest.name}")
-                self.network = RazzleNet.load(latest, device=self.device)
-                self.evaluator = BatchedEvaluator(
-                    self.network,
-                    batch_size=self.batch_size,
-                    device=self.device
-                )
-                self.model_version = latest.name
-                print(f"[Worker {self.worker_id}] Loaded new model: {self.model_version}")
-                return True
+            if model_info.version != self.model_version:
+                return self._download_latest_model()
 
         except Exception as e:
             print(f"[Worker {self.worker_id}] Error checking for new model: {e}")
 
         return False
-
-    def _count_pending_games(self) -> int:
-        """Count games in pending directory."""
-        return len(list(self.pending_dir.glob("*.pkl")))
 
     def _get_status(self) -> WorkerStatus:
         """Get current worker status."""
@@ -204,7 +223,7 @@ class SelfPlayWorker:
             worker_id=self.worker_id,
             status=self.status,
             games_completed=self.games_completed,
-            games_pending=self._count_pending_games(),
+            games_submitted=self.games_submitted,
             current_game_moves=self.current_game_moves,
             model_version=self.model_version,
             last_update=datetime.now().isoformat(),
@@ -213,7 +232,8 @@ class SelfPlayWorker:
             games_per_hour=games_per_hour,
             error_message=self.error_message,
             gpu_name=self.gpu_name,
-            simulations=self.simulations
+            simulations=self.simulations,
+            api_url=self.api_url,
         )
 
     def _write_status(self):
@@ -244,25 +264,21 @@ class SelfPlayWorker:
                 return sq // 7
         return 0
 
-    def play_one_game(self) -> GameRecord:
-        """Play a single self-play game."""
+    def play_one_game(self) -> tuple[list[int], float, list[dict[int, int]]]:
+        """
+        Play a single self-play game.
+
+        Returns:
+            Tuple of (moves, result, visit_counts)
+        """
         state = GameState.new_game()
-        states = []
-        policies = []
         moves = []
-        ball_progress = []
+        visit_counts = []
 
         move_count = 0
         self.current_game_moves = 0
 
         while not state.is_terminal() and move_count < 300:
-            # Track ball positions for reward shaping
-            p0_ball_row = self._get_ball_row(state, 0)
-            p1_ball_row = self._get_ball_row(state, 1)
-            p0_progress = p0_ball_row / 7.0
-            p1_progress = (7 - p1_ball_row) / 7.0
-            ball_progress.append((p0_progress, p1_progress))
-
             # Configure MCTS
             temp = 1.0 if move_count < self.temperature_moves else 0.0
             config = MCTSConfig(
@@ -275,9 +291,12 @@ class SelfPlayWorker:
             # Search
             root = mcts.search_batched(state, add_noise=True)
 
-            # Record state and policy
-            states.append(state.to_tensor())
-            policies.append(mcts.get_policy(root))
+            # Record visit counts (sparse - only visited moves)
+            vc = {}
+            for child in root.children:
+                if child.visit_count > 0:
+                    vc[child.move] = child.visit_count
+            visit_counts.append(vc)
 
             # Select and apply move
             move = mcts.select_move(root)
@@ -300,29 +319,40 @@ class SelfPlayWorker:
         else:
             result = 0.0
 
-        return GameRecord(
-            states=states,
-            policies=policies,
-            result=result,
-            moves=moves,
-            ball_progress=ball_progress
-        )
+        return moves, result, visit_counts
 
-    def save_game(self, game: GameRecord, game_id: int):
-        """Save a game to the pending directory."""
-        # Include worker_id and timestamp for uniqueness
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"game_w{self.worker_id:02d}_{game_id:06d}_{timestamp}.pkl"
-        path = self.pending_dir / filename
-
-        with open(path, 'wb') as f:
-            pickle.dump(game, f)
+    def submit_game(self, moves: list[int], result: float, visit_counts: list[dict[int, int]]) -> bool:
+        """Submit a game to the API."""
+        try:
+            game_id = self.api_client.submit_game(
+                worker_id=f"worker_{self.worker_id}",
+                moves=moves,
+                result=result,
+                visit_counts=visit_counts,
+                model_version=self.model_version,
+            )
+            self.games_submitted += 1
+            return True
+        except Exception as e:
+            print(f"[Worker {self.worker_id}] Failed to submit game: {e}")
+            return False
 
     def run(self):
         """Main worker loop."""
         print(f"[Worker {self.worker_id}] Starting on {self.device}")
-        print(f"[Worker {self.worker_id}] Workspace: {self.workspace}")
+        print(f"[Worker {self.worker_id}] API URL: {self.api_url}")
         print(f"[Worker {self.worker_id}] Simulations: {self.simulations}")
+
+        # Wait for API to be available
+        print(f"[Worker {self.worker_id}] Waiting for API server...")
+        if not self.api_client.wait_for_server(timeout=120):
+            self.status = "error"
+            self.error_message = "API server not available"
+            print(f"[Worker {self.worker_id}] {self.error_message}")
+            self._write_status()
+            return
+
+        print(f"[Worker {self.worker_id}] API server connected")
 
         # Load network
         if not self._load_or_create_network():
@@ -338,25 +368,22 @@ class SelfPlayWorker:
 
         print(f"[Worker {self.worker_id}] Starting self-play loop")
 
-        game_id = 0
-
         try:
             while not self.shutdown_event.is_set():
                 # Play a game
-                game = self.play_one_game()
+                moves, result, visit_counts = self.play_one_game()
 
                 if self.shutdown_event.is_set():
                     break
 
-                # Save game
-                self.save_game(game, game_id)
-                self.games_completed += 1
-                game_id += 1
+                # Submit game to API
+                if self.submit_game(moves, result, visit_counts):
+                    self.games_completed += 1
 
-                # Log progress
-                winner_str = {1.0: "P1", -1.0: "P2", 0.0: "Draw"}.get(game.result, "?")
-                print(f"[Worker {self.worker_id}] Game {self.games_completed}: "
-                      f"{len(game.moves)} moves, winner={winner_str}")
+                    # Log progress
+                    winner_str = {1.0: "P1", -1.0: "P2", 0.0: "Draw"}.get(result, "?")
+                    print(f"[Worker {self.worker_id}] Game {self.games_completed}: "
+                          f"{len(moves)} moves, winner={winner_str}")
 
                 # Check for new model periodically
                 if self.games_completed % self.model_check_interval == 0:
@@ -383,6 +410,8 @@ class SelfPlayWorker:
 def main():
     parser = argparse.ArgumentParser(description='Distributed self-play worker')
     parser.add_argument('--worker-id', type=int, required=True, help='Unique worker ID')
+    parser.add_argument('--api-url', type=str, required=True,
+                        help='Training API URL (e.g., http://server:8000)')
     parser.add_argument('--workspace', type=Path, default=Path('/workspace'),
                         help='Workspace directory')
     parser.add_argument('--device', type=str, default='cuda',
@@ -407,6 +436,7 @@ def main():
 
     worker = SelfPlayWorker(
         worker_id=args.worker_id,
+        api_url=args.api_url,
         workspace=args.workspace,
         device=args.device,
         simulations=args.simulations,

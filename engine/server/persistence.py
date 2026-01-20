@@ -73,6 +73,40 @@ def init_db(db_path: Path = None) -> None:
         # Indexes for user lookups
         conn.execute("CREATE INDEX IF NOT EXISTS idx_games_player1 ON games(player1_user_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_games_player2 ON games(player2_user_id)")
+
+        # Training games from self-play workers
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS training_games (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                worker_id TEXT NOT NULL,
+                moves TEXT NOT NULL,
+                result REAL NOT NULL,
+                visit_counts TEXT NOT NULL,
+                model_version TEXT,
+                status TEXT DEFAULT 'pending',
+                created_at TEXT NOT NULL
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_training_games_status ON training_games(status)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_training_games_created ON training_games(created_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_training_games_worker ON training_games(worker_id)")
+
+        # Model checkpoints
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS training_models (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                version TEXT UNIQUE NOT NULL,
+                iteration INTEGER NOT NULL,
+                games_trained_on INTEGER,
+                final_loss REAL,
+                final_policy_loss REAL,
+                final_value_loss REAL,
+                file_path TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_training_models_iteration ON training_models(iteration)")
+
         conn.commit()
 
 
@@ -621,3 +655,238 @@ def get_game_full(game_id: str, db_path: Path = None) -> Optional[dict]:
             "ai_model_version": row["ai_model_version"],
             "state": state,
         }
+
+
+# --- Training Data Management ---
+
+# Default models directory
+DEFAULT_MODELS_DIR = Path(__file__).parent.parent / "output" / "models"
+
+
+def save_training_game(
+    worker_id: str,
+    moves: list[int],
+    result: float,
+    visit_counts: list[dict[int, int]],
+    model_version: Optional[str] = None,
+    db_path: Path = None
+) -> int:
+    """
+    Save a training game from a self-play worker.
+
+    Returns the game ID.
+    """
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+    now = datetime.utcnow().isoformat()
+
+    with get_connection(db_path) as conn:
+        cursor = conn.execute("""
+            INSERT INTO training_games (worker_id, moves, result, visit_counts, model_version, status, created_at)
+            VALUES (?, ?, ?, ?, ?, 'pending', ?)
+        """, (worker_id, json.dumps(moves), result, json.dumps(visit_counts), model_version, now))
+        conn.commit()
+        return cursor.lastrowid
+
+
+def get_pending_training_games(
+    limit: int = 100,
+    mark_used: bool = True,
+    db_path: Path = None
+) -> tuple[list[dict], int]:
+    """
+    Fetch pending training games.
+
+    Args:
+        limit: Maximum number of games to return
+        mark_used: If True, atomically mark returned games as 'used'
+
+    Returns:
+        Tuple of (list of games, total pending count)
+    """
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+
+    with get_connection(db_path) as conn:
+        # Get total pending count
+        count_row = conn.execute(
+            "SELECT COUNT(*) as count FROM training_games WHERE status = 'pending'"
+        ).fetchone()
+        total_pending = count_row["count"]
+
+        # Fetch games
+        rows = conn.execute("""
+            SELECT id, worker_id, moves, result, visit_counts, model_version, created_at
+            FROM training_games
+            WHERE status = 'pending'
+            ORDER BY created_at ASC
+            LIMIT ?
+        """, (limit,)).fetchall()
+
+        games = []
+        game_ids = []
+        for row in rows:
+            games.append({
+                "id": row["id"],
+                "worker_id": row["worker_id"],
+                "moves": json.loads(row["moves"]),
+                "result": row["result"],
+                "visit_counts": json.loads(row["visit_counts"]),
+                "model_version": row["model_version"],
+                "created_at": row["created_at"],
+            })
+            game_ids.append(row["id"])
+
+        # Mark as used if requested
+        if mark_used and game_ids:
+            placeholders = ",".join("?" * len(game_ids))
+            conn.execute(
+                f"UPDATE training_games SET status = 'used' WHERE id IN ({placeholders})",
+                game_ids
+            )
+            conn.commit()
+
+        return games, total_pending
+
+
+def get_training_games_stats(db_path: Path = None) -> dict:
+    """Get statistics about training games."""
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+
+    with get_connection(db_path) as conn:
+        # Count by status
+        rows = conn.execute("""
+            SELECT status, COUNT(*) as count FROM training_games GROUP BY status
+        """).fetchall()
+        status_counts = {row["status"]: row["count"] for row in rows}
+
+        # Count by worker
+        rows = conn.execute("""
+            SELECT worker_id, COUNT(*) as count FROM training_games GROUP BY worker_id
+        """).fetchall()
+        worker_counts = {row["worker_id"]: row["count"] for row in rows}
+
+        # Get last activity per worker
+        rows = conn.execute("""
+            SELECT worker_id, MAX(created_at) as last_seen FROM training_games GROUP BY worker_id
+        """).fetchall()
+        worker_last_seen = {row["worker_id"]: row["last_seen"] for row in rows}
+
+        return {
+            "total": sum(status_counts.values()),
+            "pending": status_counts.get("pending", 0),
+            "used": status_counts.get("used", 0),
+            "by_worker": worker_counts,
+            "worker_last_seen": worker_last_seen,
+        }
+
+
+def save_training_model(
+    version: str,
+    iteration: int,
+    file_path: str,
+    games_trained_on: Optional[int] = None,
+    final_loss: Optional[float] = None,
+    final_policy_loss: Optional[float] = None,
+    final_value_loss: Optional[float] = None,
+    db_path: Path = None
+) -> int:
+    """
+    Save a training model checkpoint record.
+
+    Returns the model ID.
+    """
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+    now = datetime.utcnow().isoformat()
+
+    with get_connection(db_path) as conn:
+        cursor = conn.execute("""
+            INSERT INTO training_models
+                (version, iteration, games_trained_on, final_loss, final_policy_loss, final_value_loss, file_path, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(version) DO UPDATE SET
+                games_trained_on = excluded.games_trained_on,
+                final_loss = excluded.final_loss,
+                final_policy_loss = excluded.final_policy_loss,
+                final_value_loss = excluded.final_value_loss,
+                file_path = excluded.file_path
+        """, (version, iteration, games_trained_on, final_loss, final_policy_loss, final_value_loss, file_path, now))
+        conn.commit()
+        return cursor.lastrowid
+
+
+def get_latest_training_model(db_path: Path = None) -> Optional[dict]:
+    """Get the most recent training model."""
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+
+    with get_connection(db_path) as conn:
+        row = conn.execute("""
+            SELECT * FROM training_models ORDER BY iteration DESC LIMIT 1
+        """).fetchone()
+
+        if row is None:
+            return None
+
+        return {
+            "id": row["id"],
+            "version": row["version"],
+            "iteration": row["iteration"],
+            "games_trained_on": row["games_trained_on"],
+            "final_loss": row["final_loss"],
+            "final_policy_loss": row["final_policy_loss"],
+            "final_value_loss": row["final_value_loss"],
+            "file_path": row["file_path"],
+            "created_at": row["created_at"],
+        }
+
+
+def get_training_model_by_version(version: str, db_path: Path = None) -> Optional[dict]:
+    """Get a specific training model by version."""
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+
+    with get_connection(db_path) as conn:
+        row = conn.execute("""
+            SELECT * FROM training_models WHERE version = ?
+        """, (version,)).fetchone()
+
+        if row is None:
+            return None
+
+        return {
+            "id": row["id"],
+            "version": row["version"],
+            "iteration": row["iteration"],
+            "games_trained_on": row["games_trained_on"],
+            "final_loss": row["final_loss"],
+            "final_policy_loss": row["final_policy_loss"],
+            "final_value_loss": row["final_value_loss"],
+            "file_path": row["file_path"],
+            "created_at": row["created_at"],
+        }
+
+
+def list_training_models(limit: int = 50, db_path: Path = None) -> list[dict]:
+    """List training models, most recent first."""
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+
+    with get_connection(db_path) as conn:
+        rows = conn.execute("""
+            SELECT * FROM training_models ORDER BY iteration DESC LIMIT ?
+        """, (limit,)).fetchall()
+
+        return [{
+            "id": row["id"],
+            "version": row["version"],
+            "iteration": row["iteration"],
+            "games_trained_on": row["games_trained_on"],
+            "final_loss": row["final_loss"],
+            "final_policy_loss": row["final_policy_loss"],
+            "final_value_loss": row["final_value_loss"],
+            "file_path": row["file_path"],
+            "created_at": row["created_at"],
+        } for row in rows]

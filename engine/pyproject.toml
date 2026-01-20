@@ -33,6 +33,7 @@ server = [
     "uvicorn>=0.23.0",
     "websockets>=11.0",
     "pyjwt>=2.8.0",
+    "python-multipart>=0.0.6",
 ]
 all = [
     "razzle[dev,training,server]",

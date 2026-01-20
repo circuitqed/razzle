@@ -17,11 +17,12 @@ from typing import Optional
 from contextlib import asynccontextmanager
 
 import jwt
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Request, Response, Depends, Cookie
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Request, Response, Depends, Cookie, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
+import shutil
 
 from razzle.core.state import GameState
 from razzle.core.moves import (
@@ -187,6 +188,80 @@ class TrainingStatusResponse(BaseModel):
     total_time_sec: float = 0.0
     iterations: list[TrainingIterationData] = []
     config: dict = {}
+
+
+# --- Training API Models ---
+
+class SubmitGameRequest(BaseModel):
+    """Request to submit a training game from a worker."""
+    worker_id: str
+    moves: list[int]
+    result: float  # 1.0 (P0 wins), -1.0 (P1 wins), 0.0 (draw)
+    visit_counts: list[dict[str, int]]  # Sparse MCTS visit counts per position
+    model_version: Optional[str] = None
+
+
+class SubmitGameResponse(BaseModel):
+    """Response after submitting a training game."""
+    id: int
+    status: str = "accepted"
+
+
+class TrainingGameData(BaseModel):
+    """A training game returned to the trainer."""
+    id: int
+    worker_id: str
+    moves: list[int]
+    result: float
+    visit_counts: list[dict[str, int]]
+    model_version: Optional[str]
+    created_at: str
+
+
+class FetchGamesResponse(BaseModel):
+    """Response with pending training games."""
+    games: list[TrainingGameData]
+    count: int
+    total_pending: int
+
+
+class ModelInfo(BaseModel):
+    """Information about a training model."""
+    version: str
+    iteration: int
+    games_trained_on: Optional[int] = None
+    final_loss: Optional[float] = None
+    final_policy_loss: Optional[float] = None
+    final_value_loss: Optional[float] = None
+    download_url: str
+    created_at: str
+
+
+class LatestModelResponse(BaseModel):
+    """Response with latest model info, or null if none exists."""
+    model: Optional[ModelInfo] = None
+
+
+class UploadModelResponse(BaseModel):
+    """Response after uploading a model."""
+    version: str
+    status: str = "uploaded"
+
+
+class WorkerStats(BaseModel):
+    """Statistics for a single worker."""
+    games: int
+    last_seen: Optional[str]
+
+
+class TrainingDashboardResponse(BaseModel):
+    """Enhanced training status for dashboard."""
+    status: str
+    games_pending: int
+    games_total: int
+    latest_model: Optional[ModelInfo] = None
+    workers: dict[str, WorkerStats]
+    models: list[ModelInfo]
 
 
 class LogEntry(BaseModel):
@@ -644,6 +719,203 @@ async def get_training_status():
         total_time_sec=log.get('total_time_sec', 0.0),
         iterations=iterations,
         config=log.get('config', {})
+    )
+
+
+# --- Training API Endpoints ---
+
+# Models directory for storing uploaded models
+TRAINING_MODELS_DIR = Path(os.environ.get("RAZZLE_MODELS_DIR", "output/models"))
+TRAINING_MODELS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+@app.post("/training/games", response_model=SubmitGameResponse)
+async def submit_training_game(request: SubmitGameRequest):
+    """Submit a completed training game from a self-play worker."""
+    # Convert visit_counts keys from string to int (JSON doesn't support int keys)
+    visit_counts = [
+        {int(k): v for k, v in vc.items()}
+        for vc in request.visit_counts
+    ]
+
+    game_id = persistence.save_training_game(
+        worker_id=request.worker_id,
+        moves=request.moves,
+        result=request.result,
+        visit_counts=visit_counts,
+        model_version=request.model_version,
+    )
+
+    return SubmitGameResponse(id=game_id, status="accepted")
+
+
+@app.get("/training/games", response_model=FetchGamesResponse)
+async def fetch_training_games(
+    status: str = "pending",
+    limit: int = 100,
+    mark_used: bool = True
+):
+    """
+    Fetch training games for the trainer.
+
+    Args:
+        status: Filter by status (default: "pending")
+        limit: Maximum number of games to return
+        mark_used: If true, atomically mark returned games as "used"
+    """
+    if status != "pending":
+        raise HTTPException(status_code=400, detail="Only status='pending' is supported")
+
+    games_data, total_pending = persistence.get_pending_training_games(
+        limit=limit,
+        mark_used=mark_used,
+    )
+
+    games = [
+        TrainingGameData(
+            id=g["id"],
+            worker_id=g["worker_id"],
+            moves=g["moves"],
+            result=g["result"],
+            visit_counts=[{str(k): v for k, v in vc.items()} for vc in g["visit_counts"]],
+            model_version=g["model_version"],
+            created_at=g["created_at"],
+        )
+        for g in games_data
+    ]
+
+    return FetchGamesResponse(
+        games=games,
+        count=len(games),
+        total_pending=total_pending - len(games) if mark_used else total_pending,
+    )
+
+
+@app.get("/training/models/latest", response_model=LatestModelResponse)
+async def get_latest_model():
+    """Get information about the latest training model."""
+    model = persistence.get_latest_training_model()
+
+    if model is None:
+        return LatestModelResponse(model=None)
+
+    return LatestModelResponse(
+        model=ModelInfo(
+            version=model["version"],
+            iteration=model["iteration"],
+            games_trained_on=model["games_trained_on"],
+            final_loss=model["final_loss"],
+            final_policy_loss=model["final_policy_loss"],
+            final_value_loss=model["final_value_loss"],
+            download_url=f"/training/models/{model['version']}/download",
+            created_at=model["created_at"],
+        )
+    )
+
+
+@app.post("/training/models", response_model=UploadModelResponse)
+async def upload_training_model(
+    version: str = Form(...),
+    iteration: int = Form(...),
+    games_trained_on: Optional[int] = Form(None),
+    final_loss: Optional[float] = Form(None),
+    final_policy_loss: Optional[float] = Form(None),
+    final_value_loss: Optional[float] = Form(None),
+    file: UploadFile = File(...),
+):
+    """Upload a new training model checkpoint."""
+    # Validate filename
+    if not file.filename.endswith(".pt"):
+        raise HTTPException(status_code=400, detail="Model file must be a .pt file")
+
+    # Save file
+    file_path = TRAINING_MODELS_DIR / f"{version}.pt"
+    with open(file_path, "wb") as f:
+        shutil.copyfileobj(file.file, f)
+
+    # Save to database
+    persistence.save_training_model(
+        version=version,
+        iteration=iteration,
+        file_path=str(file_path),
+        games_trained_on=games_trained_on,
+        final_loss=final_loss,
+        final_policy_loss=final_policy_loss,
+        final_value_loss=final_value_loss,
+    )
+
+    return UploadModelResponse(version=version, status="uploaded")
+
+
+@app.get("/training/models/{version}/download")
+async def download_training_model(version: str):
+    """Download a specific training model file."""
+    model = persistence.get_training_model_by_version(version)
+
+    if model is None:
+        raise HTTPException(status_code=404, detail="Model not found")
+
+    file_path = Path(model["file_path"])
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="Model file not found on disk")
+
+    return FileResponse(
+        path=file_path,
+        filename=f"{version}.pt",
+        media_type="application/octet-stream",
+    )
+
+
+@app.get("/training/dashboard", response_model=TrainingDashboardResponse)
+async def get_training_dashboard():
+    """Get enhanced training status for the dashboard."""
+    stats = persistence.get_training_games_stats()
+    models = persistence.list_training_models(limit=10)
+    latest = persistence.get_latest_training_model()
+
+    # Build worker stats
+    workers = {}
+    for worker_id, count in stats.get("by_worker", {}).items():
+        workers[worker_id] = WorkerStats(
+            games=count,
+            last_seen=stats.get("worker_last_seen", {}).get(worker_id),
+        )
+
+    # Build model info list
+    model_infos = [
+        ModelInfo(
+            version=m["version"],
+            iteration=m["iteration"],
+            games_trained_on=m["games_trained_on"],
+            final_loss=m["final_loss"],
+            final_policy_loss=m["final_policy_loss"],
+            final_value_loss=m["final_value_loss"],
+            download_url=f"/training/models/{m['version']}/download",
+            created_at=m["created_at"],
+        )
+        for m in models
+    ]
+
+    latest_model = None
+    if latest:
+        latest_model = ModelInfo(
+            version=latest["version"],
+            iteration=latest["iteration"],
+            games_trained_on=latest["games_trained_on"],
+            final_loss=latest["final_loss"],
+            final_policy_loss=latest["final_policy_loss"],
+            final_value_loss=latest["final_value_loss"],
+            download_url=f"/training/models/{latest['version']}/download",
+            created_at=latest["created_at"],
+        )
+
+    return TrainingDashboardResponse(
+        status="active" if workers else "idle",
+        games_pending=stats.get("pending", 0),
+        games_total=stats.get("total", 0),
+        latest_model=latest_model,
+        workers=workers,
+        models=model_infos,
     )
 
 
