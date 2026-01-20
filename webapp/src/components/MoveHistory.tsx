@@ -9,9 +9,12 @@ interface MoveHistoryProps {
 }
 
 export default function MoveHistory({ moves }: MoveHistoryProps) {
+  // Fixed height to match board (8 rows × 50px = 400px)
+  const FIXED_HEIGHT = 'h-[400px]';
+
   if (moves.length === 0) {
     return (
-      <div className="w-48 bg-gray-800 rounded p-3 text-sm">
+      <div className={`w-48 ${FIXED_HEIGHT} bg-gray-800 rounded p-3 text-sm`}>
         <h3 className="font-semibold mb-2 text-gray-300">Move History</h3>
         <p className="text-gray-500 italic">No moves yet</p>
       </div>
@@ -40,9 +43,9 @@ export default function MoveHistory({ moves }: MoveHistoryProps) {
   }
 
   return (
-    <div className="w-48 bg-gray-800 rounded p-3 text-sm max-h-64 overflow-y-auto">
+    <div className={`w-48 ${FIXED_HEIGHT} bg-gray-800 rounded p-3 text-sm flex flex-col`}>
       <h3 className="font-semibold mb-2 text-gray-300">Move History</h3>
-      <div className="space-y-1">
+      <div className="space-y-1 flex-1 overflow-y-auto">
         {groupedMoves.map((turn, idx) => (
           <div key={idx} className="flex gap-2">
             <span className="text-gray-500 w-6">{idx + 1}.</span>
