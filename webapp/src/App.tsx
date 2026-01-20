@@ -258,6 +258,17 @@ function AppContent() {
 
       {gameState && (
         <>
+          {/* Turn indicator */}
+          <div className="mb-2 text-center">
+            <span
+              className={`inline-block px-3 py-1 rounded text-white text-sm font-medium ${
+                gameState.current_player === 0 ? 'bg-blue-500' : 'bg-red-500'
+              }`}
+            >
+              {gameState.current_player === 0 ? 'Blue' : 'Red'}'s Turn
+            </span>
+          </div>
+
           <div className="flex flex-col sm:flex-row gap-4 items-center sm:items-start w-full max-w-md sm:max-w-none sm:w-auto">
             <Board
               board={gameState.board}

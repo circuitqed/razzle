@@ -364,17 +364,6 @@ export default function Board({
 
   return (
     <div className="inline-block w-full max-w-[350px] sm:max-w-none sm:w-auto">
-      {/* Player indicator */}
-      <div className="mb-2 text-center">
-        <span
-          className={`inline-block px-3 py-1 rounded text-white text-sm font-medium ${
-            currentPlayer === 0 ? 'bg-blue-500' : 'bg-red-500'
-          }`}
-        >
-          {currentPlayer === 0 ? 'Blue' : 'Red'}'s Turn
-        </span>
-      </div>
-
       <svg
         ref={svgRef}
         width="100%"

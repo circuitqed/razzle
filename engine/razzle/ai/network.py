@@ -18,8 +18,11 @@ import torch.nn.functional as F
 from ..core.bitboard import ROWS, COLS, NUM_SQUARES
 
 
-# Total possible moves (any square to any square)
-NUM_ACTIONS = NUM_SQUARES * NUM_SQUARES  # 56 * 56 = 3136
+# Total possible moves (any square to any square, plus END_TURN)
+# Moves are encoded as src * 56 + dst for knight moves and passes (0-3135)
+# Index 3136 is reserved for END_TURN (-1 in game logic)
+END_TURN_ACTION = NUM_SQUARES * NUM_SQUARES  # 3136
+NUM_ACTIONS = END_TURN_ACTION + 1  # 3137 total actions
 
 
 @dataclass

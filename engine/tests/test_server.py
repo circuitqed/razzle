@@ -8,6 +8,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from fastapi.testclient import TestClient
 from server.main import app, games
+from razzle.ai.network import NUM_ACTIONS
 
 
 @pytest.fixture(autouse=True)
@@ -140,7 +141,7 @@ class TestAIMove:
         assert "value" in data
         assert "time_ms" in data
         assert "top_moves" in data
-        assert len(data["policy"]) == 3136
+        assert len(data["policy"]) == NUM_ACTIONS
 
     def test_ai_move_default_params(self, client):
         create_response = client.post("/games")

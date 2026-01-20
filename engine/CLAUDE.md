@@ -38,14 +38,22 @@ razzle/
 - State is 4 integers: p1_pieces, p1_ball, p2_pieces, p2_ball
 
 ### Atomic Moves
-- Each action is a single move: either a knight move OR a ball pass
-- Encoded as: `src * 56 + dst`
-- Total action space: 56 * 56 = 3136 possible moves
+- Each action is a single move: either a knight move OR a ball pass OR end turn
+- Encoded as: `src * 56 + dst` for moves, index 3136 for END_TURN
+- Total action space: 56 * 56 + 1 = 3137 possible actions
 
 ### Neural Network
 - Input: 6 planes of 8x7 (pieces, balls, touched mask, player indicator)
 - Architecture: Residual CNN (configurable depth/width)
-- Output: Policy (3136 logits) + Value (scalar)
+- Output: Policy (3137 logits) + Value (scalar)
+
+### Training
+- See `docs/TRAINING.md` for detailed training architecture documentation
+- Key features:
+  - Correct player perspective tracking (turns don't always alternate due to ball passes)
+  - Masked cross-entropy loss on legal moves only
+  - Illegal move penalty (Lagrange multiplier) to focus probability on legal moves
+  - Temperature-aware policy target generation
 
 ### MCTS
 - PUCT selection (exploration vs exploitation)
@@ -134,18 +142,20 @@ python scripts/train_distributed.py \
 - [x] MCTS implementation
 - [x] Neural network architecture
 - [x] Self-play generation
-- [x] Training loop
+- [x] Training loop with illegal move penalty
 - [x] Vast.ai integration
 - [x] Terminal CLI client
 - [x] FastAPI server (REST + WebSocket)
 - [x] Distributed training API
-- [x] Unit tests (218+ tests)
+- [x] Unit tests (229+ tests)
+- [x] Training bug fixes (player perspective, END_TURN handling)
 - [ ] Trained model
 
 ## Next Steps
 
-1. Run distributed training to generate trained model
+1. Run distributed training to generate trained model (requires fresh start due to architecture changes)
 2. Optimize batched inference for faster self-play
+3. Validate with policy diagnostics (`scripts/diagnose_policy.py`)
 
 ## Multi-Agent Development
 

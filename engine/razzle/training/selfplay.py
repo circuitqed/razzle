@@ -12,9 +12,9 @@ import numpy as np
 from pathlib import Path
 
 from ..core.state import GameState
-from ..core.moves import move_to_algebraic
+from ..core.moves import move_to_algebraic, get_legal_moves
 from ..ai.mcts import MCTS, MCTSConfig
-from ..ai.network import RazzleNet, NUM_ACTIONS
+from ..ai.network import RazzleNet, NUM_ACTIONS, END_TURN_ACTION
 from ..ai.evaluator import BatchedEvaluator, DummyEvaluator
 
 
@@ -26,20 +26,30 @@ class GameRecord:
     result: float  # Final result: 1.0 = player 0 wins, -1.0 = player 1 wins
     moves: list[int] = field(default_factory=list)  # Move history
     ball_progress: list[tuple[float, float]] = field(default_factory=list)  # Ball advancement per state
+    players: list[int] = field(default_factory=list)  # Actual current_player at each state
+    legal_masks: list[np.ndarray] = field(default_factory=list)  # Legal move masks per state
 
-    def training_examples(self, use_ball_shaping: bool = True) -> list[tuple[np.ndarray, np.ndarray, float]]:
+    def training_examples(self, use_ball_shaping: bool = True) -> list[tuple[np.ndarray, np.ndarray, float, np.ndarray]]:
         """
         Convert game record to training examples.
 
-        Returns list of (state, policy, value) tuples.
+        Returns list of (state, policy, value, legal_mask) tuples.
         Value is from the perspective of the player to move in that state.
 
         If use_ball_shaping is True, adds a small bonus based on ball advancement.
+
+        IMPORTANT: In Razzle Dazzle, turns don't strictly alternate. Ball passes
+        keep the same player, only knight moves and end_turn switch players.
+        We use the tracked `players` list for correct perspective.
         """
         examples = []
         for i, (state, policy) in enumerate(zip(self.states, self.policies)):
-            # Player to move alternates (player 0 moves on even indices)
-            player_to_move = i % 2
+            # Use tracked player if available, otherwise fall back to i % 2
+            # (for backward compatibility with old game records)
+            if self.players and i < len(self.players):
+                player_to_move = self.players[i]
+            else:
+                player_to_move = i % 2  # Legacy fallback
 
             # Base value from game result
             if self.result == 0:
@@ -63,7 +73,13 @@ class GameRecord:
             else:
                 value = base_value
 
-            examples.append((state, policy, value))
+            # Get legal mask (or create empty one for backward compatibility)
+            if self.legal_masks and i < len(self.legal_masks):
+                legal_mask = self.legal_masks[i]
+            else:
+                legal_mask = np.ones(NUM_ACTIONS, dtype=np.float32)  # Assume all legal if not tracked
+
+            examples.append((state, policy, value, legal_mask))
         return examples
 
 
@@ -101,8 +117,14 @@ class SelfPlay:
         policies = []
         moves = []
         ball_progress = []
+        players = []  # Track actual current_player at each state
+        legal_masks = []  # Track legal moves at each state
 
         move_count = 0
+
+        # Helper to map move to policy index
+        def move_to_index(m: int) -> int:
+            return END_TURN_ACTION if m == -1 else m
 
         while not state.is_terminal():
             # Track ball positions for reward shaping
@@ -127,9 +149,16 @@ class SelfPlay:
             # Search with batching for better performance
             root = mcts.search_batched(state, add_noise=True)
 
-            # Record state and policy
+            # Record state, player, and policy BEFORE applying move
             states.append(state.to_tensor())
+            players.append(state.current_player)
             policies.append(mcts.get_policy(root))
+
+            # Record legal move mask
+            legal_mask = np.zeros(NUM_ACTIONS, dtype=np.float32)
+            for m in get_legal_moves(state):
+                legal_mask[move_to_index(m)] = 1.0
+            legal_masks.append(legal_mask)
 
             # Select move
             move = mcts.select_move(root)
@@ -165,7 +194,9 @@ class SelfPlay:
             policies=policies,
             result=result,
             moves=moves,
-            ball_progress=ball_progress
+            ball_progress=ball_progress,
+            players=players,
+            legal_masks=legal_masks
         )
 
     def _get_ball_row(self, state: GameState, player: int) -> int:
@@ -216,7 +247,7 @@ def load_games(directory: Path) -> list[GameRecord]:
 def games_to_training_data(
     games: list[GameRecord],
     use_ball_shaping: bool = True
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Convert list of games to training arrays.
 
@@ -224,7 +255,7 @@ def games_to_training_data(
         games: List of game records
         use_ball_shaping: Add small reward for ball advancement
 
-    Returns (states, policies, values) arrays.
+    Returns (states, policies, values, legal_masks) arrays.
     """
     all_examples = []
     for game in games:
@@ -233,5 +264,6 @@ def games_to_training_data(
     states = np.stack([e[0] for e in all_examples])
     policies = np.stack([e[1] for e in all_examples])
     values = np.array([e[2] for e in all_examples], dtype=np.float32)
+    legal_masks = np.stack([e[3] for e in all_examples])
 
-    return states, policies, values
+    return states, policies, values, legal_masks

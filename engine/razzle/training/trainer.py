@@ -26,6 +26,7 @@ class TrainingConfig:
     epochs: int = 10
     policy_weight: float = 1.0
     value_weight: float = 1.0
+    illegal_penalty_weight: float = 1.0  # Lagrange multiplier for illegal move constraint
     device: str = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 
@@ -36,17 +37,27 @@ class RazzleDataset(Dataset):
         self,
         states: np.ndarray,
         policies: np.ndarray,
-        values: np.ndarray
+        values: np.ndarray,
+        legal_masks: Optional[np.ndarray] = None
     ):
         self.states = torch.from_numpy(states)
         self.policies = torch.from_numpy(policies)
         self.values = torch.from_numpy(values)
+        # Legal masks: 1 for legal moves, 0 for illegal
+        # If not provided, assume all moves could be legal (backward compatibility)
+        if legal_masks is not None:
+            self.legal_masks = torch.from_numpy(legal_masks)
+        else:
+            self.legal_masks = None
 
     def __len__(self) -> int:
         return len(self.states)
 
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        return self.states[idx], self.policies[idx], self.values[idx]
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, ...]:
+        if self.legal_masks is not None:
+            return self.states[idx], self.policies[idx], self.values[idx], self.legal_masks[idx]
+        else:
+            return self.states[idx], self.policies[idx], self.values[idx]
 
 
 class Trainer:
@@ -76,16 +87,24 @@ class Trainer:
             gamma=0.9
         )
 
-    def train_epoch(self, dataloader: DataLoader) -> dict:
+    def train_epoch(self, dataloader: DataLoader, has_legal_masks: bool = False) -> dict:
         """Train for one epoch."""
         self.network.train()
 
         total_loss = 0.0
         total_policy_loss = 0.0
         total_value_loss = 0.0
+        total_illegal_penalty = 0.0
         num_batches = 0
 
-        for states, target_policies, target_values in dataloader:
+        for batch in dataloader:
+            if has_legal_masks:
+                states, target_policies, target_values, legal_masks = batch
+                legal_masks = legal_masks.to(self.config.device)
+            else:
+                states, target_policies, target_values = batch
+                legal_masks = None
+
             states = states.to(self.config.device)
             target_policies = target_policies.to(self.config.device)
             target_values = target_values.to(self.config.device)
@@ -94,8 +113,33 @@ class Trainer:
             log_policies, values = self.network(states)
             values = values.squeeze(-1)
 
-            # Policy loss: cross-entropy (using log probs from network)
-            policy_loss = -torch.sum(target_policies * log_policies, dim=1).mean()
+            if legal_masks is not None:
+                # Masked cross-entropy on legal moves only
+                # legal_masks: 1 for legal, 0 for illegal
+                # We compute CE only where legal_masks == 1
+
+                # Convert log probs to probs for the penalty term
+                policies = torch.exp(log_policies)
+
+                # Cross-entropy on legal moves: -sum(target * log_pred) over legal moves
+                # Mask both target and log_policies
+                masked_target = target_policies * legal_masks
+                masked_log_policies = log_policies * legal_masks
+
+                # Normalize target over legal moves for proper CE
+                # (target should already sum to 1 over legal moves, but ensure numerical stability)
+                policy_loss = -torch.sum(masked_target * masked_log_policies, dim=1).mean()
+
+                # Illegal move penalty: sum of probability mass on illegal moves
+                # illegal_masks = 1 - legal_masks
+                illegal_masks = 1.0 - legal_masks
+                illegal_prob_mass = torch.sum(policies * illegal_masks, dim=1).mean()
+
+                illegal_penalty = self.config.illegal_penalty_weight * illegal_prob_mass
+            else:
+                # Backward compatible: standard cross-entropy over all moves
+                policy_loss = -torch.sum(target_policies * log_policies, dim=1).mean()
+                illegal_penalty = torch.tensor(0.0, device=self.config.device)
 
             # Value loss: MSE
             value_loss = F.mse_loss(values, target_values)
@@ -103,7 +147,8 @@ class Trainer:
             # Combined loss
             loss = (
                 self.config.policy_weight * policy_loss +
-                self.config.value_weight * value_loss
+                self.config.value_weight * value_loss +
+                illegal_penalty
             )
 
             # Backward pass
@@ -115,27 +160,42 @@ class Trainer:
             total_loss += loss.item()
             total_policy_loss += policy_loss.item()
             total_value_loss += value_loss.item()
+            total_illegal_penalty += illegal_penalty.item()
             num_batches += 1
 
-        return {
+        metrics = {
             'loss': total_loss / num_batches,
             'policy_loss': total_policy_loss / num_batches,
-            'value_loss': total_value_loss / num_batches
+            'value_loss': total_value_loss / num_batches,
         }
+        if has_legal_masks:
+            metrics['illegal_penalty'] = total_illegal_penalty / num_batches
+
+        return metrics
 
     def train(
         self,
         states: np.ndarray,
         policies: np.ndarray,
         values: np.ndarray,
+        legal_masks: Optional[np.ndarray] = None,
         verbose: bool = True
     ) -> list[dict]:
         """
         Train on given data for configured number of epochs.
 
+        Args:
+            states: Board state tensors (N, 6, 8, 7)
+            policies: Policy targets (N, NUM_ACTIONS)
+            values: Value targets (N,)
+            legal_masks: Optional legal move masks (N, NUM_ACTIONS).
+                        1 for legal moves, 0 for illegal.
+                        If provided, enables masked cross-entropy + illegal penalty.
+            verbose: Print progress
+
         Returns list of metrics per epoch.
         """
-        dataset = RazzleDataset(states, policies, values)
+        dataset = RazzleDataset(states, policies, values, legal_masks)
         dataloader = DataLoader(
             dataset,
             batch_size=self.config.batch_size,
@@ -143,10 +203,11 @@ class Trainer:
             num_workers=0
         )
 
+        has_legal_masks = legal_masks is not None
         history = []
 
         for epoch in range(self.config.epochs):
-            metrics = self.train_epoch(dataloader)
+            metrics = self.train_epoch(dataloader, has_legal_masks=has_legal_masks)
             self.scheduler.step()
 
             metrics['epoch'] = epoch + 1
@@ -154,13 +215,16 @@ class Trainer:
             history.append(metrics)
 
             if verbose:
-                print(
+                msg = (
                     f"Epoch {epoch + 1}/{self.config.epochs}: "
                     f"loss={metrics['loss']:.4f}, "
                     f"policy={metrics['policy_loss']:.4f}, "
-                    f"value={metrics['value_loss']:.4f}, "
-                    f"lr={metrics['lr']:.6f}"
+                    f"value={metrics['value_loss']:.4f}"
                 )
+                if 'illegal_penalty' in metrics:
+                    msg += f", illegal={metrics['illegal_penalty']:.4f}"
+                msg += f", lr={metrics['lr']:.6f}"
+                print(msg)
 
         return history
 

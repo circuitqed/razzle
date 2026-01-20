@@ -13,7 +13,7 @@ import numpy as np
 import torch
 
 from ..core.state import GameState
-from .network import RazzleNet, NUM_ACTIONS
+from .network import RazzleNet, NUM_ACTIONS, END_TURN_ACTION
 
 
 @dataclass
@@ -162,9 +162,10 @@ class DummyEvaluator:
         if legal_moves:
             prob = 1.0 / len(legal_moves)
             for move in legal_moves:
-                # Skip END_TURN (-1) as it doesn't have a policy slot
-                # MCTS handles it specially
-                if move >= 0:
+                # END_TURN (-1) maps to END_TURN_ACTION index
+                if move == -1:
+                    policy[END_TURN_ACTION] = prob
+                else:
                     policy[move] = prob
 
         return policy, 0.0

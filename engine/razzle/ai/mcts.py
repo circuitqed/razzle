@@ -12,7 +12,7 @@ import numpy as np
 
 from ..core.state import GameState
 from ..core.moves import get_legal_moves, decode_move, move_to_algebraic
-from .network import NUM_ACTIONS
+from .network import NUM_ACTIONS, END_TURN_ACTION
 
 
 class Evaluator(Protocol):
@@ -104,11 +104,11 @@ class Node:
 
         legal_moves = get_legal_moves(self.state)
 
-        # Helper to get prior for a move, handling END_TURN (-1) specially
+        # Helper to get prior for a move
         def get_prior(move: int) -> float:
             if move == -1:  # END_TURN_MOVE
-                # End turn gets a small fixed prior - MCTS will adjust via visits
-                return 0.1
+                # END_TURN is at index END_TURN_ACTION (3136) in policy array
+                return policy[END_TURN_ACTION]
             return policy[move]
 
         # Mask and renormalize policy
@@ -231,31 +231,34 @@ class MCTS:
         """
         Get move probabilities based on visit counts.
 
-        Returns array of shape (3136,) with probabilities.
-        Note: END_TURN (-1) is not included in the policy array.
+        Returns array of shape (NUM_ACTIONS,) with probabilities.
+        END_TURN (-1) is mapped to index END_TURN_ACTION (3136).
         """
         policy = np.zeros(NUM_ACTIONS, dtype=np.float32)
 
-        # Filter out END_TURN for policy array (it has no slot)
-        valid_children = {a: c for a, c in root.children.items() if a >= 0}
-        total_visits = sum(c.visit_count for c in valid_children.values())
+        # Map action to policy index (END_TURN -1 -> END_TURN_ACTION)
+        def action_to_index(action: int) -> int:
+            return END_TURN_ACTION if action == -1 else action
+
+        total_visits = sum(c.visit_count for c in root.children.values())
 
         if total_visits > 0 and self.config.temperature > 0:
             if self.config.temperature == 1.0:
                 # Standard proportional to visits
-                for action, child in valid_children.items():
-                    policy[action] = child.visit_count / total_visits
+                for action, child in root.children.items():
+                    policy[action_to_index(action)] = child.visit_count / total_visits
             else:
                 # Apply temperature
-                visits = np.array([c.visit_count for c in valid_children.values()], dtype=np.float32)
+                actions = list(root.children.keys())
+                visits = np.array([root.children[a].visit_count for a in actions], dtype=np.float32)
                 visits = np.power(visits, 1.0 / self.config.temperature)
                 visits_sum = visits.sum()
-                for i, (action, child) in enumerate(valid_children.items()):
-                    policy[action] = visits[i] / visits_sum
-        elif valid_children:
+                for i, action in enumerate(actions):
+                    policy[action_to_index(action)] = visits[i] / visits_sum
+        elif root.children:
             # Greedy (temperature = 0)
-            best_action = max(valid_children.keys(), key=lambda a: valid_children[a].visit_count)
-            policy[best_action] = 1.0
+            best_action = max(root.children.keys(), key=lambda a: root.children[a].visit_count)
+            policy[action_to_index(best_action)] = 1.0
 
         return policy
 

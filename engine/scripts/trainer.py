@@ -32,68 +32,109 @@ import torch
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from razzle.ai.network import RazzleNet, create_network, NUM_ACTIONS
+from razzle.ai.network import RazzleNet, create_network, NUM_ACTIONS, END_TURN_ACTION
 from razzle.core.state import GameState
+from razzle.core.moves import get_legal_moves
 from razzle.training.trainer import Trainer, TrainingConfig
 from razzle.training.api_client import TrainingAPIClient, TrainingGame
 
 
 def games_to_training_data(
     games: list[TrainingGame],
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    temperature: float = 1.0,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Convert API games to training arrays.
 
     This reconstructs board states from moves and converts sparse
     visit counts to dense policy vectors.
 
-    Returns (states, policies, values) arrays.
+    IMPORTANT: Player tracking must replay the game state to get the actual
+    current_player at each position. In Razzle Dazzle, turns DON'T strictly
+    alternate - ball passes keep the same player, only knight moves and
+    end_turn switch players.
+
+    Args:
+        games: List of training games from API
+        temperature: Temperature used during self-play (for policy conversion)
+
+    Returns (states, policies, values, legal_masks) arrays.
     """
     all_states = []
     all_policies = []
     all_values = []
+    all_legal_masks = []
+
+    # Helper to map move to policy index
+    def move_to_index(m: int) -> int:
+        return END_TURN_ACTION if m == -1 else m
 
     for game in games:
-        # Replay the game to get states
+        # Replay the game to get states and track actual player
         state = GameState.new_game()
         states = []
         policies = []
+        legal_masks = []
+        players = []  # Track actual current_player at each position
 
-        for i, (move, visit_counts) in enumerate(zip(game.moves, game.visit_counts)):
-            # Get state tensor
+        for move, visit_counts in zip(game.moves, game.visit_counts):
+            # Record state and player BEFORE applying move
             states.append(state.to_tensor())
+            players.append(state.current_player)
 
-            # Convert sparse visit counts to dense policy
+            # Generate legal move mask for this state
+            legal_mask = np.zeros(NUM_ACTIONS, dtype=np.float32)
+            legal_moves = get_legal_moves(state)
+            for m in legal_moves:
+                legal_mask[move_to_index(m)] = 1.0
+            legal_masks.append(legal_mask)
+
+            # Convert sparse visit counts to dense policy with temperature
             policy = np.zeros(NUM_ACTIONS, dtype=np.float32)
             total_visits = sum(visit_counts.values())
             if total_visits > 0:
-                for m, count in visit_counts.items():
-                    policy[m] = count / total_visits
+                # Apply temperature to visit counts (same as MCTS.get_policy)
+                if temperature > 0 and temperature != 1.0:
+                    moves = list(visit_counts.keys())
+                    visits_array = np.array([visit_counts[m] for m in moves], dtype=np.float32)
+                    visits_array = np.power(visits_array, 1.0 / temperature)
+                    visits_sum = visits_array.sum()
+                    if visits_sum > 0:
+                        for idx, m in enumerate(moves):
+                            policy[move_to_index(m)] = visits_array[idx] / visits_sum
+                else:
+                    # temperature == 1.0: simple proportional
+                    for m, count in visit_counts.items():
+                        policy[move_to_index(m)] = count / total_visits
             policies.append(policy)
 
-            # Apply move
+            # Apply move to advance state (this updates current_player correctly)
             state.apply_move(move)
 
-        # Calculate values for each position
+        # Calculate values for each position using ACTUAL player
         for i in range(len(states)):
-            player_to_move = i % 2
+            player_to_move = players[i]  # Use tracked player, NOT i % 2
 
             # Value from perspective of player to move
             if game.result == 0:
                 value = 0.0
             elif player_to_move == 0:
+                # Player 0 was to move; game.result is +1 if P0 won, -1 if P1 won
                 value = game.result
             else:
+                # Player 1 was to move; flip the result
                 value = -game.result
 
             all_states.append(states[i])
             all_policies.append(policies[i])
             all_values.append(value)
+            all_legal_masks.append(legal_masks[i])
 
     return (
         np.stack(all_states),
         np.stack(all_policies),
         np.array(all_values, dtype=np.float32),
+        np.stack(all_legal_masks),
     )
 
 
@@ -172,7 +213,7 @@ class DistributedTrainer:
         Returns training metrics.
         """
         print(f"[Trainer] Converting {len(games)} games to training data...")
-        states, policies, values = games_to_training_data(games)
+        states, policies, values, legal_masks = games_to_training_data(games)
         print(f"[Trainer] Training examples: {len(states)}")
 
         # Create trainer
@@ -184,8 +225,8 @@ class DistributedTrainer:
         )
         trainer = Trainer(self.network, config)
 
-        # Train
-        history = trainer.train(states, policies, values, verbose=True)
+        # Train with legal masks for proper illegal move penalty
+        history = trainer.train(states, policies, values, legal_masks=legal_masks, verbose=True)
 
         # Get final metrics
         final = history[-1] if history else {}
