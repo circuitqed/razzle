@@ -55,6 +55,7 @@ output_shaped/
 *.pt
 *.pth
 *.onnx
+games.db
 
 # OS
 .DS_Store
