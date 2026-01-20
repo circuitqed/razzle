@@ -12,8 +12,23 @@ import ReplayViewer from './components/ReplayViewer';
 import AnalysisBoard from './components/AnalysisBoard';
 import { useGame } from './hooks/useGame';
 import { setSoundEnabled, isSoundEnabled } from './utils/sounds';
-import { healthCheck } from './api/engine';
+import { healthCheck, listModels, type ModelInfo } from './api/engine';
 import { AuthProvider } from './contexts/AuthContext';
+
+// Simulation options (powers of 2)
+const SIMULATION_OPTIONS = [
+  { value: 64, label: '64' },
+  { value: 128, label: '128' },
+  { value: 256, label: '256' },
+  { value: 512, label: '512' },
+  { value: 1024, label: '1K' },
+  { value: 2048, label: '2K' },
+  { value: 4096, label: '4K' },
+  { value: 8192, label: '8K' },
+  { value: 16384, label: '16K' },
+  { value: 32768, label: '32K' },
+  { value: 65536, label: '64K' },
+];
 
 type GameMode = 'ai' | 'pvp';
 
@@ -25,6 +40,11 @@ function AppContent() {
   const [showRules, setShowRules] = useState(false);
   const [showTraining, setShowTraining] = useState(false);
   const [currentModel, setCurrentModel] = useState<string | null>(null);
+
+  // AI settings
+  const [availableModels, setAvailableModels] = useState<ModelInfo[]>([]);
+  const [selectedModel, setSelectedModel] = useState<string | undefined>(undefined); // undefined = latest
+  const [selectedSimulations, setSelectedSimulations] = useState(800);
 
   // Auth modals
   const [showLoginModal, setShowLoginModal] = useState(false);
@@ -58,19 +78,32 @@ function AppContent() {
     handleDragMove,
     endTurn,
     undoMove,
-  } = useGame({ vsAI: gameMode === 'ai', aiSimulations: 800 });
+  } = useGame({ vsAI: gameMode === 'ai', aiSimulations: selectedSimulations, aiModel: selectedModel });
 
-  // Fetch model info from server
+  // Fetch model info and available models from server
   const fetchModelInfo = async () => {
     try {
-      const health = await healthCheck();
-      if (health.model) {
-        // Extract just the filename from the path
-        const modelName = health.model.split('/').pop() || health.model;
+      // Fetch available models
+      const modelsResponse = await listModels();
+      setAvailableModels(modelsResponse.models);
+
+      // Set current model display name
+      if (modelsResponse.current) {
+        const modelName = modelsResponse.current.split('/').pop() || modelsResponse.current;
         setCurrentModel(modelName);
       }
     } catch (e) {
       console.error('Failed to fetch model info:', e);
+      // Fallback to health check
+      try {
+        const health = await healthCheck();
+        if (health.model) {
+          const modelName = health.model.split('/').pop() || health.model;
+          setCurrentModel(modelName);
+        }
+      } catch {
+        // ignore
+      }
     }
   };
 
@@ -231,6 +264,41 @@ function AppContent() {
         </button>
       </div>
 
+      {/* AI settings */}
+      {gameMode === 'ai' && (
+        <div className="mb-4 flex flex-wrap gap-4 items-end justify-center">
+          <div>
+            <label className="block text-xs text-gray-400 mb-1">Model</label>
+            <select
+              value={selectedModel || ''}
+              onChange={(e) => setSelectedModel(e.target.value || undefined)}
+              className="px-3 py-1.5 bg-gray-700 text-white rounded border border-gray-600 text-sm min-w-[140px]"
+            >
+              <option value="">Latest</option>
+              {availableModels.map((model) => (
+                <option key={model.path} value={model.path}>
+                  {model.name}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="block text-xs text-gray-400 mb-1">Simulations</label>
+            <select
+              value={selectedSimulations}
+              onChange={(e) => setSelectedSimulations(Number(e.target.value))}
+              className="px-3 py-1.5 bg-gray-700 text-white rounded border border-gray-600 text-sm"
+            >
+              {SIMULATION_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+      )}
+
       {/* PvP options */}
       {gameMode === 'pvp' && (
         <div className="mb-4">
@@ -376,8 +444,10 @@ function AppContent() {
           {/* Game info */}
           <div className="mt-4 text-sm text-gray-400 text-center">
             <span>Ply: {gameState.ply}</span>
-            {currentModel && gameMode === 'ai' && (
-              <span className="ml-4 text-gray-500">Model: {currentModel}</span>
+            {gameMode === 'ai' && (
+              <span className="ml-4 text-gray-500">
+                {selectedModel ? selectedModel.split('/').pop() : (currentModel || 'Latest')} @ {selectedSimulations} sims
+              </span>
             )}
           </div>
         </>

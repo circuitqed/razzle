@@ -55,12 +55,24 @@ export async function makeMove(gameId: string, move: number): Promise<GameState>
 // Get AI move
 export async function getAIMove(
   gameId: string,
-  options?: { simulations?: number; temperature?: number }
+  options?: { simulations?: number; temperature?: number; model?: string }
 ): Promise<AIMoveResponse> {
   return request(`/games/${gameId}/ai`, {
     method: 'POST',
     body: JSON.stringify(options || {}),
   });
+}
+
+// Model info
+export interface ModelInfo {
+  name: string;
+  path: string;
+  mtime: number;
+}
+
+// List available models
+export async function listModels(): Promise<{ models: ModelInfo[]; current: string }> {
+  return request('/models');
 }
 
 // Get legal moves with details

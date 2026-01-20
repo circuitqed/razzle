@@ -92,6 +92,7 @@ class AIMoveRequest(BaseModel):
     simulations: int = 800
     temperature: float = 0.0
     bot_type: Optional[str] = Field(default=None, description="AI bot type: 'neural', 'mcts', or 'random'. If None, uses game's default.")
+    model: Optional[str] = Field(default=None, description="Model to use: 'random_weights' or path to model file. If None, uses latest model.")
 
 
 class TopMove(BaseModel):
@@ -456,6 +457,53 @@ def get_model_info() -> str:
     return _model_path_used
 
 
+# Cache for per-model evaluators
+_model_evaluators: dict[str, BatchedEvaluator] = {}
+
+
+def get_evaluator_for_model(model_path: Optional[str]) -> BatchedEvaluator:
+    """Get an evaluator for a specific model.
+
+    Args:
+        model_path: Path to model file, 'random_weights', or None for default (latest).
+
+    Returns:
+        BatchedEvaluator for the specified model.
+    """
+    global _model_evaluators
+
+    # None means use the default (latest) model
+    if model_path is None:
+        return get_evaluator()
+
+    # Check cache
+    if model_path in _model_evaluators:
+        return _model_evaluators[model_path]
+
+    # Load the specified model
+    if model_path == "random_weights":
+        logging.info("Using random weights model")
+        net = RazzleNet()
+    else:
+        path = Path(model_path)
+        if not path.exists():
+            logging.warning(f"Model not found: {model_path}, using random weights")
+            net = RazzleNet()
+        else:
+            net = load_model(path)
+            if net is None:
+                logging.warning(f"Failed to load model: {model_path}, using random weights")
+                net = RazzleNet()
+
+    try:
+        ev = BatchedEvaluator(net, device='cpu')
+        _model_evaluators[model_path] = ev
+        return ev
+    except Exception as e:
+        logging.error(f"Failed to create evaluator for {model_path}: {e}")
+        return DummyEvaluator()
+
+
 # --- App Setup ---
 
 @asynccontextmanager
@@ -635,6 +683,53 @@ async def get_me(user: dict = Depends(require_auth)):
 async def health_check():
     """Health check endpoint."""
     return HealthResponse(status="ok", version="0.1.0", model=get_model_info())
+
+
+class ModelInfo(BaseModel):
+    """Information about an available model."""
+    name: str  # Display name (filename)
+    path: str  # Full path for selection
+    mtime: float  # Modification time for sorting
+
+
+class ModelsResponse(BaseModel):
+    """Response for listing available models."""
+    models: list[ModelInfo]
+    current: str  # Currently loaded model
+
+
+@app.get("/models", response_model=ModelsResponse)
+async def list_models():
+    """List all available models."""
+    models = []
+    seen_paths = set()
+
+    for search_dir in MODEL_SEARCH_DIRS:
+        if not search_dir.exists():
+            continue
+        for pattern in ["iter_*.pt", "model_iter_*.pt", "trained_model.pt"]:
+            for model_path in search_dir.glob(pattern):
+                try:
+                    path_str = str(model_path.resolve())
+                    if path_str in seen_paths:
+                        continue
+                    seen_paths.add(path_str)
+                    mtime = model_path.stat().st_mtime
+                    models.append(ModelInfo(
+                        name=model_path.name,
+                        path=path_str,
+                        mtime=mtime
+                    ))
+                except OSError:
+                    continue
+
+    # Sort by modification time (newest first)
+    models.sort(key=lambda m: m.mtime, reverse=True)
+
+    # Add "random_weights" as a special option at the beginning
+    models.insert(0, ModelInfo(name="random_weights", path="random_weights", mtime=0))
+
+    return ModelsResponse(models=models, current=get_model_info())
 
 
 # Training output directories to check
@@ -1120,7 +1215,7 @@ async def get_ai_move(
             # Pure MCTS with uniform priors over legal moves
             ev = DummyEvaluator()
         else:  # "neural"
-            ev = get_evaluator()
+            ev = get_evaluator_for_model(request.model)
 
         config = MCTSConfig(
             num_simulations=request.simulations,

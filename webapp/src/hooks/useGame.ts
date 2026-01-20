@@ -8,6 +8,7 @@ import { playMoveSound, playPassSound, playEndTurnSound, playWinSound, playLoseS
 interface UseGameOptions {
   vsAI?: boolean;
   aiSimulations?: number;
+  aiModel?: string;  // Model path or 'random_weights'
 }
 
 interface MoveRecord {
@@ -41,7 +42,7 @@ interface UseGameReturn {
 const END_TURN_MOVE = -1;
 
 export function useGame(options: UseGameOptions = {}): UseGameReturn {
-  const { vsAI = true, aiSimulations = 800 } = options;
+  const { vsAI = true, aiSimulations = 800, aiModel } = options;
 
   const [gameState, setGameState] = useState<GameState | null>(null);
   const [selectedSquare, setSelectedSquare] = useState<number | null>(null);
@@ -173,7 +174,7 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
 
         logger.info('[useGame] AI making move...', { moveNumber: aiMoveCount });
         const prevPlayer = currentState.current_player;
-        const aiResponse = await api.getAIMove(gameId, { simulations: aiSimulations });
+        const aiResponse = await api.getAIMove(gameId, { simulations: aiSimulations, model: aiModel });
 
         // Use the state from the AI response instead of fetching again
         currentState = aiResponse.game_state;
@@ -197,7 +198,7 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
     } finally {
       setAiThinking(false);
     }
-  }, [aiSimulations, recordMove]);
+  }, [aiSimulations, aiModel, recordMove]);
 
   // End turn explicitly (after passing)
   const endTurn = useCallback(async () => {
