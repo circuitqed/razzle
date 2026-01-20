@@ -4,13 +4,20 @@ import MoveHistory from './components/MoveHistory';
 import ConfirmDialog from './components/ConfirmDialog';
 import RulesModal from './components/RulesModal';
 import TrainingDashboard from './components/TrainingDashboard';
+import LoginModal from './components/LoginModal';
+import RegisterModal from './components/RegisterModal';
+import UserMenu from './components/UserMenu';
+import GameBrowser from './components/GameBrowser';
+import ReplayViewer from './components/ReplayViewer';
+import AnalysisBoard from './components/AnalysisBoard';
 import { useGame } from './hooks/useGame';
 import { setSoundEnabled, isSoundEnabled } from './utils/sounds';
 import { healthCheck } from './api/engine';
+import { AuthProvider } from './contexts/AuthContext';
 
 type GameMode = 'ai' | 'pvp';
 
-export default function App() {
+function AppContent() {
   const [gameMode, setGameMode] = useState<GameMode>('ai');
   const [flipBoard, setFlipBoard] = useState(false);
   const [soundOn, setSoundOn] = useState(isSoundEnabled());
@@ -18,6 +25,17 @@ export default function App() {
   const [showRules, setShowRules] = useState(false);
   const [showTraining, setShowTraining] = useState(false);
   const [currentModel, setCurrentModel] = useState<string | null>(null);
+
+  // Auth modals
+  const [showLoginModal, setShowLoginModal] = useState(false);
+  const [showRegisterModal, setShowRegisterModal] = useState(false);
+
+  // Game browser and replay
+  const [showGameBrowser, setShowGameBrowser] = useState(false);
+  const [replayGameId, setReplayGameId] = useState<string | null>(null);
+
+  // Analysis board
+  const [showAnalysisBoard, setShowAnalysisBoard] = useState(false);
 
   const toggleSound = () => {
     const newValue = !soundOn;
@@ -146,8 +164,10 @@ export default function App() {
           toggleSound();
           break;
         case 'escape':
-          // Deselect is handled in the hook but we don't expose it directly
-          // We can click on empty space or use handleSquareClick with current selection
+          // Close any open modals
+          setShowGameBrowser(false);
+          setReplayGameId(null);
+          setShowAnalysisBoard(false);
           break;
         case '?':
         case '/':
@@ -156,6 +176,12 @@ export default function App() {
         case 't':
           setShowTraining((prev) => !prev);
           break;
+        case 'b':
+          setShowGameBrowser((prev) => !prev);
+          break;
+        case 'a':
+          setShowAnalysisBoard((prev) => !prev);
+          break;
       }
     };
 
@@ -163,8 +189,22 @@ export default function App() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [gameState, isLoading, aiThinking, canEndTurn, showNewGameConfirm, showRules, handleNewGame, undoMove, endTurn, toggleSound]);
 
+  const handleSelectGameForReplay = (gameId: string) => {
+    setShowGameBrowser(false);
+    setReplayGameId(gameId);
+  };
+
   return (
     <div className="min-h-screen bg-gray-900 text-white flex flex-col items-center justify-center p-2 sm:p-4">
+      {/* Header with user menu */}
+      <div className="absolute top-4 right-4">
+        <UserMenu
+          onOpenLogin={() => setShowLoginModal(true)}
+          onOpenRegister={() => setShowRegisterModal(true)}
+          onOpenBrowser={() => setShowGameBrowser(true)}
+        />
+      </div>
+
       <h1 className="text-2xl sm:text-3xl font-bold mb-3 sm:mb-4">Razzle Dazzle</h1>
 
       {/* Game mode selector */}
@@ -306,6 +346,20 @@ export default function App() {
             >
               📊
             </button>
+            <button
+              onClick={() => setShowGameBrowser(true)}
+              className="px-4 py-2 bg-gray-600 hover:bg-gray-700 rounded font-medium transition-colors"
+              title="Game History (B)"
+            >
+              📜
+            </button>
+            <button
+              onClick={() => setShowAnalysisBoard(true)}
+              className="px-4 py-2 bg-orange-600 hover:bg-orange-700 rounded font-medium transition-colors"
+              title="Analysis Board (A)"
+            >
+              🔬
+            </button>
           </div>
 
           {/* Game info */}
@@ -324,7 +378,7 @@ export default function App() {
         <p className="mt-1">After passing, click "End Turn" to finish your turn.</p>
         <p className="mt-1">Blue aims for the top, Red aims for the bottom.</p>
         <p className="mt-2 text-xs hidden sm:block">
-          Shortcuts: N=New Game, U=Undo, E=End Turn, M=Mute
+          Shortcuts: N=New Game, U=Undo, E=End Turn, M=Mute, B=Browse, A=Analysis
         </p>
       </div>
 
@@ -346,6 +400,53 @@ export default function App() {
       {showTraining && (
         <TrainingDashboard onClose={() => setShowTraining(false)} refreshInterval={10000} />
       )}
+
+      {/* Auth Modals */}
+      <LoginModal
+        isOpen={showLoginModal}
+        onClose={() => setShowLoginModal(false)}
+        onSwitchToRegister={() => {
+          setShowLoginModal(false);
+          setShowRegisterModal(true);
+        }}
+      />
+      <RegisterModal
+        isOpen={showRegisterModal}
+        onClose={() => setShowRegisterModal(false)}
+        onSwitchToLogin={() => {
+          setShowRegisterModal(false);
+          setShowLoginModal(true);
+        }}
+      />
+
+      {/* Game Browser */}
+      <GameBrowser
+        isOpen={showGameBrowser}
+        onClose={() => setShowGameBrowser(false)}
+        onSelectGame={handleSelectGameForReplay}
+      />
+
+      {/* Replay Viewer */}
+      {replayGameId && (
+        <ReplayViewer
+          gameId={replayGameId}
+          onClose={() => setReplayGameId(null)}
+        />
+      )}
+
+      {/* Analysis Board */}
+      <AnalysisBoard
+        isOpen={showAnalysisBoard}
+        onClose={() => setShowAnalysisBoard(false)}
+      />
     </div>
+  );
+}
+
+export default function App() {
+  return (
+    <AuthProvider>
+      <AppContent />
+    </AuthProvider>
   );
 }

@@ -50,10 +50,15 @@ class CreateGameResponse(BaseModel):
 
 
 class BoardState(BaseModel):
-    p1_pieces: int
-    p1_ball: int
-    p2_pieces: int
-    p2_ball: int
+    """Board state with bitboards as strings to preserve precision in JavaScript.
+
+    JavaScript's Number type loses precision for integers > 2^53.
+    Board uses 56 squares (8x7), so bitboards can exceed this limit.
+    """
+    p1_pieces: str  # Bitboard as string
+    p1_ball: str
+    p2_pieces: str
+    p2_ball: str
 
 
 class GameStateResponse(BaseModel):
@@ -64,7 +69,7 @@ class GameStateResponse(BaseModel):
     status: str
     winner: Optional[int]
     ply: int
-    touched_mask: int  # Bitboard of ineligible receivers
+    touched_mask: str  # Bitboard of ineligible receivers (string for JS precision)
     has_passed: bool  # Whether a pass has been made this turn
 
 
@@ -304,17 +309,17 @@ class Game:
         return GameStateResponse(
             game_id=self.game_id,
             board=BoardState(
-                p1_pieces=self.state.pieces[0],
-                p1_ball=self.state.balls[0],
-                p2_pieces=self.state.pieces[1],
-                p2_ball=self.state.balls[1]
+                p1_pieces=str(self.state.pieces[0]),
+                p1_ball=str(self.state.balls[0]),
+                p2_pieces=str(self.state.pieces[1]),
+                p2_ball=str(self.state.balls[1])
             ),
             current_player=self.state.current_player,
             legal_moves=get_legal_moves(self.state),
             status=status,
             winner=self.state.get_winner(),
             ply=self.state.ply,
-            touched_mask=self.state.touched_mask,
+            touched_mask=str(self.state.touched_mask),
             has_passed=self.state.has_passed
         )
 
@@ -329,6 +334,8 @@ _model_mtime: float = 0  # Track model file modification time
 
 # Directories to search for models (in priority order)
 MODEL_SEARCH_DIRS = [
+    Path("output/models"),  # New training pipeline models
+    Path("/app/output/models"),  # Docker container path
     Path("/home/projects/razzle/engine/output/new_rules_500"),
     Path("output/new_rules_500"),
     Path("/home/projects/razzle/engine/output/output"),
@@ -349,8 +356,8 @@ def find_latest_model() -> Optional[tuple[Path, float]]:
     for search_dir in MODEL_SEARCH_DIRS:
         if not search_dir.exists():
             continue
-        # Look for model files (model_iter_*.pt or trained_model.pt)
-        for pattern in ["model_iter_*.pt", "trained_model.pt"]:
+        # Look for model files (iter_*.pt, model_iter_*.pt, or trained_model.pt)
+        for pattern in ["iter_*.pt", "model_iter_*.pt", "trained_model.pt"]:
             for model_path in search_dir.glob(pattern):
                 try:
                     mtime = model_path.stat().st_mtime
@@ -996,7 +1003,12 @@ async def get_game(game_id: str):
 
 
 @app.post("/games/{game_id}/move", response_model=GameStateResponse)
-async def make_move(game_id: str, request: MakeMoveRequest):
+async def make_move(
+    game_id: str,
+    request: MakeMoveRequest,
+    auth_request: Request = None,
+    auth_cookie: Optional[str] = Cookie(None, alias=AUTH_COOKIE_NAME)
+):
     """Make a move in the game."""
     if game_id not in games:
         raise HTTPException(status_code=404, detail="Game not found")
@@ -1009,6 +1021,11 @@ async def make_move(game_id: str, request: MakeMoveRequest):
     legal_moves = get_legal_moves(game.state)
     if request.move not in legal_moves:
         raise HTTPException(status_code=400, detail="Invalid move")
+
+    # Associate user with game if logged in (for users who log in mid-game)
+    user = await get_current_user(auth_request, auth_cookie) if auth_request else None
+    if user:
+        persistence.associate_user_with_game(game_id, user["user_id"])
 
     game.state.apply_move(request.move)
 
@@ -1024,7 +1041,12 @@ async def make_move(game_id: str, request: MakeMoveRequest):
 
 
 @app.post("/games/{game_id}/ai", response_model=AIMoveResponse)
-async def get_ai_move(game_id: str, request: AIMoveRequest = None):
+async def get_ai_move(
+    game_id: str,
+    request: AIMoveRequest = None,
+    auth_request: Request = None,
+    auth_cookie: Optional[str] = Cookie(None, alias=AUTH_COOKIE_NAME)
+):
     """Get AI to calculate and play a move."""
     if request is None:
         request = AIMoveRequest()
@@ -1033,6 +1055,11 @@ async def get_ai_move(game_id: str, request: AIMoveRequest = None):
         raise HTTPException(status_code=404, detail="Game not found")
 
     game = games[game_id]
+
+    # Associate user with game if logged in (for users who log in mid-game)
+    user = await get_current_user(auth_request, auth_cookie) if auth_request else None
+    if user:
+        persistence.associate_user_with_game(game_id, user["user_id"])
 
     if game.state.is_terminal():
         raise HTTPException(status_code=409, detail="Game already finished")
@@ -1244,10 +1271,10 @@ async def get_game_full(game_id: str):
 # --- Analysis Endpoints ---
 
 class AnalyzePositionRequest(BaseModel):
-    pieces: list[int]  # [p1_pieces, p2_pieces]
-    balls: list[int]   # [p1_ball, p2_ball]
+    pieces: list[str]  # [p1_pieces, p2_pieces] as strings for JS precision
+    balls: list[str]   # [p1_ball, p2_ball] as strings for JS precision
     current_player: int
-    touched_mask: int = 0
+    touched_mask: str = "0"  # String for JS precision
     has_passed: bool = False
     last_knight_dst: int = -1
     simulations: int = 200
@@ -1305,12 +1332,12 @@ async def analyze_position(request: AnalyzePositionRequest):
     """Analyze a single position without making a move."""
     start_time = time.time()
 
-    # Reconstruct game state
+    # Reconstruct game state (convert strings to ints for internal use)
     state = GameState(
-        pieces=request.pieces,
-        balls=request.balls,
+        pieces=[int(p) for p in request.pieces],
+        balls=[int(b) for b in request.balls],
         current_player=request.current_player,
-        touched_mask=request.touched_mask,
+        touched_mask=int(request.touched_mask),
         has_passed=request.has_passed,
         last_knight_dst=request.last_knight_dst,
         ply=0,

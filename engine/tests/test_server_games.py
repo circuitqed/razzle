@@ -165,11 +165,12 @@ class TestAnalyzePosition:
         """Test analyzing the starting position."""
         state = GameState.new_game()
 
+        # Use strings for bitboards to preserve precision in JavaScript
         response = client.post('/analyze', json={
-            'pieces': list(state.pieces),
-            'balls': list(state.balls),
+            'pieces': [str(p) for p in state.pieces],
+            'balls': [str(b) for b in state.balls],
             'current_player': state.current_player,
-            'touched_mask': state.touched_mask,
+            'touched_mask': str(state.touched_mask),
             'has_passed': state.has_passed,
             'simulations': 50  # Low for fast testing
         })
@@ -187,8 +188,8 @@ class TestAnalyzePosition:
         state = GameState.new_game()
 
         response = client.post('/analyze', json={
-            'pieces': list(state.pieces),
-            'balls': list(state.balls),
+            'pieces': [str(p) for p in state.pieces],
+            'balls': [str(b) for b in state.balls],
             'current_player': 0,
             'simulations': 10
         })

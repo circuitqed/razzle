@@ -5,17 +5,17 @@ import type { GameState, AIMoveResponse } from '../types'
 export const mockInitialGameState: GameState = {
   game_id: 'test-game-123',
   board: {
-    p1_pieces: 62,        // Initial P1 pieces
-    p1_ball: 8,           // Ball on d1
-    p2_pieces: 4432676798464,  // Initial P2 pieces
-    p2_ball: 562949953421312,  // Ball on d8
+    p1_pieces: '62',        // Initial P1 pieces
+    p1_ball: '8',           // Ball on d1
+    p2_pieces: '4432676798464',  // Initial P2 pieces
+    p2_ball: '562949953421312',  // Ball on d8
   },
   current_player: 0,
   legal_moves: [184, 185, 240, 241, 296, 297],  // Sample legal moves
   status: 'playing',
   winner: null,
   ply: 0,
-  touched_mask: 0,
+  touched_mask: '0',
   has_passed: false,
 }
 

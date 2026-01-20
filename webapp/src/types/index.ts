@@ -1,9 +1,11 @@
-// Board state using bitboards
+// Board state using bitboards (strings to preserve precision for JS)
+// JavaScript's Number loses precision for integers > 2^53
+// Our 56-square board can have bitboards exceeding this limit
 export interface BoardState {
-  p1_pieces: number;
-  p1_ball: number;
-  p2_pieces: number;
-  p2_ball: number;
+  p1_pieces: string;
+  p1_ball: string;
+  p2_pieces: string;
+  p2_ball: string;
 }
 
 // Game status
@@ -23,7 +25,7 @@ export interface GameState {
   ply: number;
   // Bitboard of pieces that are ineligible to receive passes
   // A piece becomes ineligible when it passes or receives the ball
-  touched_mask: number;
+  touched_mask: string;  // String to preserve precision for JS
   // Whether the current player has passed this turn (can only pass more or end turn)
   has_passed: boolean;
 }
@@ -108,15 +110,16 @@ export function coordsToSquare(row: number, col: number): number {
 }
 
 // Check if a bit is set in a bitboard
-export function hasPiece(bitboard: number, square: number): boolean {
+export function hasPiece(bitboard: string | number, square: number): boolean {
   // JavaScript bitwise ops work on 32-bit ints, need BigInt for 64-bit
+  // Bitboard can be string (from API) or number (for backwards compat)
   const bb = BigInt(bitboard);
   const mask = BigInt(1) << BigInt(square);
   return (bb & mask) !== BigInt(0);
 }
 
 // Get all piece positions from a bitboard
-export function getPiecePositions(bitboard: number): number[] {
+export function getPiecePositions(bitboard: string | number): number[] {
   const positions: number[] = [];
   const bb = BigInt(bitboard);
   for (let i = 0; i < TOTAL_SQUARES; i++) {

@@ -19,9 +19,10 @@ interface BoardProps {
   legalMoves: number[];
   selectedSquare: number | null;
   onSquareClick: (square: number) => void;
+  onSquareDoubleClick?: (square: number) => void;
   onDragMove?: (from: number, to: number) => void;
   flipped?: boolean;
-  touchedMask: number; // Bitboard of ineligible pieces
+  touchedMask: string | number; // Bitboard of ineligible pieces (string for JS precision)
   mustPass?: boolean; // Forced pass situation
   lastMove?: LastMove | null; // Last move for highlighting
 }
@@ -57,6 +58,7 @@ export default function Board({
   legalMoves,
   selectedSquare,
   onSquareClick,
+  onSquareDoubleClick,
   onDragMove,
   flipped = false,
   touchedMask,
@@ -302,7 +304,11 @@ export default function Board({
     }
 
     return (
-      <g key={square} onClick={() => onSquareClick(square)}>
+      <g
+        key={square}
+        onClick={() => onSquareClick(square)}
+        onDoubleClick={() => onSquareDoubleClick?.(square)}
+      >
         {/* Square background */}
         <rect
           x={x}

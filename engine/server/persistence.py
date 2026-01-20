@@ -228,6 +228,40 @@ def append_move(game_id: str, move: int, db_path: Path = None) -> None:
         conn.commit()
 
 
+def associate_user_with_game(game_id: str, user_id: str, db_path: Path = None) -> bool:
+    """
+    Associate a user with a game if not already associated.
+
+    This allows users who log in after starting a game to still have
+    the game counted as theirs.
+
+    Returns True if the association was made, False if already associated.
+    """
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+
+    with get_connection(db_path) as conn:
+        # Check if game already has a player1_user_id
+        row = conn.execute(
+            "SELECT player1_user_id FROM games WHERE game_id = ?",
+            (game_id,)
+        ).fetchone()
+
+        if row is None:
+            return False
+
+        # Only update if not already set
+        if row["player1_user_id"] is None:
+            conn.execute(
+                "UPDATE games SET player1_user_id = ? WHERE game_id = ?",
+                (user_id, game_id)
+            )
+            conn.commit()
+            return True
+
+        return False
+
+
 def pop_move(game_id: str, db_path: Path = None) -> Optional[int]:
     """Remove and return the last move from a game's history (for undo)."""
     if db_path is None:
