@@ -287,8 +287,8 @@ function AppContent() {
             </div>
           </div>
 
-          {/* Game status */}
-          <div className="mt-4 text-center">
+          {/* Game status - fixed height to prevent layout shift */}
+          <div className="mt-4 text-center h-8 flex items-center justify-center">
             {gameState.status === 'finished' && gameState.winner !== null && (
               <div className="text-2xl font-bold text-yellow-400">
                 {getWinnerText()}
