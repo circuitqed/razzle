@@ -7,14 +7,17 @@ Provides REST and WebSocket APIs for game management and AI play.
 from __future__ import annotations
 import asyncio
 import logging
+import os
+import secrets
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+import jwt
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Request, Response, Depends, Cookie
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -112,6 +115,40 @@ class HealthResponse(BaseModel):
     status: str
     version: str
     model: Optional[str] = None
+
+
+# --- Auth Models ---
+
+class RegisterRequest(BaseModel):
+    username: str = Field(..., min_length=3, max_length=32, pattern=r'^[a-zA-Z0-9_]+$')
+    password: str = Field(..., min_length=6, max_length=128)
+    display_name: Optional[str] = Field(None, max_length=64)
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+class UserResponse(BaseModel):
+    user_id: str
+    username: str
+    display_name: Optional[str]
+    created_at: str
+    last_login_at: Optional[str] = None
+
+
+class AuthResponse(BaseModel):
+    user: UserResponse
+    message: str
+
+
+# --- JWT Configuration ---
+
+JWT_SECRET = os.environ.get("JWT_SECRET", secrets.token_hex(32))
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRY_HOURS = 24
+AUTH_COOKIE_NAME = "razzle_auth"
 
 
 class TrainingIterationData(BaseModel):
@@ -372,6 +409,129 @@ app.add_middleware(
 )
 
 
+# --- Auth Utilities ---
+
+def create_jwt_token(user_id: str) -> str:
+    """Create a JWT token for a user."""
+    payload = {
+        "sub": user_id,
+        "exp": datetime.utcnow() + timedelta(hours=JWT_EXPIRY_HOURS),
+        "iat": datetime.utcnow(),
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
+def decode_jwt_token(token: str) -> Optional[str]:
+    """Decode a JWT token and return the user_id, or None if invalid."""
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        return payload.get("sub")
+    except jwt.ExpiredSignatureError:
+        return None
+    except jwt.InvalidTokenError:
+        return None
+
+
+async def get_current_user(
+    request: Request,
+    auth_cookie: Optional[str] = Cookie(None, alias=AUTH_COOKIE_NAME)
+) -> Optional[dict]:
+    """Get the current user from the auth cookie, or None if not authenticated."""
+    token = auth_cookie
+    if not token:
+        return None
+
+    user_id = decode_jwt_token(token)
+    if not user_id:
+        return None
+
+    user = persistence.get_user_by_id(user_id)
+    return user
+
+
+async def require_auth(
+    request: Request,
+    auth_cookie: Optional[str] = Cookie(None, alias=AUTH_COOKIE_NAME)
+) -> dict:
+    """Require authentication, raise 401 if not authenticated."""
+    user = await get_current_user(request, auth_cookie)
+    if not user:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    return user
+
+
+# --- Auth Endpoints ---
+
+@app.post("/auth/register", response_model=AuthResponse)
+async def register(request: RegisterRequest, response: Response):
+    """Register a new user account."""
+    user = persistence.create_user(
+        username=request.username,
+        password=request.password,
+        display_name=request.display_name,
+    )
+
+    if not user:
+        raise HTTPException(status_code=409, detail="Username already exists")
+
+    # Create token and set cookie
+    token = create_jwt_token(user["user_id"])
+    response.set_cookie(
+        key=AUTH_COOKIE_NAME,
+        value=token,
+        httponly=True,
+        secure=False,  # Set to True in production with HTTPS
+        samesite="lax",
+        max_age=JWT_EXPIRY_HOURS * 3600,
+    )
+
+    return AuthResponse(
+        user=UserResponse(**user),
+        message="Account created successfully"
+    )
+
+
+@app.post("/auth/login", response_model=AuthResponse)
+async def login(request: LoginRequest, response: Response):
+    """Login with username and password."""
+    user = persistence.authenticate_user(
+        username=request.username,
+        password=request.password,
+    )
+
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+
+    # Create token and set cookie
+    token = create_jwt_token(user["user_id"])
+    response.set_cookie(
+        key=AUTH_COOKIE_NAME,
+        value=token,
+        httponly=True,
+        secure=False,  # Set to True in production with HTTPS
+        samesite="lax",
+        max_age=JWT_EXPIRY_HOURS * 3600,
+    )
+
+    return AuthResponse(
+        user=UserResponse(**user),
+        message="Login successful"
+    )
+
+
+@app.post("/auth/logout")
+async def logout(response: Response):
+    """Logout by clearing the auth cookie."""
+    response.delete_cookie(key=AUTH_COOKIE_NAME)
+    return {"message": "Logged out successfully"}
+
+
+@app.get("/auth/me", response_model=UserResponse)
+async def get_me(user: dict = Depends(require_auth)):
+    """Get the current authenticated user."""
+    return UserResponse(**user)
+
+
 # --- REST Endpoints ---
 
 @app.get("/health", response_model=HealthResponse)
@@ -512,13 +672,21 @@ async def receive_logs(request: LogRequest):
 
 
 @app.post("/games", response_model=CreateGameResponse)
-async def create_game(request: CreateGameRequest = None):
+async def create_game(
+    request: CreateGameRequest = None,
+    auth_request: Request = None,
+    auth_cookie: Optional[str] = Cookie(None, alias=AUTH_COOKIE_NAME)
+):
     """Create a new game."""
     if request is None:
         request = CreateGameRequest()
 
     # Check for newer model on game creation
     get_evaluator(check_for_updates=True)
+
+    # Get current user if authenticated
+    user = await get_current_user(auth_request, auth_cookie) if auth_request else None
+    player1_user_id = user["user_id"] if user else None
 
     game_id = str(uuid.uuid4())[:8]
     game = Game(
@@ -529,13 +697,18 @@ async def create_game(request: CreateGameRequest = None):
     )
     games[game_id] = game
 
+    # Get current model version
+    model_version = get_model_info()
+
     # Persist to database
     persistence.save_game(
         game_id=game_id,
         state=game.state,
         player1_type=request.player1_type,
         player2_type=request.player2_type,
-        ai_simulations=request.ai_simulations
+        ai_simulations=request.ai_simulations,
+        player1_user_id=player1_user_id,
+        ai_model_version=model_version if request.player2_type == "ai" else None,
     )
 
     return CreateGameResponse(game_id=game_id)
@@ -698,6 +871,296 @@ async def undo_move(game_id: str):
     await broadcast_state(game, response)
 
     return response
+
+
+# --- Game Browser Endpoints ---
+
+class GameSummary(BaseModel):
+    game_id: str
+    player1_type: str
+    player2_type: str
+    player1_user_id: Optional[str]
+    player2_user_id: Optional[str]
+    player1_username: Optional[str]
+    player2_username: Optional[str]
+    status: str
+    winner: Optional[int]
+    move_count: int
+    ply: int
+    created_at: str
+    updated_at: str
+    ai_model_version: Optional[str]
+
+
+class GameListResponse(BaseModel):
+    games: list[GameSummary]
+    total: int
+    page: int
+    per_page: int
+    total_pages: int
+
+
+class GameFullResponse(BaseModel):
+    game_id: str
+    player1_type: str
+    player2_type: str
+    player1_user_id: Optional[str]
+    player2_user_id: Optional[str]
+    status: str
+    winner: Optional[int]
+    ply: int
+    moves: list[int]
+    moves_algebraic: list[str]
+    created_at: str
+    updated_at: str
+    ai_model_version: Optional[str]
+
+
+@app.get("/games", response_model=GameListResponse)
+async def list_games(
+    player_id: Optional[str] = None,
+    status: Optional[str] = None,
+    winner: Optional[int] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    page: int = 1,
+    per_page: int = 20,
+):
+    """List games with filtering and pagination."""
+    result = persistence.list_games(
+        player_id=player_id,
+        status=status,
+        winner=winner,
+        date_from=date_from,
+        date_to=date_to,
+        page=page,
+        per_page=per_page,
+    )
+    return GameListResponse(
+        games=[GameSummary(**g) for g in result["games"]],
+        total=result["total"],
+        page=result["page"],
+        per_page=result["per_page"],
+        total_pages=result["total_pages"],
+    )
+
+
+@app.get("/games/{game_id}/full", response_model=GameFullResponse)
+async def get_game_full(game_id: str):
+    """Get full game data including all moves for replay."""
+    data = persistence.get_game_full(game_id)
+    if not data:
+        raise HTTPException(status_code=404, detail="Game not found")
+
+    return GameFullResponse(
+        game_id=data["game_id"],
+        player1_type=data["player1_type"],
+        player2_type=data["player2_type"],
+        player1_user_id=data["player1_user_id"],
+        player2_user_id=data["player2_user_id"],
+        status=data["status"],
+        winner=data["winner"],
+        ply=data["ply"],
+        moves=data["moves"],
+        moves_algebraic=data["moves_algebraic"],
+        created_at=data["created_at"],
+        updated_at=data["updated_at"],
+        ai_model_version=data["ai_model_version"],
+    )
+
+
+# --- Analysis Endpoints ---
+
+class AnalyzePositionRequest(BaseModel):
+    pieces: list[int]  # [p1_pieces, p2_pieces]
+    balls: list[int]   # [p1_ball, p2_ball]
+    current_player: int
+    touched_mask: int = 0
+    has_passed: bool = False
+    last_knight_dst: int = -1
+    simulations: int = 200
+
+
+class MoveAnalysis(BaseModel):
+    move: int
+    algebraic: str
+    visits: int
+    value: float
+    policy: float
+
+
+class AnalyzePositionResponse(BaseModel):
+    value: float
+    legal_moves: list[int]
+    top_moves: list[MoveAnalysis]
+    time_ms: int
+
+
+class MoveClassification(BaseModel):
+    move: int
+    algebraic: str
+    value_before: float
+    value_after: float
+    best_move: int
+    best_move_algebraic: str
+    best_value: float
+    delta: float
+    classification: str  # best, good, inaccuracy, mistake, blunder
+
+
+class AnalyzeGameResponse(BaseModel):
+    game_id: str
+    move_analyses: list[MoveClassification]
+    summary: dict  # counts by classification
+
+
+def classify_move(delta: float) -> str:
+    """Classify a move based on the difference from best."""
+    if delta >= -0.02:
+        return "best"
+    elif delta >= -0.08:
+        return "good"
+    elif delta >= -0.15:
+        return "inaccuracy"
+    elif delta >= -0.30:
+        return "mistake"
+    else:
+        return "blunder"
+
+
+@app.post("/analyze", response_model=AnalyzePositionResponse)
+async def analyze_position(request: AnalyzePositionRequest):
+    """Analyze a single position without making a move."""
+    start_time = time.time()
+
+    # Reconstruct game state
+    state = GameState(
+        pieces=request.pieces,
+        balls=request.balls,
+        current_player=request.current_player,
+        touched_mask=request.touched_mask,
+        has_passed=request.has_passed,
+        last_knight_dst=request.last_knight_dst,
+        ply=0,
+        history=[],
+    )
+
+    if state.is_terminal():
+        return AnalyzePositionResponse(
+            value=1.0 if state.get_winner() == state.current_player else -1.0,
+            legal_moves=[],
+            top_moves=[],
+            time_ms=0,
+        )
+
+    # Run MCTS analysis
+    ev = get_evaluator()
+    config = MCTSConfig(
+        num_simulations=request.simulations,
+        temperature=0.0,
+        batch_size=16,
+    )
+    mcts = MCTS(ev, config)
+    root = mcts.search_batched(state, add_noise=False)
+    policy = mcts.get_policy(root)
+
+    elapsed_ms = int((time.time() - start_time) * 1000)
+
+    # Get analysis
+    analysis = mcts.analyze(root, top_k=10)
+    top_moves = [
+        MoveAnalysis(
+            move=m["move"],
+            algebraic=m["algebraic"],
+            visits=m["visits"],
+            value=m["value"],
+            policy=float(policy[m["move"]]) if m["move"] >= 0 else 0.0,
+        )
+        for m in analysis
+    ]
+
+    return AnalyzePositionResponse(
+        value=root.value,
+        legal_moves=get_legal_moves(state),
+        top_moves=top_moves,
+        time_ms=elapsed_ms,
+    )
+
+
+@app.post("/games/{game_id}/analyze", response_model=AnalyzeGameResponse)
+async def analyze_game(game_id: str, simulations_per_position: int = 200):
+    """Analyze an entire game, classifying each move."""
+    # Get full game data
+    data = persistence.get_game_full(game_id)
+    if not data:
+        raise HTTPException(status_code=404, detail="Game not found")
+
+    moves = data["moves"]
+    if not moves:
+        return AnalyzeGameResponse(
+            game_id=game_id,
+            move_analyses=[],
+            summary={"best": 0, "good": 0, "inaccuracy": 0, "mistake": 0, "blunder": 0},
+        )
+
+    # Replay through the game and analyze each position
+    ev = get_evaluator()
+    config = MCTSConfig(
+        num_simulations=simulations_per_position,
+        temperature=0.0,
+        batch_size=16,
+    )
+
+    state = GameState.new_game()
+    analyses = []
+    summary = {"best": 0, "good": 0, "inaccuracy": 0, "mistake": 0, "blunder": 0}
+
+    for move in moves:
+        if state.is_terminal():
+            break
+
+        # Analyze position before the move
+        mcts = MCTS(ev, config)
+        root = mcts.search_batched(state, add_noise=False)
+        best_move = mcts.select_move(root)
+
+        # Get values from MCTS analysis
+        analysis = mcts.analyze(root, top_k=10)
+        best_value = analysis[0]["value"] if analysis else root.value
+
+        # Find the value of the played move
+        played_value = best_value
+        for m in analysis:
+            if m["move"] == move:
+                played_value = m["value"]
+                break
+
+        # Calculate delta (best - played, from perspective of current player)
+        delta = played_value - best_value
+
+        classification = classify_move(delta)
+        summary[classification] += 1
+
+        analyses.append(MoveClassification(
+            move=move,
+            algebraic=move_to_algebraic(move),
+            value_before=root.value,
+            value_after=played_value,
+            best_move=best_move,
+            best_move_algebraic=move_to_algebraic(best_move),
+            best_value=best_value,
+            delta=delta,
+            classification=classification,
+        ))
+
+        # Apply the move
+        state.apply_move(move)
+
+    return AnalyzeGameResponse(
+        game_id=game_id,
+        move_analyses=analyses,
+        summary=summary,
+    )
 
 
 @app.get("/util/move", response_model=MoveConversionResponse)
