@@ -33,8 +33,18 @@ from razzle.core.bitboard import algebraic_to_sq, sq_to_algebraic
 from razzle.ai.mcts import MCTS, MCTSConfig
 from razzle.ai.evaluator import BatchedEvaluator, DummyEvaluator
 from razzle.ai.network import RazzleNet
+import random as py_random
 
 from . import persistence
+
+
+# --- Bot Types ---
+# Available AI bot types:
+# - "neural": Uses trained neural network for evaluation (strongest if trained well)
+# - "mcts": Pure MCTS with uniform priors over legal moves (good baseline)
+# - "random": Picks random legal moves (weakest, useful for testing)
+BOT_TYPES = ["neural", "mcts", "random"]
+DEFAULT_BOT_TYPE = "mcts"  # Use vanilla MCTS as default until we have a good trained model
 
 
 # --- Pydantic Models ---
@@ -43,6 +53,7 @@ class CreateGameRequest(BaseModel):
     player1_type: str = "human"
     player2_type: str = "ai"
     ai_simulations: int = 800
+    bot_type: str = Field(default=DEFAULT_BOT_TYPE, description="AI bot type: 'neural', 'mcts', or 'random'")
 
 
 class CreateGameResponse(BaseModel):
@@ -80,6 +91,7 @@ class MakeMoveRequest(BaseModel):
 class AIMoveRequest(BaseModel):
     simulations: int = 800
     temperature: float = 0.0
+    bot_type: Optional[str] = Field(default=None, description="AI bot type: 'neural', 'mcts', or 'random'. If None, uses game's default.")
 
 
 class TopMove(BaseModel):
@@ -291,12 +303,14 @@ class Game:
         game_id: str,
         player1_type: str = "human",
         player2_type: str = "ai",
-        ai_simulations: int = 800
+        ai_simulations: int = 800,
+        bot_type: str = DEFAULT_BOT_TYPE
     ):
         self.game_id = game_id
         self.state = GameState.new_game()
         self.player_types = [player1_type, player2_type]
         self.ai_simulations = ai_simulations
+        self.bot_type = bot_type
         self.websockets: list[WebSocket] = []
 
     def to_response(self) -> GameStateResponse:
@@ -457,7 +471,8 @@ async def lifespan(app: FastAPI):
             game_id=game_data["game_id"],
             player1_type=game_data["player1_type"],
             player2_type=game_data["player2_type"],
-            ai_simulations=game_data["ai_simulations"]
+            ai_simulations=game_data["ai_simulations"],
+            bot_type=game_data.get("bot_type", DEFAULT_BOT_TYPE)  # Default for old games
         )
         game.state = game_data["state"]
         games[game.game_id] = game
@@ -967,17 +982,23 @@ async def create_game(
     user = await get_current_user(auth_request, auth_cookie) if auth_request else None
     player1_user_id = user["user_id"] if user else None
 
+    # Validate bot type
+    bot_type = request.bot_type
+    if bot_type not in BOT_TYPES:
+        raise HTTPException(status_code=400, detail=f"Invalid bot_type: {bot_type}. Must be one of: {BOT_TYPES}")
+
     game_id = str(uuid.uuid4())[:8]
     game = Game(
         game_id=game_id,
         player1_type=request.player1_type,
         player2_type=request.player2_type,
-        ai_simulations=request.ai_simulations
+        ai_simulations=request.ai_simulations,
+        bot_type=bot_type
     )
     games[game_id] = game
 
-    # Get current model version
-    model_version = get_model_info()
+    # Get current model version (only relevant for neural bot type)
+    model_version = get_model_info() if bot_type == "neural" else None
 
     # Persist to database
     persistence.save_game(
@@ -988,6 +1009,7 @@ async def create_game(
         ai_simulations=request.ai_simulations,
         player1_user_id=player1_user_id,
         ai_model_version=model_version if request.player2_type == "ai" else None,
+        bot_type=bot_type,
     )
 
     return CreateGameResponse(game_id=game_id)
@@ -1047,7 +1069,13 @@ async def get_ai_move(
     auth_request: Request = None,
     auth_cookie: Optional[str] = Cookie(None, alias=AUTH_COOKIE_NAME)
 ):
-    """Get AI to calculate and play a move."""
+    """Get AI to calculate and play a move.
+
+    Bot types:
+    - "neural": Uses trained neural network (strongest if trained well)
+    - "mcts": Pure MCTS with uniform priors (good baseline for testing)
+    - "random": Random legal moves (weakest)
+    """
     if request is None:
         request = AIMoveRequest()
 
@@ -1055,6 +1083,11 @@ async def get_ai_move(
         raise HTTPException(status_code=404, detail="Game not found")
 
     game = games[game_id]
+
+    # Use request bot_type if provided, otherwise use game's default
+    bot_type = request.bot_type if request.bot_type else game.bot_type
+    if bot_type not in BOT_TYPES:
+        raise HTTPException(status_code=400, detail=f"Invalid bot_type: {bot_type}. Must be one of: {BOT_TYPES}")
 
     # Associate user with game if logged in (for users who log in mid-game)
     user = await get_current_user(auth_request, auth_cookie) if auth_request else None
@@ -1064,35 +1097,62 @@ async def get_ai_move(
     if game.state.is_terminal():
         raise HTTPException(status_code=409, detail="Game already finished")
 
-    # Run MCTS with batched search for better performance
     start_time = time.time()
 
-    ev = get_evaluator()
-    config = MCTSConfig(
-        num_simulations=request.simulations,
-        temperature=request.temperature,
-        batch_size=16  # Use batched inference
-    )
-    mcts = MCTS(ev, config)
+    # Handle "random" bot type - just pick a random legal move
+    if bot_type == "random":
+        legal_moves = get_legal_moves(game.state)
+        move = py_random.choice(legal_moves)
+        # Create dummy policy and analysis for response
+        from razzle.ai.network import NUM_ACTIONS
+        policy = [0.0] * NUM_ACTIONS
+        if move == -1:
+            policy[NUM_ACTIONS - 1] = 1.0  # END_TURN
+        else:
+            policy[move] = 1.0
+        elapsed_ms = int((time.time() - start_time) * 1000)
+        top_moves = [TopMove(move=move, algebraic=move_to_algebraic(move), visits=1, value=0.0)]
+        total_visits = 1
+        value = 0.0
+    else:
+        # Run MCTS with appropriate evaluator
+        if bot_type == "mcts":
+            # Pure MCTS with uniform priors over legal moves
+            ev = DummyEvaluator()
+        else:  # "neural"
+            ev = get_evaluator()
 
-    # Run batched search for better GPU utilization
-    root = mcts.search_batched(game.state, add_noise=False)
-    move = mcts.select_move(root)
-    policy = mcts.get_policy(root)
-
-    elapsed_ms = int((time.time() - start_time) * 1000)
-
-    # Get analysis
-    analysis = mcts.analyze(root, top_k=5)
-    top_moves = [
-        TopMove(
-            move=m['move'],
-            algebraic=m['algebraic'],
-            visits=m['visits'],
-            value=m['value']
+        config = MCTSConfig(
+            num_simulations=request.simulations,
+            temperature=request.temperature,
+            batch_size=16 if bot_type == "neural" else 1  # Batching only helps with NN
         )
-        for m in analysis
-    ]
+        mcts = MCTS(ev, config)
+
+        # Run search (batched for neural, regular for mcts)
+        if bot_type == "neural":
+            root = mcts.search_batched(game.state, add_noise=False)
+        else:
+            root = mcts.search(game.state, add_noise=False)
+
+        move = mcts.select_move(root)
+        policy = mcts.get_policy(root).tolist()
+        total_visits = root.visit_count
+
+        elapsed_ms = int((time.time() - start_time) * 1000)
+
+        # Get analysis
+        analysis = mcts.analyze(root, top_k=5)
+        top_moves = [
+            TopMove(
+                move=m['move'],
+                algebraic=m['algebraic'],
+                visits=m['visits'],
+                value=m['value']
+            )
+            for m in analysis
+        ]
+        value = root.value
 
     # Apply the move
     game.state.apply_move(move)
@@ -1108,9 +1168,9 @@ async def get_ai_move(
     return AIMoveResponse(
         move=move,
         algebraic=move_to_algebraic(move),
-        policy=policy.tolist(),
-        value=root.value,
-        visits=root.visit_count,
+        policy=policy if isinstance(policy, list) else policy.tolist(),
+        value=value,
+        visits=total_visits,
         time_ms=elapsed_ms,
         top_moves=top_moves,
         game_state=game_response

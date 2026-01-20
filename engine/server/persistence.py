@@ -63,6 +63,7 @@ def init_db(db_path: Path = None) -> None:
             ("ALTER TABLE games ADD COLUMN player1_user_id TEXT", None),
             ("ALTER TABLE games ADD COLUMN player2_user_id TEXT", None),
             ("ALTER TABLE games ADD COLUMN ai_model_version TEXT", None),
+            ("ALTER TABLE games ADD COLUMN bot_type TEXT DEFAULT 'mcts'", None),
         ]
         for sql, _ in migrations:
             try:
@@ -164,6 +165,7 @@ def save_game(
     player1_user_id: Optional[str] = None,
     player2_user_id: Optional[str] = None,
     ai_model_version: Optional[str] = None,
+    bot_type: Optional[str] = None,
     db_path: Path = None
 ) -> None:
     """Save or update a game in the database.
@@ -175,6 +177,9 @@ def save_game(
         db_path = DEFAULT_DB_PATH
     now = datetime.utcnow().isoformat()
     state_json = state_to_json(state)
+    # Default bot_type for backward compatibility
+    if bot_type is None:
+        bot_type = "mcts"
 
     with get_connection(db_path) as conn:
         if moves is not None:
@@ -183,26 +188,26 @@ def save_game(
             conn.execute("""
                 INSERT INTO games (game_id, player1_type, player2_type, ai_simulations, state_json,
                                  moves_json, player1_user_id, player2_user_id, ai_model_version,
-                                 created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                 bot_type, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(game_id) DO UPDATE SET
                     state_json = excluded.state_json,
                     moves_json = excluded.moves_json,
                     updated_at = excluded.updated_at
             """, (game_id, player1_type, player2_type, ai_simulations, state_json, moves_json,
-                  player1_user_id, player2_user_id, ai_model_version, now, now))
+                  player1_user_id, player2_user_id, ai_model_version, bot_type, now, now))
         else:
             # Update state only, don't touch moves_json (for in-game state updates)
             conn.execute("""
                 INSERT INTO games (game_id, player1_type, player2_type, ai_simulations, state_json,
                                  moves_json, player1_user_id, player2_user_id, ai_model_version,
-                                 created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, '[]', ?, ?, ?, ?, ?)
+                                 bot_type, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, '[]', ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(game_id) DO UPDATE SET
                     state_json = excluded.state_json,
                     updated_at = excluded.updated_at
             """, (game_id, player1_type, player2_type, ai_simulations, state_json,
-                  player1_user_id, player2_user_id, ai_model_version, now, now))
+                  player1_user_id, player2_user_id, ai_model_version, bot_type, now, now))
         conn.commit()
 
 
@@ -291,7 +296,7 @@ def load_game(game_id: str, db_path: Path = None) -> Optional[dict]:
     """
     Load a game from the database.
 
-    Returns dict with keys: game_id, player1_type, player2_type, ai_simulations, state, moves
+    Returns dict with keys: game_id, player1_type, player2_type, ai_simulations, state, moves, bot_type
     Or None if not found.
     """
     if db_path is None:
@@ -304,8 +309,9 @@ def load_game(game_id: str, db_path: Path = None) -> Optional[dict]:
         if row is None:
             return None
 
-        # Handle missing moves_json column (old databases)
+        # Handle missing columns (old databases)
         moves_json = row["moves_json"] if "moves_json" in row.keys() else "[]"
+        bot_type = row["bot_type"] if "bot_type" in row.keys() else "mcts"
 
         return {
             "game_id": row["game_id"],
@@ -314,6 +320,7 @@ def load_game(game_id: str, db_path: Path = None) -> Optional[dict]:
             "ai_simulations": row["ai_simulations"],
             "state": state_from_json(row["state_json"]),
             "moves": json.loads(moves_json) if moves_json else [],
+            "bot_type": bot_type or "mcts",  # Default for null values
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
         }
@@ -328,8 +335,9 @@ def load_all_games(db_path: Path = None) -> list[dict]:
 
         games = []
         for row in rows:
-            # Handle missing moves_json column (old databases)
+            # Handle missing columns (old databases)
             moves_json = row["moves_json"] if "moves_json" in row.keys() else "[]"
+            bot_type = row["bot_type"] if "bot_type" in row.keys() else "mcts"
 
             games.append({
                 "game_id": row["game_id"],
@@ -338,6 +346,7 @@ def load_all_games(db_path: Path = None) -> list[dict]:
                 "ai_simulations": row["ai_simulations"],
                 "state": state_from_json(row["state_json"]),
                 "moves": json.loads(moves_json) if moves_json else [],
+                "bot_type": bot_type or "mcts",  # Default for null values
                 "created_at": row["created_at"],
                 "updated_at": row["updated_at"],
             })
