@@ -120,19 +120,23 @@ def setup_worker_instance(
             try:
                 result = vast.execute(worker.instance_id, "echo ready", timeout=30)
                 if "ready" in result:
+                    print(f"[{role_name}] SSH ready after {attempt+1} attempts")
                     break
-            except:
-                pass
+            except Exception as e:
+                if attempt % 5 == 0:  # Log every 5 attempts
+                    print(f"[{role_name}] SSH attempt {attempt+1}/30: {str(e)[:50]}")
             time.sleep(10)
         else:
             raise RuntimeError("SSH not available after 5 minutes")
 
         # Create workspace directory
+        print(f"[{role_name}] Creating workspace...")
         vast.execute(worker.instance_id, "mkdir -p /workspace/model", timeout=60)
 
         # Upload package
         print(f"[{role_name}] Uploading package...")
         vast.copy_to(worker.instance_id, package_path, "/workspace/razzle_package.tar.gz")
+        print(f"[{role_name}] Package uploaded")
 
         # Extract and install
         print(f"[{role_name}] Installing dependencies...")
@@ -310,7 +314,7 @@ class DistributedOrchestrator:
 
         return any(w.status == "creating" for w in self.workers)
 
-    def wait_for_instances(self, timeout: int = 300) -> bool:
+    def wait_for_instances(self, timeout: int = 600) -> bool:
         """Wait for all instances to be ready."""
         print(f"\nWaiting for instances to be ready...")
 
@@ -324,7 +328,7 @@ class DistributedOrchestrator:
                 if instance.status not in ["failed", "running", "ready"]:
                     try:
                         info = self.vast.get_instance(instance.instance_id)
-                        if info and info.status == "running" and info.ssh_host:
+                        if info and info.actual_status == "running" and info.ssh_host:
                             instance.host = info.ssh_host
                             instance.port = info.ssh_port
                             name = "Trainer" if instance.role == "trainer" else f"Worker {instance.worker_id}"
@@ -385,6 +389,55 @@ class DistributedOrchestrator:
         print(f"\n{running_count}/{self.num_workers} workers running" +
               (f", trainer {'running' if trainer_running else 'not running'}" if self.with_trainer else ""))
         return running_count
+
+    def _ensure_initial_model(self):
+        """Create and upload initial model if none exists."""
+        import requests
+        from razzle.ai.network import create_network, RazzleNet
+
+        # Check if a model already exists
+        try:
+            response = requests.get(f"{self.api_url}/training/models/latest", timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('model') is not None:
+                    print(f"\nExisting model found: {data['model']['version']}")
+                    return
+        except Exception as e:
+            print(f"Warning: Could not check for existing model: {e}")
+
+        # Create and upload initial model
+        print("\nNo model found. Creating initial model...")
+        try:
+            # Create network with same config as workers
+            network = create_network(self.filters, self.blocks, 'cpu')
+
+            # Save locally
+            model_path = self.output_dir / "initial_model.pt"
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+            network.save(model_path)
+
+            # Upload to API
+            with open(model_path, 'rb') as f:
+                files = {'file': ('initial.pt', f, 'application/octet-stream')}
+                data = {
+                    'version': 'initial',
+                    'iteration': '0',
+                    'games_trained_on': '0',
+                }
+                response = requests.post(
+                    f"{self.api_url}/training/models",
+                    files=files,
+                    data=data,
+                    timeout=60
+                )
+                response.raise_for_status()
+
+            print(f"Uploaded initial model: initial")
+
+        except Exception as e:
+            print(f"Warning: Could not create initial model: {e}")
+            print("Workers will create their own random models.")
 
     def cleanup(self):
         """Destroy all instances."""
@@ -453,6 +506,9 @@ class DistributedOrchestrator:
         # Create package
         package_path = create_package(self.output_dir)
 
+        # Ensure initial model exists
+        self._ensure_initial_model()
+
         # Setup workers
         running_count = self.setup_workers(package_path)
         if running_count == 0:
@@ -477,26 +533,38 @@ class DistributedOrchestrator:
 
         # Wait for interrupt
         try:
+            check_interval = 60  # Check every 60 seconds
+            consecutive_failures = 0
+            max_failures = 10  # Exit after 10 consecutive failures (10 minutes)
+
             while not self.shutdown_requested:
-                time.sleep(10)
+                time.sleep(check_interval)
 
-                # Check worker status
-                running = 0
-                for worker in self.workers:
-                    if worker.instance_id and worker.status == "running":
-                        try:
-                            status = self.vast.execute(
-                                worker.instance_id,
-                                "cat /workspace/status.json 2>/dev/null | jq -r '.games_completed'",
-                                timeout=30
-                            )
-                            games = int(status.strip()) if status.strip().isdigit() else 0
-                            running += 1
-                        except:
-                            pass
+                # Check worker status via API dashboard
+                try:
+                    import requests
+                    response = requests.get(f"{self.api_url}/training/dashboard", timeout=10)
+                    if response.status_code == 200:
+                        data = response.json()
+                        games_pending = data.get('games_pending', 0)
+                        games_total = data.get('games_total', 0)
+                        workers_active = len(data.get('workers', {}))
 
-                if running == 0:
-                    print("\nAll workers stopped. Exiting.")
+                        if games_total > 0 or workers_active > 0:
+                            consecutive_failures = 0
+                            print(f"[Status] Games: {games_total} total, {games_pending} pending, {workers_active} workers active")
+                        else:
+                            consecutive_failures += 1
+                            print(f"[Status] No activity detected ({consecutive_failures}/{max_failures})")
+                    else:
+                        consecutive_failures += 1
+                        print(f"[Status] API error: {response.status_code}")
+                except Exception as e:
+                    consecutive_failures += 1
+                    print(f"[Status] Check failed: {e}")
+
+                if consecutive_failures >= max_failures:
+                    print("\nNo activity detected for too long. Exiting.")
                     break
 
         except KeyboardInterrupt:
@@ -514,8 +582,8 @@ class DistributedOrchestrator:
 def main():
     parser = argparse.ArgumentParser(description='Distributed training orchestrator')
     parser.add_argument('--workers', type=int, default=3, help='Number of workers')
-    parser.add_argument('--api-url', type=str, default='https://razzledazzle.lazybrains.com',
-                        help='Training API URL (default: https://razzledazzle.lazybrains.com)')
+    parser.add_argument('--api-url', type=str, default='https://razzledazzle.lazybrains.com/api',
+                        help='Training API URL (default: https://razzledazzle.lazybrains.com/api)')
     parser.add_argument('--gpu', type=str, default='RTX_3060', help='GPU type')
     parser.add_argument('--max-price', type=float, default=0.10, help='Max price per hour')
     parser.add_argument('--simulations', type=int, default=400, help='MCTS simulations')

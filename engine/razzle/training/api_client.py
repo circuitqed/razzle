@@ -78,7 +78,11 @@ class TrainingAPIClient:
 
     def _url(self, path: str) -> str:
         """Build full URL for a path."""
-        return urljoin(self.base_url, path)
+        # Ensure base_url ends with / for proper urljoin behavior
+        base = self.base_url if self.base_url.endswith('/') else self.base_url + '/'
+        # Remove leading / from path for proper joining
+        path = path.lstrip('/')
+        return urljoin(base, path)
 
     # --- Worker Methods ---
 
@@ -103,9 +107,10 @@ class TrainingAPIClient:
         Returns:
             The game ID assigned by the server
         """
-        # Convert int keys to strings for JSON
+        # Convert numpy types to Python types for JSON serialization
+        moves_json = [int(m) for m in moves]
         visit_counts_json = [
-            {str(k): v for k, v in vc.items()}
+            {str(int(k)): int(v) for k, v in vc.items()}
             for vc in visit_counts
         ]
 
@@ -113,8 +118,8 @@ class TrainingAPIClient:
             self._url("/training/games"),
             json={
                 "worker_id": worker_id,
-                "moves": moves,
-                "result": result,
+                "moves": moves_json,
+                "result": float(result),
                 "visit_counts": visit_counts_json,
                 "model_version": model_version,
             },

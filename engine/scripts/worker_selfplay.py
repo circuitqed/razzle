@@ -293,9 +293,9 @@ class SelfPlayWorker:
 
             # Record visit counts (sparse - only visited moves)
             vc = {}
-            for child in root.children:
+            for move, child in root.children.items():
                 if child.visit_count > 0:
-                    vc[child.move] = child.visit_count
+                    vc[move] = child.visit_count
             visit_counts.append(vc)
 
             # Select and apply move
