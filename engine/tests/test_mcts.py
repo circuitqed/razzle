@@ -49,7 +49,8 @@ class TestNode:
         node = Node(state=state, prior=0.5)
         # UCB = Q + c * P * sqrt(parent) / (1 + child)
         # With 0 visits: UCB = 0 + 1.5 * 0.5 * sqrt(100) / 1 = 7.5
-        score = node.ucb_score(parent_visits=100, c_puct=1.5)
+        # When parent_player matches child's current_player, no negation
+        score = node.ucb_score(parent_visits=100, c_puct=1.5, parent_player=state.current_player)
         assert score == pytest.approx(7.5)
 
     def test_ucb_score_explored(self):
@@ -58,8 +59,9 @@ class TestNode:
         node.visit_count = 10
         node.value_sum = 3.0  # Q = 0.3
         # UCB = 0.3 + 1.5 * 0.5 * sqrt(100) / 11
+        # When parent_player matches child's current_player, no negation
         expected = 0.3 + 1.5 * 0.5 * 10 / 11
-        score = node.ucb_score(parent_visits=100, c_puct=1.5)
+        score = node.ucb_score(parent_visits=100, c_puct=1.5, parent_player=state.current_player)
         assert score == pytest.approx(expected)
 
 

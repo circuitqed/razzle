@@ -1,0 +1,149 @@
+MCTS TEST POSITIONS
+===================
+Legend: X/O = ball carrier, x/o = knight (no ball)
+Each player has exactly 5 pieces (4 knights + 1 ball carrier)
+P1 (X/x) scores on row 8, P2 (O/o) scores on row 1
+
+
+1/7: P1 WINS IN 1
+P1 to move
+Expected: f7-f8 (pass to goal)
+  +---------------+
+8 | . . . . . x . | P1 goal
+7 | . . . . . X . |
+6 | . . . . . . . |
+5 | O . . . . . . |
+4 | . . . . . . . |
+3 | o o o o . . . |
+2 | x x x . . . . |
+1 | . . . . . . . | P2 goal
+  +---------------+
+    a b c d e f g
+
+P1: 5 pieces (X at f7, x at f8, a2, b2, c2)
+P2: 5 pieces (O at a5, o at a3, b3, c3, d3)
+
+
+2/7: P2 WINS IN 1
+P2 to move
+Expected: c2-c1 (pass to goal)
+  +---------------+
+8 | o o o . . . . | P1 goal
+7 | . . . . x x . |
+6 | . . . . . . x |
+5 | . . . . . X . |
+4 | . . . . . . . |
+3 | . . . . . . . |
+2 | x . O . . . . |
+1 | . . o . . . . | P2 goal
+  +---------------+
+    a b c d e f g
+
+P1: 5 pieces (X at f5, x at e7, f7, g6, a2)
+P2: 5 pieces (O at c2, o at c1, a8, b8, c8)
+
+
+3/7: P1 FORCED WIN
+P1 to move
+Expected: d7-f8 (knight move), then f6-f8 (pass)
+  +---------------+
+8 | . . . . . . . | P1 goal
+7 | . . . x . . . |
+6 | O . . . . X . |
+5 | . . . . . . . |
+4 | . . . . . . . |
+3 | o o o o . . . |
+2 | x x x . . . . |
+1 | . . . . . . . | P2 goal
+  +---------------+
+    a b c d e f g
+
+P1: 5 pieces (X at f6, x at d7, a2, b2, c2)
+P2: 5 pieces (O at a6, o at a3, b3, c3, d3)
+
+
+4/7: P2 FORCED WIN
+P2 to move
+Expected: a2-c1 (knight move), then c3-c1 (pass)
+  +---------------+
+8 | o o o . . . . | P1 goal
+7 | . . . . x x . |
+6 | . . . . . . x |
+5 | . . . . . X . |
+4 | x . . . . . . |
+3 | . . O . . . . |
+2 | o . . . . . . |
+1 | . . . . . . . | P2 goal
+  +---------------+
+    a b c d e f g
+
+P1: 5 pieces (X at f5, x at e7, f7, g6, a4)
+P2: 5 pieces (O at c3, o at a2, a8, b8, c8)
+
+
+5/7: RACE - P1 WINS
+P1 to move (both players can win in 1)
+Expected: f7-f8
+  +---------------+
+8 | o o . o . x . | P1 goal
+7 | . . . . . X . |
+6 | . . . . . . . |
+5 | . . . . . . . |
+4 | . . . . . . . |
+3 | x x x . . . . |
+2 | . . O . . . . |
+1 | . . o . . . . | P2 goal
+  +---------------+
+    a b c d e f g
+
+P1: 5 pieces (X at f7, x at f8, a3, b3, c3)
+P2: 5 pieces (O at c2, o at c1, a8, b8, d8)
+
+
+6/7: RACE - P2 WINS
+P2 to move (both players can win in 1)
+Expected: c2-c1
+  +---------------+
+8 | o o . o . x . | P1 goal
+7 | . . . . . X . |
+6 | . . . . . . . |
+5 | . . . . . . . |
+4 | . . . . . . . |
+3 | x x x . . . . |
+2 | . . O . . . . |
+1 | . . o . . . . | P2 goal
+  +---------------+
+    a b c d e f g
+
+P1: 5 pieces (X at f7, x at f8, a3, b3, c3)
+P2: 5 pieces (O at c2, o at c1, a8, b8, d8)
+
+
+7/7: DEFENSIVE BLOCK - P2 BLOCKS P1, THEN WINS
+P2 to move
+Situation: P1 threatens f6-f8 (immediate win next turn)
+           P2 blocks by moving e5-f7 (blocks the pass line)
+           Then P2 wins with c2-c1
+  +---------------+
+8 | o o . . . x . | P1 goal
+7 | . . . . . . . |
+6 | . . . . . X . |
+5 | . . . . o . . |
+4 | x x x . . . . |
+3 | . . . . . . . |
+2 | . . O . . . . |
+1 | . . o . . . . | P2 goal
+  +---------------+
+    a b c d e f g
+
+P1: 5 pieces (X at f6, x at f8, a4, b4, c4)
+P2: 5 pieces (O at c2, o at c1, e5, a8, b8)
+
+P1 threatens: f6-f8 (pass to knight on goal row = win)
+Only block: e5-f7 (only P2 piece that can reach f7)
+
+Sequence:
+1. P2 plays e5-f7 (knight blocks the f6-f8 pass line)
+2. P1 can't win - the knight at f7 blocks the pass to f8
+3. P1 makes some other move
+4. P2 plays c2-c1 (ball to goal) - P2 WINS!

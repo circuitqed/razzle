@@ -63,14 +63,21 @@ class Node:
         """Visit count including virtual losses."""
         return self.visit_count + self.virtual_loss
 
-    def ucb_score(self, parent_visits: int, c_puct: float) -> float:
+    def ucb_score(self, parent_visits: int, c_puct: float, parent_player: int) -> float:
         """
         Compute PUCT score for node selection.
 
         UCB = Q + c_puct * P * sqrt(parent_visits) / (1 + child_visits)
+
+        Note: Values are stored from each node's current_player perspective.
+        When turn switches (knight move), we negate because opponent's loss = our gain.
+        When turn stays (ball pass), value is already from our perspective.
         """
         exploration = c_puct * self.prior * math.sqrt(parent_visits) / (1 + self.adjusted_visit_count)
-        return self.value + exploration
+        if self.state.current_player != parent_player:
+            return -self.value + exploration
+        else:
+            return self.value + exploration
 
     def select_child(self, c_puct: float) -> tuple[int, Node]:
         """Select best child according to PUCT."""
@@ -79,9 +86,10 @@ class Node:
         best_child = None
 
         parent_visits = self.adjusted_visit_count
+        parent_player = self.state.current_player
 
         for action, child in self.children.items():
-            score = child.ucb_score(parent_visits, c_puct)
+            score = child.ucb_score(parent_visits, c_puct, parent_player)
             if score > best_score:
                 best_score = score
                 best_action = action
