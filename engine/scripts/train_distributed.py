@@ -152,32 +152,25 @@ def setup_worker_instance(
         if worker.role == "trainer":
             # Start trainer process
             print(f"[{role_name}] Starting trainer process...")
-            start_cmd = f"""setsid python -u /workspace/trainer.py \
-                --api-url {api_url} \
-                --device cuda \
-                --threshold {training_threshold} \
-                --filters {filters} \
-                --blocks {blocks} \
-                --output /workspace/output \
-                </dev/null >/workspace/trainer.log 2>&1 &
-                sleep 2 && echo "Trainer started"
-            """
+            start_cmd = (
+                f"setsid python -u /workspace/trainer.py "
+                f"--api-url {api_url} --device cuda --threshold {training_threshold} "
+                f"--filters {filters} --blocks {blocks} --output /workspace/output "
+                f"</dev/null >/workspace/trainer.log 2>&1 & "
+                f'sleep 1 && echo "Trainer started"'
+            )
         else:
             # Start worker process(es)
             if workers_per_instance == 1:
                 print(f"[{role_name}] Starting worker process...")
-                start_cmd = f"""setsid python -u /workspace/worker_selfplay.py \
-                    --worker-id {worker.worker_id} \
-                    --api-url {api_url} \
-                    --workspace /workspace \
-                    --device cuda \
-                    --simulations {simulations} \
-                    --filters {filters} \
-                    --blocks {blocks} \
-                    --batch-size {batch_size} \
-                    </dev/null >/workspace/worker.log 2>&1 &
-                    sleep 2 && echo "Worker started"
-                """
+                start_cmd = (
+                    f"setsid python -u /workspace/worker_selfplay.py "
+                    f"--worker-id {worker.worker_id} --api-url {api_url} "
+                    f"--workspace /workspace --device cuda --simulations {simulations} "
+                    f"--filters {filters} --blocks {blocks} --batch-size {batch_size} "
+                    f"</dev/null >/workspace/worker.log 2>&1 & "
+                    f'sleep 1 && echo "Worker started"'
+                )
             else:
                 # Launch multiple workers sharing the GPU
                 print(f"[{role_name}] Starting {workers_per_instance} worker processes...")
@@ -199,9 +192,8 @@ def setup_worker_instance(
                 # Create workspace dirs and launch all workers
                 mkdir_cmds = " && ".join([f"mkdir -p /workspace/worker_{i}/model" for i in range(workers_per_instance)])
                 # Join backgrounded commands with space, not &&, since & doesn't return exit status for &&
-                start_cmd = f"""{mkdir_cmds} && {" ".join(worker_cmds)}
-                    sleep 2 && echo "{workers_per_instance} workers started"
-                """
+                # Use inline command to avoid multiline string issues
+                start_cmd = f'{mkdir_cmds} && {" ".join(worker_cmds)} sleep 1 && echo "{workers_per_instance} workers started"'
 
         result = vast.execute(worker.instance_id, start_cmd, timeout=60)
         print(f"[{role_name}] {result.strip()}")
