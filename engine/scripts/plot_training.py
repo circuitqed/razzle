@@ -1,278 +1,456 @@
 #!/usr/bin/env python3
 """
-Generate training progress plots from training logs.
+Generate training analysis plots for Razzle Dazzle.
 
-Creates:
-- Loss curves (total, policy, value)
-- Win rate by player
-- Game length distribution
-- Training throughput
+Creates visualizations of:
+- Loss progression over iterations
+- Policy/value accuracy
+- Game length trends
+- Opening diversity
+- Value calibration
 
-Outputs PNG files and JSON summary for web app.
+Usage:
+    python plot_training.py --db server/games.db --output plots/
+    python plot_training.py --db server/games.db --model /tmp/iter_199.pt
 """
 
 import argparse
 import json
+import sqlite3
+import sys
+from collections import Counter
 from pathlib import Path
 
-# Use non-interactive backend for server-side rendering
-import matplotlib
-matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
 
-
-def load_training_log(log_path: Path) -> dict:
-    """Load and parse training log."""
-    with open(log_path) as f:
-        return json.load(f)
+# Add parent directory for imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 
-def plot_loss_curves(data: dict, output_dir: Path) -> None:
-    """Plot loss curves over iterations."""
-    iterations = data['iterations']
+def get_db_connection(db_path: Path):
+    """Get SQLite connection with row factory."""
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    return conn
 
-    fig, axes = plt.subplots(1, 3, figsize=(15, 4))
 
-    # Extract data
-    iters = [it['iteration'] for it in iterations]
+def fetch_models(conn) -> list:
+    """Fetch all training models."""
+    rows = conn.execute("""
+        SELECT iteration, version, final_loss, final_policy_loss, final_value_loss,
+               games_trained_on, created_at
+        FROM training_models
+        ORDER BY iteration
+    """).fetchall()
+    return [dict(row) for row in rows]
 
-    # Total loss per epoch (flatten all epochs)
-    all_epochs = []
-    for it in iterations:
-        for ep in it['epochs']:
-            all_epochs.append({
-                'iteration': it['iteration'],
-                'epoch': ep['epoch'],
-                'loss': ep['loss'],
-                'policy_loss': ep['policy_loss'],
-                'value_loss': ep['value_loss']
-            })
 
-    epoch_nums = range(len(all_epochs))
+def fetch_games(conn, limit: int = 5000) -> list:
+    """Fetch training games."""
+    rows = conn.execute("""
+        SELECT id, moves, result, model_version, created_at
+        FROM training_games
+        ORDER BY created_at DESC
+        LIMIT ?
+    """, (limit,)).fetchall()
 
-    # Total loss
-    axes[0].plot(epoch_nums, [e['loss'] for e in all_epochs], 'b-', alpha=0.7)
-    axes[0].set_xlabel('Epoch')
-    axes[0].set_ylabel('Total Loss')
-    axes[0].set_title('Total Loss')
-    axes[0].grid(True, alpha=0.3)
+    games = []
+    for row in rows:
+        g = dict(row)
+        g['moves'] = json.loads(g['moves'])
+        games.append(g)
+    return games
 
-    # Policy loss
-    axes[1].plot(epoch_nums, [e['policy_loss'] for e in all_epochs], 'g-', alpha=0.7)
-    axes[1].set_xlabel('Epoch')
-    axes[1].set_ylabel('Policy Loss')
-    axes[1].set_title('Policy Loss')
-    axes[1].grid(True, alpha=0.3)
 
-    # Value loss
-    axes[2].plot(epoch_nums, [e['value_loss'] for e in all_epochs], 'r-', alpha=0.7)
-    axes[2].set_xlabel('Epoch')
-    axes[2].set_ylabel('Value Loss')
-    axes[2].set_title('Value Loss')
-    axes[2].grid(True, alpha=0.3)
+def get_iter_num(v):
+    """Extract iteration number from version string."""
+    if v == 'initial':
+        return 0
+    try:
+        return int(v.split('_')[1])
+    except:
+        return 0
+
+
+def plot_loss_progression(models: list, output_dir: Path):
+    """Plot loss over iterations."""
+    iterations = [m['iteration'] for m in models if m['final_loss']]
+    total_loss = [m['final_loss'] for m in models if m['final_loss']]
+    policy_loss = [m['final_policy_loss'] for m in models if m['final_loss']]
+    value_loss = [m['final_value_loss'] for m in models if m['final_loss']]
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
+
+    # Total and policy loss
+    ax1.plot(iterations, total_loss, 'b-', label='Total Loss', linewidth=2)
+    ax1.plot(iterations, policy_loss, 'g-', label='Policy Loss', linewidth=2, alpha=0.8)
+    ax1.set_ylabel('Loss')
+    ax1.set_title('Training Loss Progression')
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+    ax1.set_ylim(bottom=0)
+
+    # Value loss (separate scale)
+    ax2.plot(iterations, value_loss, 'r-', label='Value Loss', linewidth=2)
+    ax2.set_xlabel('Iteration')
+    ax2.set_ylabel('Value Loss')
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
+    ax2.set_ylim(bottom=0)
 
     plt.tight_layout()
-    plt.savefig(output_dir / 'loss_curves.png', dpi=100)
+    plt.savefig(output_dir / 'loss_progression.png', dpi=150)
     plt.close()
+    print(f"  Saved: loss_progression.png")
 
 
-def plot_win_rates(data: dict, output_dir: Path) -> None:
-    """Plot win rates by player over iterations."""
-    iterations = data['iterations']
+def plot_game_length_distribution(games: list, output_dir: Path):
+    """Plot game length distribution."""
+    lengths = [len(g['moves']) for g in games]
 
-    fig, ax = plt.subplots(figsize=(10, 5))
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
 
-    iters = [it['iteration'] for it in iterations]
-    p1_wins = [it['p1_wins'] for it in iterations]
-    p2_wins = [it['p2_wins'] for it in iterations]
-    draws = [it['draws'] for it in iterations]
+    # Histogram
+    ax1.hist(lengths, bins=50, color='steelblue', edgecolor='white', alpha=0.8)
+    ax1.axvline(np.mean(lengths), color='red', linestyle='--', label=f'Mean: {np.mean(lengths):.1f}')
+    ax1.axvline(np.median(lengths), color='orange', linestyle='--', label=f'Median: {np.median(lengths):.1f}')
+    ax1.set_xlabel('Game Length (moves)')
+    ax1.set_ylabel('Count')
+    ax1.set_title('Game Length Distribution')
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
 
-    total_games = [p1 + p2 + d for p1, p2, d in zip(p1_wins, p2_wins, draws)]
-    p1_rate = [p1/t*100 if t > 0 else 0 for p1, t in zip(p1_wins, total_games)]
-    p2_rate = [p2/t*100 if t > 0 else 0 for p2, t in zip(p2_wins, total_games)]
-    draw_rate = [d/t*100 if t > 0 else 0 for d, t in zip(draws, total_games)]
+    # Trend over training
+    version_lengths = {}
+    for g in games:
+        v = g['model_version']
+        if v not in version_lengths:
+            version_lengths[v] = []
+        version_lengths[v].append(len(g['moves']))
 
-    width = 0.8
-    ax.bar(iters, p1_rate, width, label='P1 Wins', color='#2ecc71')
-    ax.bar(iters, p2_rate, width, bottom=p1_rate, label='P2 Wins', color='#e74c3c')
-    ax.bar(iters, draw_rate, width, bottom=[p1+p2 for p1, p2 in zip(p1_rate, p2_rate)],
-           label='Draws', color='#95a5a6')
+    versions = sorted(version_lengths.keys(), key=get_iter_num)
+    iters = [get_iter_num(v) for v in versions]
+    avg_lengths = [np.mean(version_lengths[v]) for v in versions]
+
+    ax2.plot(iters, avg_lengths, 'purple', linewidth=2)
+    ax2.fill_between(iters, avg_lengths, alpha=0.3, color='purple')
+    ax2.set_xlabel('Iteration')
+    ax2.set_ylabel('Avg Game Length')
+    ax2.set_title('Average Game Length Over Training')
+    ax2.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(output_dir / 'game_length.png', dpi=150)
+    plt.close()
+    print(f"  Saved: game_length.png")
+
+
+def plot_win_rates(games: list, output_dir: Path):
+    """Plot win rates over training."""
+    version_results = {}
+    for g in games:
+        v = g['model_version']
+        if v not in version_results:
+            version_results[v] = {'p0_wins': 0, 'p1_wins': 0, 'total': 0}
+        version_results[v]['total'] += 1
+        if g['result'] > 0:
+            version_results[v]['p0_wins'] += 1
+        elif g['result'] < 0:
+            version_results[v]['p1_wins'] += 1
+
+    versions = sorted(version_results.keys(), key=get_iter_num)
+    iterations = [get_iter_num(v) for v in versions]
+    p0_rates = [version_results[v]['p0_wins'] / version_results[v]['total'] * 100 for v in versions]
+    p1_rates = [version_results[v]['p1_wins'] / version_results[v]['total'] * 100 for v in versions]
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+
+    ax.plot(iterations, p0_rates, 'b-', label='Player 0 Win Rate', linewidth=2, alpha=0.8)
+    ax.plot(iterations, p1_rates, 'r-', label='Player 1 Win Rate', linewidth=2, alpha=0.8)
+    ax.axhline(50, color='gray', linestyle='--', alpha=0.5)
 
     ax.set_xlabel('Iteration')
-    ax.set_ylabel('Percentage')
-    ax.set_title('Game Outcomes by Iteration')
+    ax.set_ylabel('Win Rate (%)')
+    ax.set_title('Win Rates Over Training')
     ax.legend()
+    ax.grid(True, alpha=0.3)
     ax.set_ylim(0, 100)
+
+    plt.tight_layout()
+    plt.savefig(output_dir / 'win_rates.png', dpi=150)
+    plt.close()
+    print(f"  Saved: win_rates.png")
+
+
+def plot_games_per_iteration(games: list, output_dir: Path):
+    """Plot number of games generated per model version."""
+    version_counts = Counter(g['model_version'] for g in games)
+
+    versions = sorted(version_counts.keys(), key=get_iter_num)
+    iterations = [get_iter_num(v) for v in versions]
+    counts = [version_counts[v] for v in versions]
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+
+    ax.bar(iterations, counts, color='steelblue', alpha=0.8, width=0.8)
+    ax.axhline(np.mean(counts), color='red', linestyle='--', label=f'Mean: {np.mean(counts):.1f}')
+
+    ax.set_xlabel('Iteration')
+    ax.set_ylabel('Games Generated')
+    ax.set_title('Games Generated Per Model Version')
+    ax.legend()
     ax.grid(True, alpha=0.3, axis='y')
 
     plt.tight_layout()
-    plt.savefig(output_dir / 'win_rates.png', dpi=100)
+    plt.savefig(output_dir / 'games_per_iteration.png', dpi=150)
     plt.close()
+    print(f"  Saved: games_per_iteration.png")
 
 
-def plot_game_lengths(data: dict, output_dir: Path) -> None:
-    """Plot game length statistics over iterations."""
-    iterations = data['iterations']
+def plot_opening_diversity(games: list, output_dir: Path):
+    """Plot opening move diversity."""
+    first_moves = [g['moves'][0] if g['moves'] else None for g in games]
+    first_moves = [m for m in first_moves if m is not None]
+    move_counts = Counter(first_moves)
 
-    fig, ax = plt.subplots(figsize=(10, 5))
+    top_moves = move_counts.most_common(10)
 
-    iters = [it['iteration'] for it in iterations]
-    avg_lens = [it['avg_game_length'] for it in iterations]
-    min_lens = [it.get('min_game_length', 0) for it in iterations]
-    max_lens = [it.get('max_game_length', 0) for it in iterations]
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
 
-    ax.plot(iters, avg_lens, 'b-o', label='Average', linewidth=2, markersize=8)
-    ax.fill_between(iters, min_lens, max_lens, alpha=0.2, color='blue', label='Min-Max Range')
+    # Bar chart of top opening moves
+    moves = [str(m[0]) for m in top_moves]
+    counts = [m[1] for m in top_moves]
 
-    ax.set_xlabel('Iteration')
-    ax.set_ylabel('Game Length (moves)')
-    ax.set_title('Game Length Over Training')
-    ax.legend()
-    ax.grid(True, alpha=0.3)
+    ax1.barh(moves, counts, color='steelblue', alpha=0.8)
+    ax1.set_xlabel('Count')
+    ax1.set_ylabel('Move (encoded)')
+    ax1.set_title('Top 10 Opening Moves')
+    ax1.invert_yaxis()
+    ax1.grid(True, alpha=0.3, axis='x')
 
-    plt.tight_layout()
-    plt.savefig(output_dir / 'game_lengths.png', dpi=100)
-    plt.close()
+    # Diversity over training
+    version_diversity = {}
+    for g in games:
+        v = g['model_version']
+        if g['moves']:
+            if v not in version_diversity:
+                version_diversity[v] = set()
+            version_diversity[v].add(g['moves'][0])
 
+    versions = sorted(version_diversity.keys(), key=get_iter_num)
+    iterations = [get_iter_num(v) for v in versions]
+    diversity = [len(version_diversity[v]) for v in versions]
 
-def plot_training_summary(data: dict, output_dir: Path) -> None:
-    """Create a summary dashboard image."""
-    fig = plt.figure(figsize=(16, 10))
-
-    iterations = data['iterations']
-
-    # Loss curve (main plot)
-    ax1 = fig.add_subplot(2, 2, 1)
-    final_losses = [it['final_loss'] for it in iterations]
-    iters = [it['iteration'] for it in iterations]
-    ax1.plot(iters, final_losses, 'b-o', linewidth=2, markersize=8)
-    ax1.set_xlabel('Iteration')
-    ax1.set_ylabel('Final Loss')
-    ax1.set_title('Loss per Iteration')
-    ax1.grid(True, alpha=0.3)
-
-    # Win rates
-    ax2 = fig.add_subplot(2, 2, 2)
-    p1_wins = [it['p1_wins'] for it in iterations]
-    p2_wins = [it['p2_wins'] for it in iterations]
-    draws = [it['draws'] for it in iterations]
-    ax2.stackplot(iters, p1_wins, p2_wins, draws,
-                  labels=['P1 Wins', 'P2 Wins', 'Draws'],
-                  colors=['#2ecc71', '#e74c3c', '#95a5a6'])
+    ax2.plot(iterations, diversity, 'g-o', linewidth=2, markersize=4, alpha=0.8)
     ax2.set_xlabel('Iteration')
-    ax2.set_ylabel('Games')
-    ax2.set_title('Game Outcomes')
-    ax2.legend(loc='upper left')
+    ax2.set_ylabel('Unique Opening Moves')
+    ax2.set_title('Opening Move Diversity Over Training')
     ax2.grid(True, alpha=0.3)
 
-    # Game lengths
-    ax3 = fig.add_subplot(2, 2, 3)
-    avg_lens = [it['avg_game_length'] for it in iterations]
-    ax3.plot(iters, avg_lens, 'g-o', linewidth=2, markersize=8)
-    ax3.set_xlabel('Iteration')
-    ax3.set_ylabel('Moves')
-    ax3.set_title('Average Game Length')
-    ax3.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(output_dir / 'opening_diversity.png', dpi=150)
+    plt.close()
+    print(f"  Saved: opening_diversity.png")
 
-    # Stats text
+
+def plot_training_summary(models: list, games: list, output_dir: Path):
+    """Create a summary dashboard."""
+    fig = plt.figure(figsize=(16, 12))
+
+    # Loss progression
+    ax1 = fig.add_subplot(2, 2, 1)
+    iterations = [m['iteration'] for m in models if m['final_loss']]
+    total_loss = [m['final_loss'] for m in models if m['final_loss']]
+    policy_loss = [m['final_policy_loss'] for m in models if m['final_loss']]
+
+    ax1.plot(iterations, total_loss, 'b-', label='Total', linewidth=2)
+    ax1.plot(iterations, policy_loss, 'g-', label='Policy', linewidth=2, alpha=0.7)
+    ax1.set_xlabel('Iteration')
+    ax1.set_ylabel('Loss')
+    ax1.set_title('Loss Progression')
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+
+    # Game length trend
+    ax2 = fig.add_subplot(2, 2, 2)
+    version_lengths = {}
+    for g in games:
+        v = g['model_version']
+        if v not in version_lengths:
+            version_lengths[v] = []
+        version_lengths[v].append(len(g['moves']))
+
+    versions = sorted(version_lengths.keys(), key=get_iter_num)
+    iters = [get_iter_num(v) for v in versions]
+    avg_lengths = [np.mean(version_lengths[v]) for v in versions]
+
+    ax2.plot(iters, avg_lengths, 'purple', linewidth=2)
+    ax2.fill_between(iters, avg_lengths, alpha=0.3, color='purple')
+    ax2.set_xlabel('Iteration')
+    ax2.set_ylabel('Avg Game Length')
+    ax2.set_title('Game Length Over Training')
+    ax2.grid(True, alpha=0.3)
+
+    # Games per iteration
+    ax3 = fig.add_subplot(2, 2, 3)
+    version_counts = Counter(g['model_version'] for g in games)
+    versions = sorted(version_counts.keys(), key=get_iter_num)
+    iters = [get_iter_num(v) for v in versions]
+    counts = [version_counts[v] for v in versions]
+
+    ax3.bar(iters, counts, color='teal', alpha=0.7, width=0.8)
+    ax3.set_xlabel('Iteration')
+    ax3.set_ylabel('Games')
+    ax3.set_title('Games Per Iteration')
+    ax3.grid(True, alpha=0.3, axis='y')
+
+    # Summary stats
     ax4 = fig.add_subplot(2, 2, 4)
     ax4.axis('off')
 
-    total_games = data['total_games']
-    total_examples = data['total_examples']
-    total_time = data['total_time_sec'] / 60
-    start_loss = iterations[0]['epochs'][0]['loss'] if iterations else 0
-    final_loss = iterations[-1]['final_loss'] if iterations else 0
-
     stats_text = f"""
-Training Summary
-================
+    Training Summary
+    ================
 
-Total Games: {total_games:,}
-Training Examples: {total_examples:,}
-Total Time: {total_time:.1f} min
+    Total Iterations: {len(models)}
+    Total Games: {len(games)}
 
-Loss: {start_loss:.3f} → {final_loss:.3f}
-Reduction: {(1 - final_loss/start_loss)*100:.1f}%
+    Loss:
+      Initial: {total_loss[0]:.3f}
+      Final: {total_loss[-1]:.3f}
+      Reduction: {(1 - total_loss[-1]/total_loss[0])*100:.1f}%
 
-Iterations: {len(iterations)}
-Games/Iteration: {total_games // len(iterations) if iterations else 0}
-"""
-    ax4.text(0.1, 0.9, stats_text, transform=ax4.transAxes,
-             fontsize=12, verticalalignment='top', fontfamily='monospace',
+    Game Length:
+      Initial: {avg_lengths[0]:.1f} moves
+      Final: {avg_lengths[-1]:.1f} moves
+
+    Win Rates:
+      P0: {sum(1 for g in games if g['result'] > 0) / len(games) * 100:.1f}%
+      P1: {sum(1 for g in games if g['result'] < 0) / len(games) * 100:.1f}%
+    """
+
+    ax4.text(0.1, 0.9, stats_text, transform=ax4.transAxes, fontsize=12,
+             verticalalignment='top', fontfamily='monospace',
              bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
 
     plt.tight_layout()
-    plt.savefig(output_dir / 'training_summary.png', dpi=100)
+    plt.savefig(output_dir / 'training_summary.png', dpi=150)
     plt.close()
+    print(f"  Saved: training_summary.png")
 
 
-def generate_json_summary(data: dict, output_dir: Path) -> None:
-    """Generate JSON summary for web app."""
-    iterations = data['iterations']
+def plot_model_accuracy(model_path: Path, games: list, output_dir: Path):
+    """Plot model value accuracy."""
+    try:
+        import torch
+        from razzle.ai.network import RazzleNet
+        from razzle.core.state import GameState
+    except ImportError as e:
+        print(f"  Skipping model accuracy plots: {e}")
+        return
 
-    summary = {
-        'run_id': data.get('run_id', 'unknown'),
-        'total_games': data['total_games'],
-        'total_examples': data['total_examples'],
-        'total_time_min': data['total_time_sec'] / 60,
-        'num_iterations': len(iterations),
-        'start_loss': iterations[0]['epochs'][0]['loss'] if iterations else None,
-        'final_loss': iterations[-1]['final_loss'] if iterations else None,
-        'iterations': [{
-            'iteration': it['iteration'],
-            'p1_wins': it['p1_wins'],
-            'p2_wins': it['p2_wins'],
-            'draws': it['draws'],
-            'avg_game_length': it['avg_game_length'],
-            'final_loss': it['final_loss'],
-            'final_policy_loss': it['final_policy_loss'],
-            'final_value_loss': it['final_value_loss'],
-        } for it in iterations],
-        'plots': {
-            'summary': 'training_summary.png',
-            'loss_curves': 'loss_curves.png',
-            'win_rates': 'win_rates.png',
-            'game_lengths': 'game_lengths.png',
-        }
-    }
+    print(f"  Loading model: {model_path}")
+    model = RazzleNet.load(model_path)
+    model.eval()
+    device = next(model.parameters()).device
 
-    with open(output_dir / 'training_metrics.json', 'w') as f:
-        json.dump(summary, f, indent=2)
+    predictions = []
+    actuals = []
+
+    for game in games[:100]:
+        state = GameState.new_game()
+        result = game['result']
+
+        for move in game['moves'][:20]:
+            state_tensor = torch.tensor(state.to_tensor(), dtype=torch.float32).unsqueeze(0)
+            with torch.no_grad():
+                _, value = model(state_tensor.to(device))
+                pred_value = value.item()
+
+            current_player = state.current_player
+            actual_value = result if current_player == 0 else -result
+
+            predictions.append(pred_value)
+            actuals.append(actual_value)
+            state.apply_move(move)
+
+    predictions = np.array(predictions)
+    actuals = np.array(actuals)
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+
+    # Scatter plot
+    ax1.scatter(predictions, actuals, alpha=0.3, s=10)
+    ax1.plot([-1, 1], [-1, 1], 'r--', label='Perfect calibration')
+    corr = np.corrcoef(predictions, actuals)[0, 1]
+    ax1.set_xlabel('Predicted Value')
+    ax1.set_ylabel('Actual Outcome')
+    ax1.set_title(f'Value Prediction vs Outcome (r={corr:.3f})')
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+
+    # Calibration plot
+    bins = [(-1.0, -0.6), (-0.6, -0.2), (-0.2, 0.2), (0.2, 0.6), (0.6, 1.0)]
+    bin_centers = []
+    actual_rates = []
+
+    for low, high in bins:
+        mask = (predictions >= low) & (predictions < high)
+        if mask.sum() > 0:
+            bin_centers.append((low + high) / 2)
+            win_rate = (actuals[mask] + 1) / 2
+            actual_rates.append(win_rate.mean())
+
+    ax2.bar(bin_centers, actual_rates, width=0.35, alpha=0.8, color='steelblue')
+    ax2.plot([-1, 1], [0, 1], 'r--', label='Perfect calibration')
+    ax2.set_xlabel('Predicted Value')
+    ax2.set_ylabel('Actual Win Rate')
+    ax2.set_title('Value Calibration')
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(output_dir / 'model_accuracy.png', dpi=150)
+    plt.close()
+    print(f"  Saved: model_accuracy.png")
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Generate training progress plots')
-    parser.add_argument('--log', type=Path, default=Path('output/output/training_log.json'),
-                        help='Path to training log JSON')
-    parser.add_argument('--output', type=Path, default=Path('output/plots'),
+    parser = argparse.ArgumentParser(description='Generate training analysis plots')
+    parser.add_argument('--db', type=Path, default=Path('server/games.db'),
+                        help='Path to games database')
+    parser.add_argument('--output', type=Path, default=Path('plots'),
                         help='Output directory for plots')
+    parser.add_argument('--model', type=Path, default=None,
+                        help='Model file for accuracy analysis')
+    parser.add_argument('--games', type=int, default=5000,
+                        help='Max games to analyze')
 
     args = parser.parse_args()
-
-    if not args.log.exists():
-        print(f"Training log not found: {args.log}")
-        return
-
     args.output.mkdir(parents=True, exist_ok=True)
 
-    print(f"Loading training log: {args.log}")
-    data = load_training_log(args.log)
+    print(f"Loading data from {args.db}...")
+    conn = get_db_connection(args.db)
 
-    print(f"Generating plots to: {args.output}")
-    plot_loss_curves(data, args.output)
-    plot_win_rates(data, args.output)
-    plot_game_lengths(data, args.output)
-    plot_training_summary(data, args.output)
-    generate_json_summary(data, args.output)
+    models = fetch_models(conn)
+    games = fetch_games(conn, args.games)
 
-    print("Generated:")
-    print("  - training_summary.png")
-    print("  - loss_curves.png")
-    print("  - win_rates.png")
-    print("  - game_lengths.png")
-    print("  - training_metrics.json")
+    print(f"Loaded {len(models)} models and {len(games)} games")
+    print("\nGenerating plots...")
+
+    plot_loss_progression(models, args.output)
+    plot_game_length_distribution(games, args.output)
+    plot_win_rates(games, args.output)
+    plot_games_per_iteration(games, args.output)
+    plot_opening_diversity(games, args.output)
+    plot_training_summary(models, games, args.output)
+
+    if args.model and args.model.exists():
+        plot_model_accuracy(args.model, games, args.output)
+
+    print(f"\nAll plots saved to {args.output}/")
+    conn.close()
 
 
 if __name__ == '__main__':

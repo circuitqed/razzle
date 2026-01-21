@@ -52,6 +52,7 @@ games/
 logs/
 output/
 output_shaped/
+plots/
 *.pt
 *.pth
 *.onnx

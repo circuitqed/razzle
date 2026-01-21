@@ -792,6 +792,51 @@ def get_pending_training_games(
         return games, total_pending
 
 
+def get_all_training_games(
+    limit: int = 500,
+    offset: int = 0,
+    db_path: Path = None
+) -> tuple[list[dict], int]:
+    """
+    Fetch all training games for analysis (both pending and used).
+
+    Args:
+        limit: Maximum number of games to return
+        offset: Number of games to skip
+
+    Returns:
+        Tuple of (list of games, total count)
+    """
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+
+    with get_connection(db_path) as conn:
+        # Get total count
+        total = conn.execute("SELECT COUNT(*) FROM training_games").fetchone()[0]
+
+        # Fetch games
+        rows = conn.execute("""
+            SELECT id, worker_id, moves, result, visit_counts, model_version, created_at
+            FROM training_games
+            ORDER BY created_at DESC
+            LIMIT ? OFFSET ?
+        """, (limit, offset)).fetchall()
+
+        games = []
+        for row in rows:
+            games.append({
+                "id": row["id"],
+                "worker_id": row["worker_id"],
+                "moves": json.loads(row["moves"]),
+                "result": row["result"],
+                "visit_counts": json.loads(row["visit_counts"]),
+                "model_version": row["model_version"],
+                "created_at": row["created_at"],
+            })
+
+        return games, total
+
+
 def get_training_games_stats(db_path: Path = None) -> dict:
     """Get statistics about training games."""
     if db_path is None:
@@ -933,3 +978,43 @@ def list_training_models(limit: int = 50, db_path: Path = None) -> list[dict]:
             "file_path": row["file_path"],
             "created_at": row["created_at"],
         } for row in rows]
+
+
+def clear_training_data(db_path: Path = None) -> dict:
+    """Clear all training games and models. Returns counts of deleted items."""
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+
+    with get_connection(db_path) as conn:
+        # Get counts before deletion
+        games_count = conn.execute("SELECT COUNT(*) FROM training_games").fetchone()[0]
+        models_count = conn.execute("SELECT COUNT(*) FROM training_models").fetchone()[0]
+
+        # Delete all training games
+        conn.execute("DELETE FROM training_games")
+
+        # Get file paths before deleting models
+        model_rows = conn.execute("SELECT file_path FROM training_models").fetchall()
+        model_files = [row["file_path"] for row in model_rows]
+
+        # Delete all training models from DB
+        conn.execute("DELETE FROM training_models")
+
+        conn.commit()
+
+        # Delete model files from disk
+        deleted_files = 0
+        for file_path in model_files:
+            try:
+                path = Path(file_path)
+                if path.exists():
+                    path.unlink()
+                    deleted_files += 1
+            except Exception:
+                pass  # Ignore file deletion errors
+
+        return {
+            "games_deleted": games_count,
+            "models_deleted": models_count,
+            "files_deleted": deleted_files,
+        }

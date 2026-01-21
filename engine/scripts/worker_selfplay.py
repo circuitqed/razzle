@@ -84,7 +84,7 @@ class SelfPlayWorker:
         temperature_moves: int = 30,
         filters: int = 64,
         blocks: int = 6,
-        batch_size: int = 16,
+        batch_size: int = 32,
         model_check_interval: int = 5,  # Check for new model every N games
     ):
         self.worker_id = worker_id
@@ -420,16 +420,34 @@ def main():
                         help='MCTS simulations per move')
     parser.add_argument('--temperature-moves', type=int, default=30,
                         help='Number of moves to use temperature')
-    parser.add_argument('--filters', type=int, default=64,
-                        help='Network filter count')
-    parser.add_argument('--blocks', type=int, default=6,
-                        help='Network residual blocks')
-    parser.add_argument('--batch-size', type=int, default=16,
-                        help='MCTS batch size')
+    parser.add_argument('--filters', type=int, default=None,
+                        help='Network filter count (overrides --network-size)')
+    parser.add_argument('--blocks', type=int, default=None,
+                        help='Network residual blocks (overrides --network-size)')
+    parser.add_argument('--network-size', type=str, default='medium', choices=['small', 'medium', 'large'],
+                        help='Network size preset: small (64f/6b), medium (128f/10b), large (256f/15b)')
+    parser.add_argument('--batch-size', type=int, default=32,
+                        help='MCTS batch size for GPU parallelism')
     parser.add_argument('--model-check-interval', type=int, default=5,
                         help='Check for new model every N games')
 
     args = parser.parse_args()
+
+    # Resolve network size presets
+    NETWORK_PRESETS = {
+        'small': (64, 6),      # ~900K params, fast inference
+        'medium': (128, 10),   # ~3.5M params, balanced
+        'large': (256, 15),    # ~15M params, stronger but slower
+    }
+
+    if args.filters is not None and args.blocks is not None:
+        filters, blocks = args.filters, args.blocks
+    else:
+        filters, blocks = NETWORK_PRESETS[args.network_size]
+        if args.filters is not None:
+            filters = args.filters
+        if args.blocks is not None:
+            blocks = args.blocks
 
     # Ensure unbuffered output
     os.environ['PYTHONUNBUFFERED'] = '1'
@@ -441,8 +459,8 @@ def main():
         device=args.device,
         simulations=args.simulations,
         temperature_moves=args.temperature_moves,
-        filters=args.filters,
-        blocks=args.blocks,
+        filters=filters,
+        blocks=blocks,
         batch_size=args.batch_size,
         model_check_interval=args.model_check_interval
     )

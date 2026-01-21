@@ -108,6 +108,8 @@ def setup_worker_instance(
     filters: int,
     blocks: int,
     training_threshold: int = 50,
+    workers_per_instance: int = 1,
+    batch_size: int = 32,
 ) -> bool:
     """Set up a worker instance and start the worker/trainer process."""
     role_name = "Trainer" if worker.role == "trainer" else f"Worker {worker.worker_id}"
@@ -161,19 +163,44 @@ def setup_worker_instance(
                 sleep 2 && echo "Trainer started"
             """
         else:
-            # Start worker process
-            print(f"[{role_name}] Starting worker process...")
-            start_cmd = f"""setsid python -u /workspace/worker_selfplay.py \
-                --worker-id {worker.worker_id} \
-                --api-url {api_url} \
-                --workspace /workspace \
-                --device cuda \
-                --simulations {simulations} \
-                --filters {filters} \
-                --blocks {blocks} \
-                </dev/null >/workspace/worker.log 2>&1 &
-                sleep 2 && echo "Worker started"
-            """
+            # Start worker process(es)
+            if workers_per_instance == 1:
+                print(f"[{role_name}] Starting worker process...")
+                start_cmd = f"""setsid python -u /workspace/worker_selfplay.py \
+                    --worker-id {worker.worker_id} \
+                    --api-url {api_url} \
+                    --workspace /workspace \
+                    --device cuda \
+                    --simulations {simulations} \
+                    --filters {filters} \
+                    --blocks {blocks} \
+                    --batch-size {batch_size} \
+                    </dev/null >/workspace/worker.log 2>&1 &
+                    sleep 2 && echo "Worker started"
+                """
+            else:
+                # Launch multiple workers sharing the GPU
+                print(f"[{role_name}] Starting {workers_per_instance} worker processes...")
+                worker_cmds = []
+                for i in range(workers_per_instance):
+                    sub_worker_id = worker.worker_id * workers_per_instance + i
+                    worker_cmds.append(
+                        f"setsid python -u /workspace/worker_selfplay.py "
+                        f"--worker-id {sub_worker_id} "
+                        f"--api-url {api_url} "
+                        f"--workspace /workspace/worker_{i} "
+                        f"--device cuda "
+                        f"--simulations {simulations} "
+                        f"--filters {filters} "
+                        f"--blocks {blocks} "
+                        f"--batch-size {batch_size} "
+                        f"</dev/null >/workspace/worker_{i}.log 2>&1 &"
+                    )
+                # Create workspace dirs and launch all workers
+                mkdir_cmds = " && ".join([f"mkdir -p /workspace/worker_{i}/model" for i in range(workers_per_instance)])
+                start_cmd = f"""{mkdir_cmds} && {" && ".join(worker_cmds)}
+                    sleep 2 && echo "{workers_per_instance} workers started"
+                """
 
         result = vast.execute(worker.instance_id, start_cmd, timeout=60)
         print(f"[{role_name}] {result.strip()}")
@@ -216,6 +243,8 @@ class DistributedOrchestrator:
         blocks: int = 6,
         with_trainer: bool = True,
         training_threshold: int = 50,
+        workers_per_instance: int = 1,
+        batch_size: int = 32,
     ):
         self.num_workers = num_workers
         self.api_url = api_url
@@ -228,6 +257,8 @@ class DistributedOrchestrator:
         self.blocks = blocks
         self.with_trainer = with_trainer
         self.training_threshold = training_threshold
+        self.workers_per_instance = workers_per_instance
+        self.batch_size = batch_size
 
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -370,6 +401,8 @@ class DistributedOrchestrator:
                     self.filters,
                     self.blocks,
                     self.training_threshold,
+                    self.workers_per_instance,
+                    self.batch_size,
                 ): instance
                 for instance in ready_instances
             }
@@ -469,12 +502,15 @@ class DistributedOrchestrator:
         print("=" * 60)
 
         print(f"\nConfiguration:")
-        print(f"  Workers: {self.num_workers}")
-        print(f"  Trainer: {'Yes (cloud GPU)' if self.with_trainer else 'No (run separately)'}")
+        print(f"  Instances: {self.num_workers} worker + {'1 trainer' if self.with_trainer else 'no trainer'}")
+        print(f"  Workers per instance: {self.workers_per_instance}")
+        print(f"  Total worker processes: {self.num_workers * self.workers_per_instance}")
         print(f"  API URL: {self.api_url}")
         print(f"  GPU: {self.gpu_name or 'any'}")
         print(f"  Max price: ${self.max_price}/hr")
+        print(f"  Network: {self.filters} filters, {self.blocks} blocks")
         print(f"  Simulations: {self.simulations}")
+        print(f"  MCTS batch size: {self.batch_size}")
         print(f"  Training threshold: {self.training_threshold} games")
         print(f"  Output: {self.output_dir}")
 
@@ -587,16 +623,39 @@ def main():
     parser.add_argument('--gpu', type=str, default='RTX_3060', help='GPU type')
     parser.add_argument('--max-price', type=float, default=0.10, help='Max price per hour')
     parser.add_argument('--simulations', type=int, default=400, help='MCTS simulations')
-    parser.add_argument('--filters', type=int, default=64, help='Network filters')
-    parser.add_argument('--blocks', type=int, default=6, help='Network blocks')
+    parser.add_argument('--filters', type=int, default=None, help='Network filters (overrides --network-size)')
+    parser.add_argument('--blocks', type=int, default=None, help='Network blocks (overrides --network-size)')
+    parser.add_argument('--network-size', type=str, default='medium', choices=['small', 'medium', 'large'],
+                        help='Network size preset: small (64f/6b), medium (128f/10b), large (256f/15b)')
     parser.add_argument('--output', type=Path, default=Path('output/distributed'),
                         help='Output directory')
     parser.add_argument('--no-trainer', action='store_true',
                         help='Do not create a trainer instance (run trainer separately)')
     parser.add_argument('--threshold', type=int, default=50,
                         help='Number of games before training (default: 50)')
+    parser.add_argument('--workers-per-instance', type=int, default=1,
+                        help='Number of worker processes per GPU instance (default: 1)')
+    parser.add_argument('--batch-size', type=int, default=32,
+                        help='MCTS batch size for GPU parallelism (default: 32)')
 
     args = parser.parse_args()
+
+    # Resolve network size presets
+    NETWORK_PRESETS = {
+        'small': (64, 6),      # ~900K params, fast inference
+        'medium': (128, 10),   # ~3.5M params, balanced
+        'large': (256, 15),    # ~15M params, stronger but slower
+    }
+
+    # Use explicit args if provided, otherwise use preset
+    if args.filters is not None and args.blocks is not None:
+        filters, blocks = args.filters, args.blocks
+    else:
+        filters, blocks = NETWORK_PRESETS[args.network_size]
+        if args.filters is not None:
+            filters = args.filters
+        if args.blocks is not None:
+            blocks = args.blocks
 
     # Ensure unbuffered output
     os.environ['PYTHONUNBUFFERED'] = '1'
@@ -608,10 +667,12 @@ def main():
         gpu_name=args.gpu,
         max_price=args.max_price,
         simulations=args.simulations,
-        filters=args.filters,
-        blocks=args.blocks,
+        filters=filters,
+        blocks=blocks,
         with_trainer=not args.no_trainer,
         training_threshold=args.threshold,
+        workers_per_instance=args.workers_per_instance,
+        batch_size=args.batch_size,
     )
 
     # Handle signals
