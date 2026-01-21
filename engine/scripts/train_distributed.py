@@ -198,7 +198,8 @@ def setup_worker_instance(
                     )
                 # Create workspace dirs and launch all workers
                 mkdir_cmds = " && ".join([f"mkdir -p /workspace/worker_{i}/model" for i in range(workers_per_instance)])
-                start_cmd = f"""{mkdir_cmds} && {" && ".join(worker_cmds)}
+                # Join backgrounded commands with space, not &&, since & doesn't return exit status for &&
+                start_cmd = f"""{mkdir_cmds} && {" ".join(worker_cmds)}
                     sleep 2 && echo "{workers_per_instance} workers started"
                 """
 
