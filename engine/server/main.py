@@ -30,9 +30,10 @@ from razzle.core.moves import (
     decode_move, encode_move
 )
 from razzle.core.bitboard import algebraic_to_sq, sq_to_algebraic
-from razzle.ai.mcts import MCTS, MCTSConfig
+from razzle.ai.mcts import MCTS, MCTSConfig, play_move_timed
 from razzle.ai.evaluator import BatchedEvaluator, DummyEvaluator
 from razzle.ai.network import RazzleNet
+from razzle.ai.time_manager import create_time_manager, TimeManager
 import random as py_random
 
 from . import persistence
@@ -54,6 +55,7 @@ class CreateGameRequest(BaseModel):
     player2_type: str = "ai"
     ai_simulations: int = 800
     bot_type: str = Field(default=DEFAULT_BOT_TYPE, description="AI bot type: 'neural', 'mcts', or 'random'")
+    time_control: Optional[float] = Field(default=None, description="Total time per player in seconds. If set, enables dynamic time management.")
 
 
 class CreateGameResponse(BaseModel):
@@ -82,6 +84,8 @@ class GameStateResponse(BaseModel):
     ply: int
     touched_mask: str  # Bitboard of ineligible receivers (string for JS precision)
     has_passed: bool  # Whether a pass has been made this turn
+    time_control: Optional[float] = None  # Total time per player in seconds
+    time_remaining: Optional[list[float]] = None  # Remaining time [p1, p2] if time controlled
 
 
 class MakeMoveRequest(BaseModel):
@@ -93,6 +97,7 @@ class AIMoveRequest(BaseModel):
     temperature: float = 0.0
     bot_type: Optional[str] = Field(default=None, description="AI bot type: 'neural', 'mcts', or 'random'. If None, uses game's default.")
     model: Optional[str] = Field(default=None, description="Model to use: 'random_weights' or path to model file. If None, uses latest model.")
+    use_time_control: bool = Field(default=True, description="If game has time control, use dynamic time management for this move.")
 
 
 class TopMove(BaseModel):
@@ -111,6 +116,8 @@ class AIMoveResponse(BaseModel):
     time_ms: int
     top_moves: list[TopMove]
     game_state: GameStateResponse
+    difficulty: Optional[float] = Field(default=None, description="Position difficulty [0-1] if using time control")
+    remaining_time: Optional[float] = Field(default=None, description="Remaining time in seconds if using time control")
 
 
 class LegalMove(BaseModel):
@@ -305,14 +312,27 @@ class Game:
         player1_type: str = "human",
         player2_type: str = "ai",
         ai_simulations: int = 800,
-        bot_type: str = DEFAULT_BOT_TYPE
+        bot_type: str = DEFAULT_BOT_TYPE,
+        time_control: Optional[float] = None
     ):
         self.game_id = game_id
         self.state = GameState.new_game()
         self.player_types = [player1_type, player2_type]
         self.ai_simulations = ai_simulations
         self.bot_type = bot_type
+        self.time_control = time_control
         self.websockets: list[WebSocket] = []
+
+        # Create time managers if time control is enabled
+        self.time_managers: list[Optional[TimeManager]] = [None, None]
+        if time_control is not None:
+            for i in range(2):
+                self.time_managers[i] = create_time_manager(
+                    total_time=time_control,
+                    min_sims=100,
+                    max_sims=ai_simulations,
+                    default_sims=ai_simulations
+                )
 
     def to_response(self) -> GameStateResponse:
         """Convert to API response."""
@@ -320,6 +340,14 @@ class Game:
             status = "finished"
         else:
             status = "playing"
+
+        # Get time remaining if time controlled
+        time_remaining = None
+        if self.time_control is not None:
+            time_remaining = [
+                self.time_managers[0].remaining_time if self.time_managers[0] else 0.0,
+                self.time_managers[1].remaining_time if self.time_managers[1] else 0.0,
+            ]
 
         return GameStateResponse(
             game_id=self.game_id,
@@ -335,7 +363,9 @@ class Game:
             winner=self.state.get_winner(),
             ply=self.state.ply,
             touched_mask=str(self.state.touched_mask),
-            has_passed=self.state.has_passed
+            has_passed=self.state.has_passed,
+            time_control=self.time_control,
+            time_remaining=time_remaining
         )
 
 
@@ -685,8 +715,8 @@ async def health_check():
     return HealthResponse(status="ok", version="0.1.0", model=get_model_info())
 
 
-class ModelInfo(BaseModel):
-    """Information about an available model."""
+class AvailableModelInfo(BaseModel):
+    """Information about an available model file."""
     name: str  # Display name (filename)
     path: str  # Full path for selection
     mtime: float  # Modification time for sorting
@@ -694,7 +724,7 @@ class ModelInfo(BaseModel):
 
 class ModelsResponse(BaseModel):
     """Response for listing available models."""
-    models: list[ModelInfo]
+    models: list[AvailableModelInfo]
     current: str  # Currently loaded model
 
 
@@ -715,7 +745,7 @@ async def list_models():
                         continue
                     seen_paths.add(path_str)
                     mtime = model_path.stat().st_mtime
-                    models.append(ModelInfo(
+                    models.append(AvailableModelInfo(
                         name=model_path.name,
                         path=path_str,
                         mtime=mtime
@@ -727,7 +757,7 @@ async def list_models():
     models.sort(key=lambda m: m.mtime, reverse=True)
 
     # Add "random_weights" as a special option at the beginning
-    models.insert(0, ModelInfo(name="random_weights", path="random_weights", mtime=0))
+    models.insert(0, AvailableModelInfo(name="random_weights", path="random_weights", mtime=0))
 
     return ModelsResponse(models=models, current=get_model_info())
 
@@ -908,6 +938,24 @@ async def fetch_training_games(
     )
 
 
+@app.get("/training/games/all")
+async def get_all_training_games(
+    limit: int = 500,
+    offset: int = 0,
+):
+    """
+    Fetch all training games for analysis (both pending and used).
+    Does not mark games as used.
+    """
+    games, total = persistence.get_all_training_games(limit=limit, offset=offset)
+    return {
+        "games": games,
+        "count": len(games),
+        "total": total,
+        "offset": offset,
+    }
+
+
 @app.get("/training/models/latest", response_model=LatestModelResponse)
 async def get_latest_model():
     """Get information about the latest training model."""
@@ -1036,6 +1084,20 @@ async def get_training_dashboard():
     )
 
 
+class ClearTrainingResponse(BaseModel):
+    """Response after clearing training data."""
+    games_deleted: int
+    models_deleted: int
+    files_deleted: int
+
+
+@app.delete("/training/clear")
+async def clear_training_data():
+    """Clear all training games and models to start fresh."""
+    result = persistence.clear_training_data()
+    return ClearTrainingResponse(**result)
+
+
 # Setup client logging
 LOG_DIR = Path("/tmp/razzle-logs")
 LOG_DIR.mkdir(exist_ok=True)
@@ -1088,7 +1150,8 @@ async def create_game(
         player1_type=request.player1_type,
         player2_type=request.player2_type,
         ai_simulations=request.ai_simulations,
-        bot_type=bot_type
+        bot_type=bot_type,
+        time_control=request.time_control
     )
     games[game_id] = game
 
@@ -1170,6 +1233,9 @@ async def get_ai_move(
     - "neural": Uses trained neural network (strongest if trained well)
     - "mcts": Pure MCTS with uniform priors (good baseline for testing)
     - "random": Random legal moves (weakest)
+
+    If the game has time control enabled and use_time_control is True,
+    the AI will dynamically allocate simulations based on position difficulty.
     """
     if request is None:
         request = AIMoveRequest()
@@ -1193,6 +1259,13 @@ async def get_ai_move(
         raise HTTPException(status_code=409, detail="Game already finished")
 
     start_time = time.time()
+    difficulty = None
+    remaining_time = None
+
+    # Check if we should use time control
+    current_player = game.state.current_player
+    time_manager = game.time_managers[current_player] if game.time_control else None
+    use_time_control = request.use_time_control and time_manager is not None and bot_type == "neural"
 
     # Handle "random" bot type - just pick a random legal move
     if bot_type == "random":
@@ -1209,8 +1282,38 @@ async def get_ai_move(
         top_moves = [TopMove(move=move, algebraic=move_to_algebraic(move), visits=1, value=0.0)]
         total_visits = 1
         value = 0.0
+    elif use_time_control:
+        # Use dynamic time management based on position difficulty
+        ev = get_evaluator_for_model(request.model)
+
+        move, root, info = play_move_timed(
+            game.state, ev, time_manager,
+            temperature=request.temperature,
+            batch_size=16
+        )
+
+        policy = MCTS(ev, MCTSConfig(temperature=request.temperature)).get_policy(root).tolist()
+        total_visits = info['simulations_done']
+        difficulty = info['difficulty']
+        remaining_time = time_manager.remaining_time
+
+        elapsed_ms = int(info['elapsed_time'] * 1000)
+
+        # Get analysis
+        mcts = MCTS(ev, MCTSConfig(temperature=request.temperature))
+        analysis = mcts.analyze(root, top_k=5)
+        top_moves = [
+            TopMove(
+                move=m['move'],
+                algebraic=m['algebraic'],
+                visits=m['visits'],
+                value=m['value']
+            )
+            for m in analysis
+        ]
+        value = root.value
     else:
-        # Run MCTS with appropriate evaluator
+        # Run MCTS with fixed simulations
         if bot_type == "mcts":
             # Pure MCTS with uniform priors over legal moves
             ev = DummyEvaluator()
@@ -1268,7 +1371,9 @@ async def get_ai_move(
         visits=total_visits,
         time_ms=elapsed_ms,
         top_moves=top_moves,
-        game_state=game_response
+        game_state=game_response,
+        difficulty=difficulty,
+        remaining_time=remaining_time
     )
 
 

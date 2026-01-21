@@ -1,11 +1,12 @@
 """
 Neural network for Razzle Dazzle position evaluation.
 
-Architecture: Residual CNN with policy and value heads.
+Architecture: Residual CNN with policy, value, and difficulty heads.
 Input: (batch, 6, 8, 7) - board planes
 Output:
-  - policy: (batch, 3136) - log probabilities over moves (56*56)
+  - policy: (batch, 3137) - log probabilities over moves (56*56 + END_TURN)
   - value: (batch, 1) - position evaluation [-1, 1]
+  - difficulty: (batch, 1) - predicted search difficulty [0, 1]
 """
 
 from __future__ import annotations
@@ -86,7 +87,13 @@ class RazzleNet(nn.Module):
         self.value_fc1 = nn.Linear(c.value_filters * ROWS * COLS, c.value_hidden)
         self.value_fc2 = nn.Linear(c.value_hidden, 1)
 
-    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        # Difficulty head (predicts how much MCTS will change the policy)
+        self.difficulty_conv = nn.Conv2d(c.num_filters, c.value_filters, 1, bias=False)
+        self.difficulty_bn = nn.BatchNorm2d(c.value_filters)
+        self.difficulty_fc1 = nn.Linear(c.value_filters * ROWS * COLS, c.value_hidden)
+        self.difficulty_fc2 = nn.Linear(c.value_hidden, 1)
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Forward pass.
 
@@ -94,8 +101,9 @@ class RazzleNet(nn.Module):
             x: Input tensor of shape (batch, 6, 8, 7)
 
         Returns:
-            policy: Log probabilities over actions (batch, 3136)
+            policy: Log probabilities over actions (batch, 3137)
             value: Position evaluation (batch, 1) in range [-1, 1]
+            difficulty: Predicted search difficulty (batch, 1) in range [0, 1]
         """
         # Input block
         x = F.relu(self.bn_in(self.conv_in(x)))
@@ -104,22 +112,40 @@ class RazzleNet(nn.Module):
         for block in self.res_blocks:
             x = block(x)
 
+        tower = x  # Save tower output for all heads
+
         # Policy head
-        p = F.relu(self.policy_bn(self.policy_conv(x)))
+        p = F.relu(self.policy_bn(self.policy_conv(tower)))
         p = p.view(p.size(0), -1)
         p = self.policy_fc(p)
         p = F.log_softmax(p, dim=1)
 
         # Value head
-        v = F.relu(self.value_bn(self.value_conv(x)))
+        v = F.relu(self.value_bn(self.value_conv(tower)))
         v = v.view(v.size(0), -1)
         v = F.relu(self.value_fc1(v))
         v = torch.tanh(self.value_fc2(v))
 
-        return p, v
+        # Difficulty head (backward compatible - may not exist in old models)
+        if hasattr(self, 'difficulty_fc2'):
+            d = F.relu(self.difficulty_bn(self.difficulty_conv(tower)))
+            d = d.view(d.size(0), -1)
+            d = F.relu(self.difficulty_fc1(d))
+            d = torch.sigmoid(self.difficulty_fc2(d))  # Output in [0, 1]
+        else:
+            # Old model: return neutral difficulty (0.5)
+            d = torch.full((x.size(0), 1), 0.5, device=x.device)
 
-    def predict(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """Inference mode prediction (no gradients)."""
+        return p, v, d
+
+    def predict(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Inference mode prediction (no gradients).
+
+        Returns:
+            policy: Log probabilities over actions
+            value: Position evaluation
+            difficulty: Predicted search difficulty
+        """
         self.eval()
         with torch.no_grad():
             return self.forward(x)
@@ -133,12 +159,31 @@ class RazzleNet(nn.Module):
 
     @classmethod
     def load(cls, path: str, device: str = 'cpu') -> RazzleNet:
-        """Load model from file."""
+        """Load model from file.
+
+        Handles backward compatibility with old models that don't have
+        the difficulty head - those will use neutral difficulty (0.5).
+        """
         # Use weights_only=False since we're loading our own checkpoints
         # which contain NetworkConfig dataclass
         checkpoint = torch.load(path, map_location=device, weights_only=False)
         model = cls(checkpoint['config'])
-        model.load_state_dict(checkpoint['state_dict'])
+
+        # Handle backward compatibility: old models don't have difficulty head
+        state_dict = checkpoint['state_dict']
+        model_state = model.state_dict()
+
+        # Check if checkpoint has difficulty head weights
+        has_difficulty = 'difficulty_fc2.weight' in state_dict
+
+        if not has_difficulty:
+            # Old model - load only existing weights, keep new difficulty head random
+            # Filter to only keys that exist in the checkpoint
+            filtered_state = {k: v for k, v in state_dict.items() if k in model_state}
+            model.load_state_dict(filtered_state, strict=False)
+        else:
+            model.load_state_dict(state_dict)
+
         return model
 
     def num_parameters(self) -> int:

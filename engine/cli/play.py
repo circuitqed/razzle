@@ -20,9 +20,10 @@ from razzle.core.moves import (
 )
 from razzle.core.bitboard import sq_to_algebraic
 from razzle.core.notation import game_to_pgn
-from razzle.ai.mcts import MCTS, MCTSConfig, play_move
+from razzle.ai.mcts import MCTS, MCTSConfig, play_move, play_move_timed
 from razzle.ai.network import RazzleNet, create_network
 from razzle.ai.evaluator import BatchedEvaluator, DummyEvaluator
+from razzle.ai.time_manager import create_time_manager, TimeManager
 
 
 def print_board(state: GameState, highlight_moves: list[int] = None) -> None:
@@ -152,9 +153,18 @@ def play_human_vs_ai(
     network: RazzleNet | None = None,
     human_player: int = 0,
     num_simulations: int = 800,
-    device: str = 'cpu'
+    device: str = 'cpu',
+    time_limit: float | None = None
 ) -> None:
-    """Play a game: human vs AI."""
+    """Play a game: human vs AI.
+
+    Args:
+        network: Neural network for AI evaluation
+        human_player: Which player is human (0 or 1)
+        num_simulations: Max MCTS simulations per move (fixed mode)
+        device: Device for neural network
+        time_limit: If set, use timed mode with this total time in seconds
+    """
     state = GameState.new_game()
 
     if network:
@@ -163,7 +173,18 @@ def play_human_vs_ai(
         print("No network loaded. Using random policy.")
         evaluator = DummyEvaluator()
 
-    mcts_config = MCTSConfig(num_simulations=num_simulations, temperature=0.0, batch_size=16)
+    # Set up time manager if using timed mode
+    time_manager = None
+    if time_limit is not None:
+        time_manager = create_time_manager(
+            total_time=time_limit,
+            min_sims=100,
+            max_sims=num_simulations,
+            default_sims=num_simulations
+        )
+        print(f"\n=== Timed Game: {time_limit}s for AI ===")
+    else:
+        mcts_config = MCTSConfig(num_simulations=num_simulations, temperature=0.0, batch_size=16)
 
     print("\n=== Razzle Dazzle ===")
     print("You are", "X (player 1)" if human_player == 0 else "O (player 2)")
@@ -207,15 +228,31 @@ def play_human_vs_ai(
                     print(f"You played: {move_to_algebraic(result)}")
                     break
         else:
-            # AI's turn - use batched search for better performance
-            print(f"AI thinking ({num_simulations} simulations)...")
-            mcts = MCTS(evaluator, mcts_config)
-            root = mcts.search_batched(state, add_noise=False)
-            move = mcts.select_move(root)
+            # AI's turn
+            if time_manager is not None:
+                # Timed mode - dynamic simulation allocation
+                remaining = time_manager.remaining_time
+                print(f"AI thinking (time remaining: {remaining:.1f}s)...")
 
-            # Show analysis
-            analysis = mcts.analyze(root, top_k=3)
-            print("AI analysis:")
+                move, root, info = play_move_timed(
+                    state, evaluator, time_manager, temperature=0.0
+                )
+
+                # Show analysis with timing info
+                mcts = MCTS(evaluator, MCTSConfig(temperature=0.0))
+                analysis = mcts.analyze(root, top_k=3)
+                print(f"AI analysis (difficulty={info['difficulty']:.2f}, "
+                      f"sims={info['simulations_done']}, "
+                      f"time={info['elapsed_time']:.2f}s):")
+            else:
+                # Fixed simulation mode
+                print(f"AI thinking ({num_simulations} simulations)...")
+                mcts = MCTS(evaluator, mcts_config)
+                root = mcts.search_batched(state, add_noise=False)
+                move = mcts.select_move(root)
+                analysis = mcts.analyze(root, top_k=3)
+                print("AI analysis:")
+
             for m in analysis:
                 print(f"  {m['algebraic']}: {m['visits']} visits, "
                       f"value={m['value']:.2f}")
@@ -234,15 +271,31 @@ def play_human_vs_ai(
     else:
         print("Game drawn.")
 
+    # Show time management stats if applicable
+    if time_manager is not None:
+        stats = time_manager.stats()
+        print(f"\nTime stats: {stats['total_simulations']} total sims, "
+              f"{stats['avg_sims_per_move']:.0f} avg/move, "
+              f"{stats['total_time_used']:.1f}s used")
+
 
 def watch_ai_vs_ai(
     network: RazzleNet | None = None,
     num_simulations: int = 400,
     device: str = 'cpu',
-    delay: float = 1.0
+    delay: float = 1.0,
+    time_limit: float | None = None
 ) -> GameState:
-    """Watch AI play against itself. Returns final state."""
-    import time
+    """Watch AI play against itself. Returns final state.
+
+    Args:
+        network: Neural network for AI evaluation
+        num_simulations: Max MCTS simulations per move
+        device: Device for neural network
+        delay: Delay between moves in seconds
+        time_limit: If set, use timed mode with this total time per player
+    """
+    import time as time_module
 
     state = GameState.new_game()
 
@@ -251,21 +304,54 @@ def watch_ai_vs_ai(
     else:
         evaluator = DummyEvaluator()
 
-    mcts_config = MCTSConfig(num_simulations=num_simulations, temperature=0.1, batch_size=16)
-
-    print("\n=== AI vs AI ===")
-    print(f"Simulations per move: {num_simulations}")
+    # Set up time managers for each player if using timed mode
+    time_managers = [None, None]
+    if time_limit is not None:
+        time_managers = [
+            create_time_manager(
+                total_time=time_limit,
+                min_sims=100,
+                max_sims=num_simulations,
+                default_sims=num_simulations
+            ),
+            create_time_manager(
+                total_time=time_limit,
+                min_sims=100,
+                max_sims=num_simulations,
+                default_sims=num_simulations
+            )
+        ]
+        print(f"\n=== Timed AI vs AI: {time_limit}s per player ===")
+    else:
+        mcts_config = MCTSConfig(num_simulations=num_simulations, temperature=0.1, batch_size=16)
+        print("\n=== AI vs AI ===")
+        print(f"Simulations per move: {num_simulations}")
 
     move_count = 0
     while not state.is_terminal():
         print_board(state)
-        print(f"Move {move_count + 1}, Player {state.current_player + 1}")
+        player = state.current_player
+        tm = time_managers[player]
 
-        mcts = MCTS(evaluator, mcts_config)
-        root = mcts.search_batched(state)
-        move = mcts.select_move(root)
+        if tm is not None:
+            remaining = tm.remaining_time
+            print(f"Move {move_count + 1}, Player {player + 1} (time: {remaining:.1f}s)")
 
-        analysis = mcts.analyze(root, top_k=3)
+            move, root, info = play_move_timed(
+                state, evaluator, tm, temperature=0.1
+            )
+
+            mcts = MCTS(evaluator, MCTSConfig(temperature=0.1))
+            analysis = mcts.analyze(root, top_k=3)
+            print(f"  difficulty={info['difficulty']:.2f}, sims={info['simulations_done']}")
+        else:
+            print(f"Move {move_count + 1}, Player {player + 1}")
+
+            mcts = MCTS(evaluator, mcts_config)
+            root = mcts.search_batched(state)
+            move = mcts.select_move(root)
+            analysis = mcts.analyze(root, top_k=3)
+
         for m in analysis:
             print(f"  {m['algebraic']}: {m['visits']} visits, value={m['value']:.2f}")
 
@@ -273,11 +359,19 @@ def watch_ai_vs_ai(
         print(f"Plays: {move_to_algebraic(move)}\n")
 
         move_count += 1
-        time.sleep(delay)
+        time_module.sleep(delay)
 
     print_board(state)
     winner = state.get_winner()
     print(f"Game over after {move_count} moves. Winner: Player {winner + 1 if winner is not None else 'None (draw)'}")
+
+    # Show time stats if applicable
+    if time_managers[0] is not None:
+        for i, tm in enumerate(time_managers):
+            stats = tm.stats()
+            print(f"Player {i+1}: {stats['total_simulations']} sims, "
+                  f"{stats['avg_sims_per_move']:.0f} avg, "
+                  f"{stats['total_time_used']:.1f}s used")
 
     return state
 
@@ -285,7 +379,7 @@ def watch_ai_vs_ai(
 def main():
     parser = argparse.ArgumentParser(description='Razzle Dazzle Terminal Client')
     parser.add_argument('--model', type=str, help='Path to trained model')
-    parser.add_argument('--simulations', type=int, default=800, help='MCTS simulations')
+    parser.add_argument('--simulations', type=int, default=800, help='Max MCTS simulations per move')
     parser.add_argument('--device', type=str, default='cpu', help='Device (cpu/cuda)')
     parser.add_argument('--watch', action='store_true', help='Watch AI vs AI')
     parser.add_argument('--play-as', type=int, choices=[1, 2], default=1,
@@ -294,6 +388,9 @@ def main():
                         help='Save game to PGN file (use - for stdout)')
     parser.add_argument('--delay', type=float, default=1.0,
                         help='Delay between moves in watch mode (seconds)')
+    parser.add_argument('--time', type=float, default=None, metavar='SECONDS',
+                        help='Enable timed mode with given total time in seconds. '
+                             'AI will dynamically allocate simulations based on position difficulty.')
 
     args = parser.parse_args()
 
@@ -305,7 +402,10 @@ def main():
         print(f"Model loaded ({network.num_parameters()} parameters)")
 
     if args.watch:
-        state = watch_ai_vs_ai(network, args.simulations, args.device, args.delay)
+        state = watch_ai_vs_ai(
+            network, args.simulations, args.device, args.delay,
+            time_limit=args.time
+        )
 
         # Output PGN if requested
         if args.pgn:
@@ -319,7 +419,10 @@ def main():
                     f.write(pgn)
                 print(f"\nGame saved to {args.pgn}")
     else:
-        play_human_vs_ai(network, args.play_as - 1, args.simulations, args.device)
+        play_human_vs_ai(
+            network, args.play_as - 1, args.simulations, args.device,
+            time_limit=args.time
+        )
 
 
 if __name__ == '__main__':

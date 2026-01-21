@@ -180,11 +180,14 @@ class TestTrainerPlayerTracking:
                 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
                 from trainer import games_to_training_data
 
-                states, policies, values, legal_masks = games_to_training_data([mock_game])
+                # games_to_training_data returns 5 values: states, policies, values, legal_masks, difficulties
+                # difficulties is None when no network is provided
+                states, policies, values, legal_masks, difficulties = games_to_training_data([mock_game])
                 assert len(states) == 1
                 assert len(policies) == 1
                 assert len(values) == 1
                 assert len(legal_masks) == 1
+                assert difficulties is None  # No network provided, so no difficulty targets
                 # P0 was to move, P0 won -> value should be +1.0
                 assert values[0] == pytest.approx(1.0)
             except ImportError:

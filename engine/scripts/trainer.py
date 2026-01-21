@@ -35,14 +35,42 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from razzle.ai.network import RazzleNet, create_network, NUM_ACTIONS, END_TURN_ACTION
 from razzle.core.state import GameState
 from razzle.core.moves import get_legal_moves
-from razzle.training.trainer import Trainer, TrainingConfig
+from razzle.training.trainer import Trainer as NetworkTrainer, TrainingConfig
 from razzle.training.api_client import TrainingAPIClient, TrainingGame
+
+
+def compute_difficulty_target(raw_policy: np.ndarray, mcts_policy: np.ndarray) -> float:
+    """
+    Compute difficulty as KL divergence between raw and MCTS policies.
+
+    Returns value in [0, 1] where:
+    - 0 = MCTS completely agrees with network (easy)
+    - 1 = MCTS found very different answer (hard)
+    """
+    # Add small epsilon to avoid log(0)
+    eps = 1e-8
+    raw_policy = np.clip(raw_policy, eps, 1.0)
+    mcts_policy = np.clip(mcts_policy, eps, 1.0)
+
+    # Only compute KL over moves where mcts_policy > eps
+    # KL divergence: sum(mcts * log(mcts / raw))
+    mask = mcts_policy > eps
+    if not mask.any():
+        return 0.0
+
+    kl_div = np.sum(mcts_policy[mask] * np.log(mcts_policy[mask] / raw_policy[mask]))
+
+    # Normalize to [0, 1] - KL of 2.0 maps to difficulty 1.0
+    KL_NORMALIZATION = 2.0
+    return min(1.0, kl_div / KL_NORMALIZATION)
 
 
 def games_to_training_data(
     games: list[TrainingGame],
     temperature: float = 1.0,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    network: Optional[RazzleNet] = None,
+    device: str = 'cpu',
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, Optional[np.ndarray]]:
     """
     Convert API games to training arrays.
 
@@ -57,13 +85,18 @@ def games_to_training_data(
     Args:
         games: List of training games from API
         temperature: Temperature used during self-play (for policy conversion)
+        network: Optional network for computing difficulty targets.
+                 If provided, computes KL divergence between raw and MCTS policies.
+        device: Device for network inference when computing difficulty.
 
-    Returns (states, policies, values, legal_masks) arrays.
+    Returns (states, policies, values, legal_masks, difficulties) arrays.
+            difficulties is None if network is not provided.
     """
     all_states = []
     all_policies = []
     all_values = []
     all_legal_masks = []
+    all_difficulties = [] if network is not None else None
 
     # Helper to map move to policy index
     def move_to_index(m: int) -> int:
@@ -130,11 +163,27 @@ def games_to_training_data(
             all_values.append(value)
             all_legal_masks.append(legal_masks[i])
 
+    # Compute difficulty targets if network provided
+    if network is not None and all_states:
+        network.eval()
+        states_tensor = torch.from_numpy(np.stack(all_states)).to(device)
+
+        with torch.no_grad():
+            log_policies, _, _ = network(states_tensor)
+            raw_policies = torch.exp(log_policies).cpu().numpy()
+
+        # Compute KL divergence for each position
+        mcts_policies = np.stack(all_policies)
+        for i in range(len(all_states)):
+            difficulty = compute_difficulty_target(raw_policies[i], mcts_policies[i])
+            all_difficulties.append(difficulty)
+
     return (
         np.stack(all_states),
         np.stack(all_policies),
         np.array(all_values, dtype=np.float32),
         np.stack(all_legal_masks),
+        np.array(all_difficulties, dtype=np.float32) if all_difficulties else None,
     )
 
 
@@ -175,14 +224,18 @@ class DistributedTrainer:
         # API client
         self.api_client = TrainingAPIClient(base_url=api_url)
 
-        # Network
+        # Network and trainer (created once, reused across iterations)
         self.network: Optional[RazzleNet] = None
+        self.network_trainer: Optional[NetworkTrainer] = None  # Reuse to preserve optimizer state
         self.iteration = 0
 
         # State
         self.shutdown_event = Event()
         self.total_games_trained = 0
         self.start_time = datetime.now()
+
+        # Games log for analysis
+        self.games_log_path = self.output_dir / 'games_log.jsonl'
 
     def _load_or_create_network(self) -> bool:
         """Load latest model from API or create new one."""
@@ -197,14 +250,45 @@ class DistributedTrainer:
                 self.iteration = model_info.iteration
                 print(f"[Trainer] Loaded model: {model_info.version} (iteration {self.iteration})")
             else:
-                # Create new network
+                # No model available, create new network
                 self.network = create_network(self.filters, self.blocks, self.device)
                 self.iteration = 0
-                print(f"[Trainer] Created new network")
-            return True
+                print(f"[Trainer] No model found, created new network")
         except Exception as e:
-            print(f"[Trainer] Error loading network: {e}")
-            return False
+            # API error (e.g., 500) - fall back to creating new network
+            print(f"[Trainer] API error checking for model: {e}")
+            print(f"[Trainer] Falling back to new network")
+            try:
+                self.network = create_network(self.filters, self.blocks, self.device)
+                self.iteration = 0
+            except Exception as e2:
+                print(f"[Trainer] Error creating network: {e2}")
+                return False
+
+        # Create trainer once (preserves optimizer state across iterations)
+        config = TrainingConfig(
+            batch_size=self.batch_size,
+            learning_rate=self.learning_rate,
+            epochs=self.epochs,
+            device=self.device,
+        )
+        self.network_trainer = NetworkTrainer(self.network, config)
+        print(f"[Trainer] Created trainer with Adam optimizer (lr={self.learning_rate})")
+        return True
+
+    def _save_games_to_log(self, games: list[TrainingGame], iteration: int):
+        """Save games to JSONL log for later analysis."""
+        with open(self.games_log_path, 'a') as f:
+            for game in games:
+                record = {
+                    'iteration': iteration,
+                    'model_version': game.model_version,
+                    'worker_id': game.worker_id,
+                    'moves': game.moves,
+                    'result': game.result,
+                    'visit_counts': game.visit_counts,
+                }
+                f.write(json.dumps(record) + '\n')
 
     def train_on_games(self, games: list[TrainingGame]) -> dict:
         """
@@ -213,20 +297,23 @@ class DistributedTrainer:
         Returns training metrics.
         """
         print(f"[Trainer] Converting {len(games)} games to training data...")
-        states, policies, values, legal_masks = games_to_training_data(games)
-        print(f"[Trainer] Training examples: {len(states)}")
-
-        # Create trainer
-        config = TrainingConfig(
-            batch_size=self.batch_size,
-            learning_rate=self.learning_rate,
-            epochs=self.epochs,
+        states, policies, values, legal_masks, difficulties = games_to_training_data(
+            games,
+            network=self.network,
             device=self.device,
         )
-        trainer = Trainer(self.network, config)
+        print(f"[Trainer] Training examples: {len(states)}")
+        if difficulties is not None:
+            avg_difficulty = difficulties.mean()
+            print(f"[Trainer] Average difficulty target: {avg_difficulty:.3f}")
 
-        # Train with legal masks for proper illegal move penalty
-        history = trainer.train(states, policies, values, legal_masks=legal_masks, verbose=True)
+        # Reuse trainer to preserve optimizer momentum across iterations
+        history = self.network_trainer.train(
+            states, policies, values,
+            legal_masks=legal_masks,
+            difficulties=difficulties,
+            verbose=True
+        )
 
         # Get final metrics
         final = history[-1] if history else {}
@@ -237,6 +324,7 @@ class DistributedTrainer:
             'final_loss': final.get('loss', 0),
             'final_policy_loss': final.get('policy_loss', 0),
             'final_value_loss': final.get('value_loss', 0),
+            'final_difficulty_loss': final.get('difficulty_loss', 0),
             'epochs': len(history),
         }
 
@@ -307,6 +395,9 @@ class DistributedTrainer:
                             mark_used=True,
                         )
 
+                        # Save games to log for analysis
+                        self._save_games_to_log(games, self.iteration + 1)
+
                         # Train
                         start_time = time.time()
                         metrics = self.train_on_games(games)
@@ -363,14 +454,32 @@ def main():
                         help='Training batch size')
     parser.add_argument('--learning-rate', type=float, default=0.001,
                         help='Learning rate')
-    parser.add_argument('--filters', type=int, default=64,
-                        help='Network filter count')
-    parser.add_argument('--blocks', type=int, default=6,
-                        help='Network residual blocks')
+    parser.add_argument('--filters', type=int, default=None,
+                        help='Network filter count (overrides --network-size)')
+    parser.add_argument('--blocks', type=int, default=None,
+                        help='Network residual blocks (overrides --network-size)')
+    parser.add_argument('--network-size', type=str, default='medium', choices=['small', 'medium', 'large'],
+                        help='Network size preset: small (64f/6b), medium (128f/10b), large (256f/15b)')
     parser.add_argument('--output', type=Path, default=Path('output/trainer'),
                         help='Output directory')
 
     args = parser.parse_args()
+
+    # Resolve network size presets
+    NETWORK_PRESETS = {
+        'small': (64, 6),      # ~900K params, fast inference
+        'medium': (128, 10),   # ~3.5M params, balanced
+        'large': (256, 15),    # ~15M params, stronger but slower
+    }
+
+    if args.filters is not None and args.blocks is not None:
+        filters, blocks = args.filters, args.blocks
+    else:
+        filters, blocks = NETWORK_PRESETS[args.network_size]
+        if args.filters is not None:
+            filters = args.filters
+        if args.blocks is not None:
+            blocks = args.blocks
 
     # Ensure unbuffered output
     os.environ['PYTHONUNBUFFERED'] = '1'
@@ -383,8 +492,8 @@ def main():
         epochs=args.epochs,
         batch_size=args.batch_size,
         learning_rate=args.learning_rate,
-        filters=args.filters,
-        blocks=args.blocks,
+        filters=filters,
+        blocks=blocks,
         output_dir=args.output,
     )
 

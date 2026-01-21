@@ -55,13 +55,13 @@ class BatchedEvaluator:
         Synchronous evaluation of a single state.
 
         Returns (policy, value) where:
-          - policy: numpy array of shape (3136,) with move probabilities
+          - policy: numpy array of shape (3137,) with move probabilities
           - value: float in [-1, 1]
         """
         tensor = torch.from_numpy(state.to_tensor()).unsqueeze(0).to(self.device)
 
         with torch.no_grad():
-            log_policy, value = self.network(tensor)
+            log_policy, value, _ = self.network(tensor)
 
         policy = torch.exp(log_policy).squeeze(0).cpu().numpy()
         value = value.item()
@@ -70,6 +70,29 @@ class BatchedEvaluator:
         self.total_batches += 1
 
         return policy, value
+
+    def evaluate_with_difficulty(self, state: GameState) -> tuple[np.ndarray, float, float]:
+        """
+        Synchronous evaluation including difficulty prediction.
+
+        Returns (policy, value, difficulty) where:
+          - policy: numpy array of shape (3137,) with move probabilities
+          - value: float in [-1, 1]
+          - difficulty: float in [0, 1] predicting search difficulty
+        """
+        tensor = torch.from_numpy(state.to_tensor()).unsqueeze(0).to(self.device)
+
+        with torch.no_grad():
+            log_policy, value, difficulty = self.network(tensor)
+
+        policy = torch.exp(log_policy).squeeze(0).cpu().numpy()
+        value = value.item()
+        difficulty = difficulty.item()
+
+        self.total_evals += 1
+        self.total_batches += 1
+
+        return policy, value, difficulty
 
     def evaluate_batch(self, states: list[GameState]) -> list[tuple[np.ndarray, float]]:
         """
@@ -85,7 +108,7 @@ class BatchedEvaluator:
         batch = torch.from_numpy(tensors).to(self.device)
 
         with torch.no_grad():
-            log_policies, values = self.network(batch)
+            log_policies, values, _ = self.network(batch)
 
         policies = torch.exp(log_policies).cpu().numpy()
         values = values.squeeze(-1).cpu().numpy()
@@ -94,6 +117,33 @@ class BatchedEvaluator:
         self.total_batches += 1
 
         return [(policies[i], values[i]) for i in range(len(states))]
+
+    def evaluate_batch_with_difficulty(
+        self, states: list[GameState]
+    ) -> list[tuple[np.ndarray, float, float]]:
+        """
+        Evaluate a batch of states including difficulty.
+
+        Returns list of (policy, value, difficulty) tuples.
+        """
+        if not states:
+            return []
+
+        # Stack state tensors
+        tensors = np.stack([s.to_tensor() for s in states])
+        batch = torch.from_numpy(tensors).to(self.device)
+
+        with torch.no_grad():
+            log_policies, values, difficulties = self.network(batch)
+
+        policies = torch.exp(log_policies).cpu().numpy()
+        values = values.squeeze(-1).cpu().numpy()
+        difficulties = difficulties.squeeze(-1).cpu().numpy()
+
+        self.total_evals += len(states)
+        self.total_batches += 1
+
+        return [(policies[i], values[i], difficulties[i]) for i in range(len(states))]
 
     def request_eval(
         self,
@@ -170,6 +220,17 @@ class DummyEvaluator:
 
         return policy, 0.0
 
+    def evaluate_with_difficulty(self, state: GameState) -> tuple[np.ndarray, float, float]:
+        """Return uniform policy, zero value, and neutral difficulty."""
+        policy, value = self.evaluate(state)
+        return policy, value, 0.5  # Neutral difficulty for dummy evaluator
+
     def evaluate_batch(self, states: list[GameState]) -> list[tuple[np.ndarray, float]]:
         """Evaluate batch of states."""
         return [self.evaluate(s) for s in states]
+
+    def evaluate_batch_with_difficulty(
+        self, states: list[GameState]
+    ) -> list[tuple[np.ndarray, float, float]]:
+        """Evaluate batch of states with difficulty."""
+        return [self.evaluate_with_difficulty(s) for s in states]

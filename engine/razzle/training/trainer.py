@@ -26,6 +26,7 @@ class TrainingConfig:
     epochs: int = 10
     policy_weight: float = 1.0
     value_weight: float = 1.0
+    difficulty_weight: float = 0.5  # Weight for difficulty prediction loss
     illegal_penalty_weight: float = 1.0  # Lagrange multiplier for illegal move constraint
     device: str = 'cuda' if torch.cuda.is_available() else 'cpu'
 
@@ -38,7 +39,8 @@ class RazzleDataset(Dataset):
         states: np.ndarray,
         policies: np.ndarray,
         values: np.ndarray,
-        legal_masks: Optional[np.ndarray] = None
+        legal_masks: Optional[np.ndarray] = None,
+        difficulties: Optional[np.ndarray] = None
     ):
         self.states = torch.from_numpy(states)
         self.policies = torch.from_numpy(policies)
@@ -49,15 +51,25 @@ class RazzleDataset(Dataset):
             self.legal_masks = torch.from_numpy(legal_masks)
         else:
             self.legal_masks = None
+        # Difficulty targets: predicted KL divergence between raw and MCTS policies
+        if difficulties is not None:
+            self.difficulties = torch.from_numpy(difficulties)
+        else:
+            self.difficulties = None
 
     def __len__(self) -> int:
         return len(self.states)
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, ...]:
-        if self.legal_masks is not None:
-            return self.states[idx], self.policies[idx], self.values[idx], self.legal_masks[idx]
+        base = (self.states[idx], self.policies[idx], self.values[idx])
+        if self.legal_masks is not None and self.difficulties is not None:
+            return base + (self.legal_masks[idx], self.difficulties[idx])
+        elif self.legal_masks is not None:
+            return base + (self.legal_masks[idx],)
+        elif self.difficulties is not None:
+            return base + (self.difficulties[idx],)
         else:
-            return self.states[idx], self.policies[idx], self.values[idx]
+            return base
 
 
 class Trainer:
@@ -81,37 +93,53 @@ class Trainer:
             weight_decay=self.config.weight_decay
         )
 
-        self.scheduler = torch.optim.lr_scheduler.StepLR(
-            self.optimizer,
-            step_size=10,
-            gamma=0.9
-        )
+        # No LR scheduler - Adam adapts per-parameter learning rates automatically
+        # A constant base LR works well with Adam for most cases
+        self.scheduler = None
 
-    def train_epoch(self, dataloader: DataLoader, has_legal_masks: bool = False) -> dict:
+    def train_epoch(
+        self,
+        dataloader: DataLoader,
+        has_legal_masks: bool = False,
+        has_difficulties: bool = False
+    ) -> dict:
         """Train for one epoch."""
         self.network.train()
 
         total_loss = 0.0
         total_policy_loss = 0.0
         total_value_loss = 0.0
+        total_difficulty_loss = 0.0
         total_illegal_penalty = 0.0
         num_batches = 0
 
         for batch in dataloader:
-            if has_legal_masks:
+            # Unpack batch based on what's included
+            if has_legal_masks and has_difficulties:
+                states, target_policies, target_values, legal_masks, target_difficulties = batch
+                legal_masks = legal_masks.to(self.config.device)
+                target_difficulties = target_difficulties.to(self.config.device)
+            elif has_legal_masks:
                 states, target_policies, target_values, legal_masks = batch
                 legal_masks = legal_masks.to(self.config.device)
+                target_difficulties = None
+            elif has_difficulties:
+                states, target_policies, target_values, target_difficulties = batch
+                legal_masks = None
+                target_difficulties = target_difficulties.to(self.config.device)
             else:
                 states, target_policies, target_values = batch
                 legal_masks = None
+                target_difficulties = None
 
             states = states.to(self.config.device)
             target_policies = target_policies.to(self.config.device)
             target_values = target_values.to(self.config.device)
 
             # Forward pass
-            log_policies, values = self.network(states)
+            log_policies, values, difficulties = self.network(states)
             values = values.squeeze(-1)
+            difficulties = difficulties.squeeze(-1)
 
             if legal_masks is not None:
                 # Masked cross-entropy on legal moves only
@@ -144,10 +172,17 @@ class Trainer:
             # Value loss: MSE
             value_loss = F.mse_loss(values, target_values)
 
+            # Difficulty loss: Binary cross-entropy (target is in [0, 1])
+            if target_difficulties is not None:
+                difficulty_loss = F.binary_cross_entropy(difficulties, target_difficulties)
+            else:
+                difficulty_loss = torch.tensor(0.0, device=self.config.device)
+
             # Combined loss
             loss = (
                 self.config.policy_weight * policy_loss +
                 self.config.value_weight * value_loss +
+                self.config.difficulty_weight * difficulty_loss +
                 illegal_penalty
             )
 
@@ -160,6 +195,7 @@ class Trainer:
             total_loss += loss.item()
             total_policy_loss += policy_loss.item()
             total_value_loss += value_loss.item()
+            total_difficulty_loss += difficulty_loss.item()
             total_illegal_penalty += illegal_penalty.item()
             num_batches += 1
 
@@ -170,6 +206,8 @@ class Trainer:
         }
         if has_legal_masks:
             metrics['illegal_penalty'] = total_illegal_penalty / num_batches
+        if has_difficulties:
+            metrics['difficulty_loss'] = total_difficulty_loss / num_batches
 
         return metrics
 
@@ -179,6 +217,7 @@ class Trainer:
         policies: np.ndarray,
         values: np.ndarray,
         legal_masks: Optional[np.ndarray] = None,
+        difficulties: Optional[np.ndarray] = None,
         verbose: bool = True
     ) -> list[dict]:
         """
@@ -191,11 +230,14 @@ class Trainer:
             legal_masks: Optional legal move masks (N, NUM_ACTIONS).
                         1 for legal moves, 0 for illegal.
                         If provided, enables masked cross-entropy + illegal penalty.
+            difficulties: Optional difficulty targets (N,).
+                         Values in [0, 1] where higher = harder position.
+                         If provided, trains the difficulty prediction head.
             verbose: Print progress
 
         Returns list of metrics per epoch.
         """
-        dataset = RazzleDataset(states, policies, values, legal_masks)
+        dataset = RazzleDataset(states, policies, values, legal_masks, difficulties)
         dataloader = DataLoader(
             dataset,
             batch_size=self.config.batch_size,
@@ -204,11 +246,17 @@ class Trainer:
         )
 
         has_legal_masks = legal_masks is not None
+        has_difficulties = difficulties is not None
         history = []
 
         for epoch in range(self.config.epochs):
-            metrics = self.train_epoch(dataloader, has_legal_masks=has_legal_masks)
-            self.scheduler.step()
+            metrics = self.train_epoch(
+                dataloader,
+                has_legal_masks=has_legal_masks,
+                has_difficulties=has_difficulties
+            )
+            if self.scheduler:
+                self.scheduler.step()
 
             metrics['epoch'] = epoch + 1
             metrics['lr'] = self.optimizer.param_groups[0]['lr']
@@ -223,6 +271,8 @@ class Trainer:
                 )
                 if 'illegal_penalty' in metrics:
                     msg += f", illegal={metrics['illegal_penalty']:.4f}"
+                if 'difficulty_loss' in metrics:
+                    msg += f", difficulty={metrics['difficulty_loss']:.4f}"
                 msg += f", lr={metrics['lr']:.6f}"
                 print(msg)
 
@@ -234,7 +284,7 @@ class Trainer:
             'network_config': self.network.config,
             'network_state': self.network.state_dict(),
             'optimizer_state': self.optimizer.state_dict(),
-            'scheduler_state': self.scheduler.state_dict(),
+            'scheduler_state': self.scheduler.state_dict() if self.scheduler else None,
         }
         if extra:
             checkpoint.update(extra)
@@ -245,5 +295,6 @@ class Trainer:
         checkpoint = torch.load(path, map_location=self.config.device)
         self.network.load_state_dict(checkpoint['network_state'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state'])
-        self.scheduler.load_state_dict(checkpoint['scheduler_state'])
+        if self.scheduler and checkpoint.get('scheduler_state'):
+            self.scheduler.load_state_dict(checkpoint['scheduler_state'])
         return checkpoint

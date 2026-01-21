@@ -6,19 +6,27 @@ Implements PUCT (Polynomial Upper Confidence Trees) as used in AlphaZero.
 
 from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import Optional, Protocol
+from typing import Optional, Protocol, TYPE_CHECKING
 import math
+import time
 import numpy as np
 
 from ..core.state import GameState
 from ..core.moves import get_legal_moves, decode_move, move_to_algebraic
 from .network import NUM_ACTIONS, END_TURN_ACTION
 
+if TYPE_CHECKING:
+    from .time_manager import TimeManager
+
 
 class Evaluator(Protocol):
     """Protocol for position evaluators."""
     def evaluate(self, state: GameState) -> tuple[np.ndarray, float]:
         """Return (policy, value) for state."""
+        ...
+
+    def evaluate_with_difficulty(self, state: GameState) -> tuple[np.ndarray, float, float]:
+        """Return (policy, value, difficulty) for state."""
         ...
 
 
@@ -30,8 +38,14 @@ class MCTSConfig:
     dirichlet_alpha: float = 0.3  # Noise for root exploration
     dirichlet_epsilon: float = 0.25  # Weight of noise at root
     temperature: float = 1.0  # Temperature for move selection
-    batch_size: int = 8  # Number of parallel simulations for batched search
+    batch_size: int = 32  # Number of parallel simulations for batched search
     virtual_loss: int = 3  # Virtual loss to encourage exploration in parallel search
+
+    # Early termination settings
+    early_termination: bool = True  # Enable early stopping when search converges
+    visit_concentration_threshold: float = 0.85  # Stop if top move has this fraction of visits
+    min_sims_for_early_stop: int = 100  # Minimum sims before early termination allowed
+    check_early_stop_interval: int = 50  # Check every N simulations
 
 
 @dataclass
@@ -408,6 +422,110 @@ class MCTS:
         moves.sort(key=lambda m: m['visits'], reverse=True)
         return moves[:top_k]
 
+    def _should_stop_early(self, root: Node, sims_done: int) -> bool:
+        """
+        Check if we should stop search early due to convergence.
+
+        Returns True if:
+        - Early termination is enabled
+        - Minimum simulations have been done
+        - Top move has enough visit concentration
+        """
+        if not self.config.early_termination:
+            return False
+
+        if sims_done < self.config.min_sims_for_early_stop:
+            return False
+
+        if not root.children:
+            return True  # No children = terminal state
+
+        # Calculate visit concentration
+        total_visits = sum(c.visit_count for c in root.children.values())
+        if total_visits == 0:
+            return False
+
+        max_visits = max(c.visit_count for c in root.children.values())
+        concentration = max_visits / total_visits
+
+        return concentration >= self.config.visit_concentration_threshold
+
+    def search_timed(
+        self,
+        state: GameState,
+        time_manager: 'TimeManager',
+        add_noise: bool = True
+    ) -> tuple[Node, dict]:
+        """
+        Run MCTS with dynamic time management based on position difficulty.
+
+        Uses the neural network's difficulty prediction to allocate simulations:
+        - Easy positions (low difficulty) get fewer simulations
+        - Hard positions (high difficulty) get more simulations
+
+        Args:
+            state: Current game state
+            time_manager: TimeManager for tracking time budget
+            add_noise: Add Dirichlet noise at root for exploration
+
+        Returns:
+            (root_node, info_dict) where info_dict contains search statistics
+        """
+        start_time = time.time()
+
+        root = Node(state=state.copy())
+
+        # Get evaluation with difficulty prediction
+        if hasattr(self.evaluator, 'evaluate_with_difficulty'):
+            policy, value, difficulty = self.evaluator.evaluate_with_difficulty(root.state)
+        else:
+            # Fallback for evaluators without difficulty
+            policy, value = self.evaluator.evaluate(root.state)
+            difficulty = 0.5  # Neutral difficulty
+
+        root.expand(policy)
+
+        if add_noise and self.config.dirichlet_epsilon > 0:
+            root.add_dirichlet_noise(
+                self.config.dirichlet_alpha,
+                self.config.dirichlet_epsilon
+            )
+
+        # Determine target simulations based on difficulty
+        target_sims = time_manager.get_target_simulations(difficulty)
+
+        # Run simulations in batches
+        sims_done = 0
+        batch_size = self.config.batch_size
+        early_stopped = False
+
+        while sims_done < target_sims:
+            current_batch = min(batch_size, target_sims - sims_done)
+            self._simulate_batch(root, current_batch)
+            sims_done += current_batch
+
+            # Check for early termination
+            if (sims_done % self.config.check_early_stop_interval == 0 and
+                self._should_stop_early(root, sims_done)):
+                early_stopped = True
+                break
+
+        elapsed = time.time() - start_time
+
+        # Update time manager
+        time_manager.update(elapsed, sims_done)
+
+        info = {
+            'difficulty': difficulty,
+            'target_simulations': target_sims,
+            'simulations_done': sims_done,
+            'elapsed_time': elapsed,
+            'early_stopped': early_stopped,
+            'sims_per_second': sims_done / elapsed if elapsed > 0 else 0,
+        }
+
+        return root, info
+
 
 def play_move(
     state: GameState,
@@ -444,3 +562,39 @@ def play_move(
 
     move = mcts.select_move(root)
     return move, root
+
+
+def play_move_timed(
+    state: GameState,
+    evaluator: Evaluator,
+    time_manager: 'TimeManager',
+    temperature: float = 0.0,
+    batch_size: int = 16
+) -> tuple[int, Node, dict]:
+    """
+    Play a single move using MCTS with dynamic time management.
+
+    The number of simulations is determined by the time manager based on:
+    - Remaining time budget
+    - Position difficulty (from neural network)
+
+    Args:
+        state: Current game state
+        evaluator: Position evaluator (must support evaluate_with_difficulty)
+        time_manager: TimeManager tracking game time
+        temperature: Temperature for move selection (0 = greedy)
+        batch_size: Number of parallel simulations per batch
+
+    Returns (move, root_node, info_dict).
+    """
+    config = MCTSConfig(
+        num_simulations=time_manager.config.max_simulations,  # Will be limited by time
+        temperature=temperature,
+        batch_size=batch_size
+    )
+    mcts = MCTS(evaluator, config)
+
+    root, info = mcts.search_timed(state, time_manager, add_noise=False)
+    move = mcts.select_move(root)
+
+    return move, root, info
