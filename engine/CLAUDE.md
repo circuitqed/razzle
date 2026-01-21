@@ -154,8 +154,27 @@ python scripts/train_distributed.py \
 ## Next Steps
 
 1. Run distributed training to generate trained model (requires fresh start due to architecture changes)
-2. Optimize batched inference for faster self-play
-3. Validate with policy diagnostics (`scripts/diagnose_policy.py`)
+2. Validate with policy diagnostics (`scripts/diagnose_policy.py`)
+3. Increase default simulations for better tactical play (currently 800, consider 1600-2000)
+
+## Future Optimizations
+
+### Parallel MCTS (High Priority)
+Currently MCTS runs single-threaded. Implementing parallel tree search would significantly improve performance:
+- **Virtual loss**: When a thread selects a node, add a temporary "loss" to discourage other threads from selecting the same path
+- **Lock-free tree updates**: Use atomic operations for visit counts and value updates
+- **Batch leaf evaluation**: Collect multiple leaf nodes across threads, evaluate together on GPU
+- Expected speedup: 4-8x on multi-core CPU, more with GPU batching
+
+This is important because:
+- Current neural network MCTS: ~500 sims/s (single-threaded)
+- With parallel search: potentially 2000-4000 sims/s
+- Enables deeper tactical search without increasing wall-clock time
+
+### Other Potential Optimizations
+- **Transposition tables**: Cache evaluations for repeated positions
+- **Progressive widening**: Limit branching factor early in search, expand as visits increase
+- **Move ordering in tree**: Prioritize forced responses (moves that limit opponent options)
 
 ## Multi-Agent Development
 
