@@ -30,7 +30,7 @@ interface BoardProps {
 const SQUARE_SIZE = 50;
 const BOARD_WIDTH = BOARD_COLS * SQUARE_SIZE;
 const BOARD_HEIGHT = BOARD_ROWS * SQUARE_SIZE;
-const ANIMATION_DURATION = 200; // ms
+const ANIMATION_DURATION = 350; // ms
 
 // Helper to get visual position for a square
 function getSquarePosition(square: number, flipped: boolean) {
