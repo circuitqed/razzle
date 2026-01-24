@@ -1,4 +1,4 @@
-# Training Plan - January 2025
+# Training Plan
 
 ## Goals
 
@@ -15,7 +15,7 @@
 ### Self-Play Settings
 | Parameter | Value | Rationale |
 |-----------|-------|-----------|
-| Simulations | 400 | Faster games, more data per hour |
+| Simulations | 2000 | Faster games, more data per hour |
 | Temperature | 1.0 (first 15 moves), 0.3 (after) | Exploration early, exploitation late |
 | Batch size | 32 | Good GPU utilization |
 | Dirichlet noise | alpha=0.3, epsilon=0.25 | Standard exploration |
@@ -36,7 +36,7 @@
 | Parameter | Value |
 |-----------|-------|
 | Workers | 4 |
-| Workers per instance | 2 |
+| Workers per instance | 3 |
 | GPU type | RTX 3060 or better |
 | Max price | $0.15/hr |
 | Estimated cost | ~$2-3/hr total |
@@ -66,9 +66,9 @@ cd /home/projects/razzle/engine
 python3 scripts/train_distributed.py \
     --api-url https://razzledazzle.lazybrains.com/api \
     --workers 4 \
-    --workers-per-instance 2 \
+    --workers-per-instance 3 \
     --network-size medium \
-    --simulations 400 \
+    --simulations 2000 \
     --batch-size 32 \
     --threshold 50 \
     --epochs 5 \
