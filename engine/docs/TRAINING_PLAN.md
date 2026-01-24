@@ -43,19 +43,24 @@
 
 ## Pre-Flight Checklist
 
-1. **Clear existing training data**:
+1. **Destroy existing Vast.ai instances** (if any):
+   ```bash
+   vastai show instances --raw | jq -r '.[].id' | xargs -I {} vastai destroy instance {}
+   ```
+
+2. **Clear existing training data**:
    ```bash
    curl -X DELETE https://razzledazzle.lazybrains.com/api/training/clear
    ```
 
-2. **Verify API server is running**:
+3. **Verify API server is running**:
    ```bash
    curl https://razzledazzle.lazybrains.com/api/health
    ```
 
-3. **Check no existing workers**:
+4. **Check dashboard is empty**:
    ```bash
-   curl https://razzledazzle.lazybrains.com/api/training/dashboard
+   curl -s https://razzledazzle.lazybrains.com/api/training/dashboard | jq '{games_total, models: (.models | length)}'
    ```
 
 ## Launch Command
@@ -71,7 +76,6 @@ python3 scripts/train_distributed.py \
     --simulations 2000 \
     --batch-size 32 \
     --threshold 50 \
-    --epochs 5 \
     --gpu RTX_3060 \
     --max-price 0.15
 ```
