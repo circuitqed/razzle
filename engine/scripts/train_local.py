@@ -14,6 +14,8 @@ Modes:
 import argparse
 import pickle
 from pathlib import Path
+from typing import Optional
+import numpy as np
 import torch
 
 import sys
@@ -23,6 +25,8 @@ from razzle.ai.network import RazzleNet, NetworkConfig, create_network
 from razzle.training.selfplay import SelfPlay, games_to_training_data
 from razzle.training.trainer import Trainer, TrainingConfig
 from razzle.training.logger import TrainingLogger
+from razzle.training.replay_buffer import ReplayBuffer
+from scripts.model_arena import run_match
 
 
 def load_games_from_dir(games_dir: Path):
@@ -52,6 +56,19 @@ def main():
     parser.add_argument('--selfplay-only', action='store_true', help='Only generate games, skip training')
     parser.add_argument('--train-only', action='store_true', help='Only train on existing games')
     parser.add_argument('--games-dir', type=Path, help='Directory with games to train on (for --train-only)')
+
+    # Random opening moves for diversity
+    parser.add_argument('--random-opening-moves', type=int, default=4, help='Number of random moves at game start')
+    parser.add_argument('--random-opening-fraction', type=float, default=0.3, help='Fraction of games with random opening')
+
+    # Replay buffer settings
+    parser.add_argument('--replay-buffer-size', type=int, default=100000, help='Max positions in replay buffer')
+    parser.add_argument('--replay-mix-ratio', type=float, default=0.5, help='Fraction of training batch from replay buffer')
+
+    # Checkpoint gating
+    parser.add_argument('--gating-games', type=int, default=20, help='Games for checkpoint gating (0 to disable)')
+    parser.add_argument('--gating-threshold', type=float, default=0.55, help='Win rate threshold to promote model')
+    parser.add_argument('--gating-simulations', type=int, default=100, help='MCTS simulations for gating games')
 
     args = parser.parse_args()
 
@@ -93,6 +110,15 @@ def main():
     print(f"Device: {args.device}")
     print(f"Logging to: {args.output / 'training_log.json'}")
 
+    # Initialize replay buffer
+    replay_buffer = ReplayBuffer(max_positions=args.replay_buffer_size)
+    print(f"Replay buffer: max {args.replay_buffer_size} positions, {args.replay_mix_ratio:.0%} mix ratio")
+
+    # Track best model for checkpoint gating
+    best_model_path: Optional[Path] = None
+    if args.gating_games > 0:
+        print(f"Checkpoint gating: {args.gating_games} games, {args.gating_threshold:.0%} threshold")
+
     # Train-only mode: load existing games and train
     if args.train_only:
         print(f"\nTrain-only mode: loading games from {args.games_dir}")
@@ -128,7 +154,9 @@ def main():
             network=network,
             device=args.device,
             num_simulations=args.simulations,
-            batch_size=1
+            batch_size=1,
+            random_opening_moves=args.random_opening_moves,
+            random_opening_fraction=args.random_opening_fraction
         )
 
         logger.start_selfplay()
@@ -144,8 +172,23 @@ def main():
         print(f"Self-play time: {iter_metrics.selfplay_time_sec:.1f}s")
 
         # Convert to training data
-        states, policies, values = games_to_training_data(games)
-        print(f"Training examples: {len(states)}")
+        states, policies, values, legal_masks = games_to_training_data(games)
+        print(f"New training examples: {len(states)}")
+
+        # Add to replay buffer
+        replay_buffer.add(states, policies, values, legal_masks)
+        print(f"Replay buffer size: {len(replay_buffer)}")
+
+        # Mix with replay buffer samples
+        if len(replay_buffer) > 1000 and args.replay_mix_ratio > 0:
+            num_replay = int(len(states) * args.replay_mix_ratio / (1 - args.replay_mix_ratio))
+            buf_states, buf_policies, buf_values, buf_masks = replay_buffer.sample(num_replay)
+            states = np.concatenate([states, buf_states])
+            policies = np.concatenate([policies, buf_policies])
+            values = np.concatenate([values, buf_values])
+            if legal_masks is not None and buf_masks is not None:
+                legal_masks = np.concatenate([legal_masks, buf_masks])
+            print(f"Training with {len(states)} examples ({num_replay} from replay buffer)")
 
         # Skip training in selfplay-only mode
         if args.selfplay_only:
@@ -166,7 +209,7 @@ def main():
         trainer = Trainer(network, config)
 
         logger.start_training()
-        history = trainer.train(states, policies, values, verbose=True)
+        history = trainer.train(states, policies, values, legal_masks=legal_masks, verbose=True)
         logger.end_training(iter_metrics, history)
 
         print(f"Training time: {iter_metrics.training_time_sec:.1f}s")
@@ -176,6 +219,33 @@ def main():
         checkpoint_path = args.output / f"model_iter_{iteration:03d}.pt"
         network.save(checkpoint_path)
         print(f"Saved checkpoint to {checkpoint_path}")
+
+        # Checkpoint gating: validate new model against best
+        if args.gating_games > 0 and best_model_path is not None:
+            print(f"\nValidating {checkpoint_path.name} vs {best_model_path.name}...")
+            try:
+                result = run_match(
+                    str(checkpoint_path),
+                    str(best_model_path),
+                    num_games=args.gating_games,
+                    simulations=args.gating_simulations,
+                    device=args.device,
+                    verbose=False
+                )
+                win_rate = result.model1_win_rate()
+                print(f"Win rate: {win_rate:.1%} ({result.model1_wins}W-{result.model2_wins}L-{result.draws}D)")
+
+                if win_rate >= args.gating_threshold:
+                    print(f"Model promoted! (threshold: {args.gating_threshold:.0%})")
+                    best_model_path = checkpoint_path
+                else:
+                    print(f"Model rejected (need >= {args.gating_threshold:.0%})")
+            except Exception as e:
+                print(f"Gating failed: {e}, promoting by default")
+                best_model_path = checkpoint_path
+        else:
+            # First model or gating disabled - automatically becomes best
+            best_model_path = checkpoint_path
 
     print("\nTraining complete!")
     logger.print_status()

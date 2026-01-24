@@ -13,8 +13,15 @@ The training pipeline follows the AlphaZero approach:
 ## Neural Network Architecture
 
 ### Input
-- 6 planes of 8x7 (board is 8 rows × 7 columns = 56 squares)
-- Planes: my pieces, my ball, opponent pieces, opponent ball, touched mask, player indicator
+- 7 planes of 8x7 (board is 8 rows × 7 columns = 56 squares)
+- Planes:
+  - Plane 0: Current player's pieces
+  - Plane 1: Current player's ball
+  - Plane 2: Opponent's pieces
+  - Plane 3: Opponent's ball
+  - Plane 4: Touched mask (pieces that can't receive passes)
+  - Plane 5: Current player indicator (all 1s if player 0)
+  - Plane 6: Has passed indicator (all 1s if mid-pass turn)
 
 ### Output
 - **Policy head**: 3137 logits (56×56 = 3136 possible src→dst moves + 1 for END_TURN)
@@ -104,7 +111,37 @@ policy = visits / visits.sum()
 
 During self-play, early moves use temperature=1.0 for exploration, later moves use temperature=0.0. The training targets should reflect this.
 
-### 4. END_TURN Action
+### 4. Pass Quiescence Search
+
+**Problem**: During a turn, a player can make multiple ball passes before ending their turn. If MCTS evaluates a mid-pass position with the neural network, it may miss winning pass chains.
+
+**Solution**: Exhaustive pass quiescence search. When MCTS reaches a leaf node that's mid-pass (`has_passed=True`), it:
+1. Expands all possible pass continuations
+2. Recursively searches each branch
+3. Takes the **maximum** value (since the same player is moving)
+
+```python
+def _quiescence_search(self, node: Node, depth: int = 0) -> float:
+    if node.state.is_terminal():
+        return node.state.get_result(node.state.current_player)
+    if not node.state.has_passed:
+        # Turn ended - evaluate here
+        _, value = self.evaluator.evaluate(node.state)
+        return value
+    # Mid-pass: search all children, take max
+    best = float('-inf')
+    for child in node.children.values():
+        best = max(best, self._quiescence_search(child, depth + 1))
+    return best
+```
+
+**Why max, not min?** During a pass sequence, the same player is moving the entire time. We want the best outcome for that player.
+
+**Config options**:
+- `pass_quiescence: bool = True` - Enable/disable
+- `pass_quiescence_max_depth: int = 10` - Safety limit
+
+### 5. END_TURN Action
 
 END_TURN is a special move (internally -1) that ends the current player's turn after ball passes. It needs explicit handling:
 
@@ -193,7 +230,7 @@ Expected results:
 @dataclass
 class TrainingConfig:
     batch_size: int = 256
-    learning_rate: float = 0.001
+    learning_rate: float = 0.001  # Adam default, stable for training
     weight_decay: float = 1e-4
     epochs: int = 10
     policy_weight: float = 1.0
@@ -212,6 +249,56 @@ class MCTSConfig:
     dirichlet_alpha: float = 0.3
     dirichlet_epsilon: float = 0.25
     temperature: float = 1.0
+    pass_quiescence: bool = True  # Search through pass sequences
+    pass_quiescence_max_depth: int = 10
+```
+
+## Advanced Training Features
+
+### Replay Buffer
+
+Prevents catastrophic forgetting by mixing old and new positions during training.
+
+```python
+from razzle.training.replay_buffer import ReplayBuffer
+
+buffer = ReplayBuffer(max_positions=100_000)
+buffer.add(states, policies, values, legal_masks)
+
+# Mix 50% new data with 50% from buffer
+buf_states, buf_policies, buf_values, buf_masks = buffer.sample(num_samples)
+```
+
+**Config options** (train_local.py):
+- `--replay-buffer-size 100000` - Maximum positions to store
+- `--replay-mix-ratio 0.5` - Fraction of training batch from buffer
+
+### Checkpoint Gating
+
+Only promotes models that beat the previous best by a threshold.
+
+```python
+# New model must win >55% of games against previous best
+if win_rate >= args.gating_threshold:
+    best_model_path = checkpoint_path  # Promoted!
+else:
+    print("Model rejected")  # Keep using previous best
+```
+
+**Config options** (train_local.py):
+- `--gating-games 20` - Games to play for validation
+- `--gating-threshold 0.55` - Win rate needed to promote
+- `--gating-simulations 100` - MCTS sims for gating games
+
+### Random Opening Moves
+
+Increases opening diversity to break self-play echo chambers.
+
+```python
+selfplay = SelfPlay(
+    random_opening_moves=4,     # First N moves can be random
+    random_opening_fraction=0.3  # 30% of games use random opening
+)
 ```
 
 ## Files Reference
@@ -220,7 +307,10 @@ class MCTSConfig:
 |------|---------|
 | `razzle/training/trainer.py` | Training loop with masked CE + illegal penalty |
 | `razzle/training/selfplay.py` | Self-play game generation |
+| `razzle/training/replay_buffer.py` | Replay buffer for preventing forgetting |
 | `scripts/trainer.py` | Distributed trainer (fetches from API) |
+| `scripts/train_local.py` | Local training with replay buffer + gating |
+| `scripts/train_distributed.py` | Distributed training orchestrator |
 | `scripts/diagnose_policy.py` | Policy analysis tool |
-| `razzle/ai/mcts.py` | Monte Carlo Tree Search |
-| `razzle/ai/network.py` | Neural network architecture |
+| `razzle/ai/mcts.py` | Monte Carlo Tree Search with pass quiescence |
+| `razzle/ai/network.py` | Neural network architecture (7 input planes) |

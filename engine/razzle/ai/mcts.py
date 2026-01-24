@@ -47,6 +47,10 @@ class MCTSConfig:
     min_sims_for_early_stop: int = 100  # Minimum sims before early termination allowed
     check_early_stop_interval: int = 50  # Check every N simulations
 
+    # Pass quiescence: continue search through pass sequences to avoid evaluating mid-turn
+    pass_quiescence: bool = True  # Don't evaluate mid-pass positions
+    pass_quiescence_max_depth: int = 10  # Max passes to extend (safety limit)
+
 
 @dataclass
 class Node:
@@ -205,6 +209,55 @@ class MCTS:
 
         return root
 
+    def _quiescence_search(self, node: Node, depth: int = 0) -> float:
+        """
+        Search through pass sequence to find best outcome.
+
+        Since the same player is moving throughout a pass sequence,
+        we take the max value over all branches. This ensures we
+        properly evaluate positions where a pass chain leads to a win.
+
+        Args:
+            node: Current node (must be expanded)
+            depth: Current depth in quiescence search
+
+        Returns:
+            Best value achievable from this position
+        """
+        # Safety limit to prevent infinite loops
+        if depth >= self.config.pass_quiescence_max_depth:
+            _, value = self.evaluator.evaluate(node.state)
+            return value
+
+        # Terminal state - return actual result
+        if node.state.is_terminal():
+            result = node.state.get_result(node.state.current_player)
+            return 2 * result - 1  # Convert [0,1] to [-1,1]
+
+        # Turn ended (has_passed=False) - evaluate this position
+        if not node.state.has_passed:
+            _, value = self.evaluator.evaluate(node.state)
+            return value
+
+        # Mid-pass: search all children and take max
+        # (same player is still moving, so we want the best outcome)
+        if not node.children:
+            # No children somehow - evaluate here
+            _, value = self.evaluator.evaluate(node.state)
+            return value
+
+        best_value = float('-inf')
+        for action, child in node.children.items():
+            # Expand child if needed
+            if not child.is_expanded and not child.state.is_terminal():
+                policy, _ = self.evaluator.evaluate(child.state)
+                child.expand(policy)
+
+            child_value = self._quiescence_search(child, depth + 1)
+            best_value = max(best_value, child_value)
+
+        return best_value
+
     def _simulate(self, root: Node) -> None:
         """Run one MCTS simulation."""
         node = root
@@ -217,17 +270,22 @@ class MCTS:
             _, node = node.select_child(self.config.c_puct)
             path.append(node)
 
-        # EVALUATE
+        # EVALUATE (with pass quiescence)
         if node.state.is_terminal():
             # Terminal node - use actual game result
-            # Value from perspective of leaf's current player
             leaf_player = node.state.current_player
             value = node.state.get_result(leaf_player)
             value = 2 * value - 1  # Convert from [0,1] to [-1,1]
         else:
-            # Expand and evaluate with neural network
+            # Expand the node first
             policy, value = self.evaluator.evaluate(node.state)
             node.expand(policy)
+
+            # Pass quiescence: if we're mid-pass, search all continuations
+            # and take the max value (same player is moving throughout)
+            if self.config.pass_quiescence and node.state.has_passed:
+                value = self._quiescence_search(node, depth=0)
+
             leaf_player = node.state.current_player
 
         # BACKUP: propagate value up the tree

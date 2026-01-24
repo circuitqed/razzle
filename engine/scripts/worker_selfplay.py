@@ -27,6 +27,7 @@ Status file (status.json):
 import argparse
 import json
 import os
+import random
 import signal
 import sys
 import time
@@ -45,6 +46,7 @@ from razzle.ai.network import RazzleNet, create_network
 from razzle.ai.mcts import MCTS, MCTSConfig
 from razzle.ai.evaluator import BatchedEvaluator
 from razzle.core.state import GameState
+from razzle.core.moves import get_legal_moves
 from razzle.training.api_client import TrainingAPIClient
 
 
@@ -86,6 +88,8 @@ class SelfPlayWorker:
         blocks: int = 6,
         batch_size: int = 32,
         model_check_interval: int = 5,  # Check for new model every N games
+        random_opening_moves: int = 0,  # Number of random moves at start
+        random_opening_fraction: float = 0.0,  # Fraction of games with random opening
     ):
         self.worker_id = worker_id
         self.api_url = api_url
@@ -97,6 +101,8 @@ class SelfPlayWorker:
         self.blocks = blocks
         self.batch_size = batch_size
         self.model_check_interval = model_check_interval
+        self.random_opening_moves = random_opening_moves
+        self.random_opening_fraction = random_opening_fraction
 
         # Directories
         self.model_dir = self.workspace / "model"
@@ -268,6 +274,9 @@ class SelfPlayWorker:
         """
         Play a single self-play game.
 
+        If random_opening_fraction > 0, some games use random moves for
+        the first random_opening_moves moves to increase opening diversity.
+
         Returns:
             Tuple of (moves, result, visit_counts)
         """
@@ -278,30 +287,47 @@ class SelfPlayWorker:
         move_count = 0
         self.current_game_moves = 0
 
+        # Decide if this game uses random opening
+        use_random_opening = random.random() < self.random_opening_fraction
+
         while not state.is_terminal() and move_count < 300:
-            # Configure MCTS
-            temp = 1.0 if move_count < self.temperature_moves else 0.0
-            config = MCTSConfig(
-                num_simulations=self.simulations,
-                temperature=temp,
-                batch_size=self.batch_size
-            )
-            mcts = MCTS(self.evaluator, config)
+            legal_moves = get_legal_moves(state)
 
-            # Search
-            root = mcts.search_batched(state, add_noise=True)
+            # Check if we should use random move (for opening diversity)
+            if use_random_opening and move_count < self.random_opening_moves:
+                # Random opening move - uniform distribution over legal moves
+                move = random.choice(legal_moves)
 
-            # Record visit counts (sparse - only visited moves)
-            vc = {}
-            for move, child in root.children.items():
-                if child.visit_count > 0:
-                    vc[move] = child.visit_count
-            visit_counts.append(vc)
+                # Record uniform visit counts for training
+                vc = {m: 1 for m in legal_moves}
+                visit_counts.append(vc)
 
-            # Select and apply move
-            move = mcts.select_move(root)
-            moves.append(move)
-            state.apply_move(move)
+                moves.append(move)
+                state.apply_move(move)
+            else:
+                # Standard MCTS move
+                temp = 1.0 if move_count < self.temperature_moves else 0.0
+                config = MCTSConfig(
+                    num_simulations=self.simulations,
+                    temperature=temp,
+                    batch_size=self.batch_size
+                )
+                mcts = MCTS(self.evaluator, config)
+
+                # Search
+                root = mcts.search_batched(state, add_noise=True)
+
+                # Record visit counts (sparse - only visited moves)
+                vc = {}
+                for m, child in root.children.items():
+                    if child.visit_count > 0:
+                        vc[m] = child.visit_count
+                visit_counts.append(vc)
+
+                # Select and apply move
+                move = mcts.select_move(root)
+                moves.append(move)
+                state.apply_move(move)
 
             move_count += 1
             self.current_game_moves = move_count
@@ -430,6 +456,10 @@ def main():
                         help='MCTS batch size for GPU parallelism')
     parser.add_argument('--model-check-interval', type=int, default=5,
                         help='Check for new model every N games')
+    parser.add_argument('--random-opening-moves', type=int, default=0,
+                        help='Number of random moves at game start (default: 0)')
+    parser.add_argument('--random-opening-fraction', type=float, default=0.3,
+                        help='Fraction of games with random openings (default: 0.3)')
 
     args = parser.parse_args()
 
@@ -462,7 +492,9 @@ def main():
         filters=filters,
         blocks=blocks,
         batch_size=args.batch_size,
-        model_check_interval=args.model_check_interval
+        model_check_interval=args.model_check_interval,
+        random_opening_moves=args.random_opening_moves,
+        random_opening_fraction=args.random_opening_fraction,
     )
 
     # Handle signals for graceful shutdown

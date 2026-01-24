@@ -21,7 +21,7 @@ from ..ai.network import RazzleNet
 class TrainingConfig:
     """Configuration for training."""
     batch_size: int = 256
-    learning_rate: float = 0.001
+    learning_rate: float = 0.001  # Adam default, stable for training
     weight_decay: float = 1e-4
     epochs: int = 10
     policy_weight: float = 1.0

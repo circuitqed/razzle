@@ -2,7 +2,7 @@
 Neural network for Razzle Dazzle position evaluation.
 
 Architecture: Residual CNN with policy, value, and difficulty heads.
-Input: (batch, 6, 8, 7) - board planes
+Input: (batch, 7, 8, 7) - board planes (pieces, balls, touched_mask, player, has_passed)
 Output:
   - policy: (batch, 3137) - log probabilities over moves (56*56 + END_TURN)
   - value: (batch, 1) - position evaluation [-1, 1]
@@ -29,7 +29,7 @@ NUM_ACTIONS = END_TURN_ACTION + 1  # 3137 total actions
 @dataclass
 class NetworkConfig:
     """Configuration for the neural network."""
-    num_input_planes: int = 6
+    num_input_planes: int = 7  # Updated: added has_passed plane
     num_filters: int = 64
     num_blocks: int = 6
     policy_filters: int = 2
@@ -98,7 +98,7 @@ class RazzleNet(nn.Module):
         Forward pass.
 
         Args:
-            x: Input tensor of shape (batch, 6, 8, 7)
+            x: Input tensor of shape (batch, 7, 8, 7)
 
         Returns:
             policy: Log probabilities over actions (batch, 3137)

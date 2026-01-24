@@ -10,9 +10,9 @@ The network follows the AlphaZero architecture: a residual convolutional neural 
 
 ## Input Representation
 
-The board state is encoded as a tensor of shape `(6, 8, 7)`:
+The board state is encoded as a tensor of shape `(7, 8, 7)`:
 - 8 rows × 7 columns = 56 squares (fits in a 64-bit integer for bitboard ops)
-- 6 input planes (channels)
+- 7 input planes (channels)
 
 ### Input Planes
 
@@ -30,7 +30,7 @@ The representation is **canonical** - it always shows the position from the curr
 ## Architecture
 
 ```
-Input (6, 8, 7)
+Input (7, 8, 7)
     │
     ▼
 ┌─────────────────────┐
@@ -75,7 +75,7 @@ Input (6, 8, 7)
 ### Key Components
 
 **Input Convolution**
-- 3×3 convolution transforming 6 input planes → 64 feature maps
+- 3×3 convolution transforming 7 input planes → 64 feature maps
 - Batch normalization + ReLU activation
 - No bias (BatchNorm handles the shift)
 
@@ -116,7 +116,7 @@ The default configuration creates a network with ~340K parameters:
 
 ```python
 NetworkConfig(
-    num_input_planes=6,    # Fixed by board representation
+    num_input_planes=7,    # Fixed by board representation
     num_filters=64,        # Width of residual tower
     num_blocks=6,          # Depth of residual tower
     policy_filters=2,      # Channels before policy FC

@@ -8,6 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 import pickle
+import random
 import numpy as np
 from pathlib import Path
 
@@ -95,7 +96,9 @@ class SelfPlay:
         num_simulations: int = 800,
         temperature_moves: int = 30,  # Use temperature for first N moves
         temperature: float = 1.0,
-        batch_size: int = 1
+        batch_size: int = 1,
+        random_opening_moves: int = 0,  # Number of random moves at start
+        random_opening_fraction: float = 0.0,  # Fraction of games with random opening
     ):
         if network is not None:
             self.evaluator = BatchedEvaluator(network, batch_size=batch_size, device=device)
@@ -105,12 +108,18 @@ class SelfPlay:
         self.num_simulations = num_simulations
         self.temperature_moves = temperature_moves
         self.temperature = temperature
+        self.random_opening_moves = random_opening_moves
+        self.random_opening_fraction = random_opening_fraction
 
     def play_game(self, verbose: bool = False) -> GameRecord:
         """
         Play a full game of self-play.
 
         Returns a GameRecord with states, policies, and result.
+
+        If random_opening_fraction > 0, some games will use random moves
+        for the first random_opening_moves moves. This increases opening
+        diversity and breaks self-play echo chambers.
         """
         state = GameState.new_game()
         states = []
@@ -121,6 +130,9 @@ class SelfPlay:
         legal_masks = []  # Track legal moves at each state
 
         move_count = 0
+
+        # Decide if this game uses random opening
+        use_random_opening = random.random() < self.random_opening_fraction
 
         # Helper to map move to policy index
         def move_to_index(m: int) -> int:
@@ -137,32 +149,52 @@ class SelfPlay:
             p1_progress = (7 - p1_ball_row) / 7.0  # 7 = start, 0 = goal -> inverted
             ball_progress.append((p0_progress, p1_progress))
 
-            # Configure MCTS
-            temp = self.temperature if move_count < self.temperature_moves else 0.0
-            config = MCTSConfig(
-                num_simulations=self.num_simulations,
-                temperature=temp,
-                batch_size=16  # Use batched search for efficiency
-            )
-            mcts = MCTS(self.evaluator, config)
-
-            # Search with batching for better performance
-            root = mcts.search_batched(state, add_noise=True)
-
-            # Record state, player, and policy BEFORE applying move
-            states.append(state.to_tensor())
-            players.append(state.current_player)
-            policies.append(mcts.get_policy(root))
+            # Get legal moves for this state
+            legal_moves = get_legal_moves(state)
 
             # Record legal move mask
             legal_mask = np.zeros(NUM_ACTIONS, dtype=np.float32)
-            for m in get_legal_moves(state):
+            for m in legal_moves:
                 legal_mask[move_to_index(m)] = 1.0
-            legal_masks.append(legal_mask)
 
-            # Select move
-            move = mcts.select_move(root)
-            moves.append(move)
+            # Check if we should use random move (for opening diversity)
+            if use_random_opening and move_count < self.random_opening_moves:
+                # Random opening move
+                move = random.choice(legal_moves)
+
+                # Uniform policy over legal moves for training
+                policy = np.zeros(NUM_ACTIONS, dtype=np.float32)
+                for m in legal_moves:
+                    policy[move_to_index(m)] = 1.0 / len(legal_moves)
+
+                # Record state, player, and policy
+                states.append(state.to_tensor())
+                players.append(state.current_player)
+                policies.append(policy)
+                legal_masks.append(legal_mask)
+                moves.append(move)
+            else:
+                # Standard MCTS move
+                temp = self.temperature if move_count < self.temperature_moves else 0.0
+                config = MCTSConfig(
+                    num_simulations=self.num_simulations,
+                    temperature=temp,
+                    batch_size=16  # Use batched search for efficiency
+                )
+                mcts = MCTS(self.evaluator, config)
+
+                # Search with batching for better performance
+                root = mcts.search_batched(state, add_noise=True)
+
+                # Record state, player, and policy BEFORE applying move
+                states.append(state.to_tensor())
+                players.append(state.current_player)
+                policies.append(mcts.get_policy(root))
+                legal_masks.append(legal_mask)
+
+                # Select move
+                move = mcts.select_move(root)
+                moves.append(move)
 
             if verbose:
                 print(f"Move {move_count + 1}: {move_to_algebraic(move)}")

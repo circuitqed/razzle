@@ -40,7 +40,7 @@ class TestGameState:
     def test_to_tensor(self):
         state = GameState.new_game()
         tensor = state.to_tensor()
-        assert tensor.shape == (6, 8, 7)
+        assert tensor.shape == (7, 8, 7)
         # Should have non-zero values in piece planes
         assert tensor[0].sum() > 0  # Current player pieces
         assert tensor[1].sum() > 0  # Current player ball

@@ -43,7 +43,7 @@ razzle/
 - Total action space: 56 * 56 + 1 = 3137 possible actions
 
 ### Neural Network
-- Input: 6 planes of 8x7 (pieces, balls, touched mask, player indicator)
+- Input: 7 planes of 8x7 (pieces, balls, touched mask, player indicator)
 - Architecture: Residual CNN (configurable depth/width)
 - Output: Policy (3137 logits) + Value (scalar)
 

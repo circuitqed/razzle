@@ -24,7 +24,7 @@
 | Parameter | Value | Rationale |
 |-----------|-------|-----------|
 | Batch size | 256 | Standard for stability |
-| Learning rate | 0.001 | Adam default, works well |
+| Learning rate | 0.001 | Adam default, stable for training |
 | Epochs per iteration | 5 | Faster iterations, more frequent updates |
 | Games per iteration | 50 | Train frequently early on |
 | Policy weight | 1.0 | Standard |

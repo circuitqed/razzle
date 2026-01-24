@@ -37,6 +37,7 @@ from razzle.core.state import GameState
 from razzle.core.moves import get_legal_moves
 from razzle.training.trainer import Trainer as NetworkTrainer, TrainingConfig
 from razzle.training.api_client import TrainingAPIClient, TrainingGame
+from razzle.training.replay_buffer import ReplayBuffer
 
 
 def compute_difficulty_target(raw_policy: np.ndarray, mcts_policy: np.ndarray) -> float:
@@ -192,6 +193,14 @@ class DistributedTrainer:
     Trainer that fetches games from API and uploads models.
     """
 
+    # Learning rate schedule: list of (iteration, learning_rate) tuples
+    # LR changes when iteration reaches each milestone
+    DEFAULT_LR_SCHEDULE = [
+        (0, 0.001),     # Start at 0.001 (proven to work well)
+        (200, 0.0005),  # Drop to 0.0005 at iter 200
+        (500, 0.0001),  # Drop to 0.0001 at iter 500 for fine-tuning
+    ]
+
     def __init__(
         self,
         api_url: str,
@@ -199,11 +208,12 @@ class DistributedTrainer:
         threshold: int = 50,
         poll_interval: int = 30,
         epochs: int = 10,
-        batch_size: int = 256,
-        learning_rate: float = 0.001,
+        batch_size: int = 512,  # Increased from 256
+        learning_rate: float = 0.001,  # Starting LR (proven to work well)
         filters: int = 64,
         blocks: int = 6,
         output_dir: Path = Path('output/trainer'),
+        lr_schedule: list[tuple[int, float]] | None = None,
     ):
         self.api_url = api_url
         self.device = device
@@ -215,6 +225,8 @@ class DistributedTrainer:
         self.filters = filters
         self.blocks = blocks
         self.output_dir = Path(output_dir)
+        self.lr_schedule = lr_schedule if lr_schedule is not None else self.DEFAULT_LR_SCHEDULE
+        self.current_lr = learning_rate
 
         # Create output directory
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -237,8 +249,16 @@ class DistributedTrainer:
         # Games log for analysis
         self.games_log_path = self.output_dir / 'games_log.jsonl'
 
+        # Replay buffer for preventing catastrophic forgetting
+        self.replay_buffer = ReplayBuffer(max_positions=100_000)
+
+        # Checkpoint gating - track best model
+        self.best_model_path: Optional[Path] = None
+
     def _load_or_create_network(self) -> bool:
-        """Load latest model from API or create new one."""
+        """Load latest model from API or create new one, and restore trainer state."""
+        model_path = None
+
         try:
             model_info = self.api_client.get_latest_model()
             if model_info:
@@ -248,6 +268,8 @@ class DistributedTrainer:
                 self.api_client.download_model(model_info.version, model_path)
                 self.network = RazzleNet.load(model_path, device=self.device)
                 self.iteration = model_info.iteration
+                # IMPORTANT: Set best_model_path so checkpoint gating works!
+                self.best_model_path = model_path
                 print(f"[Trainer] Loaded model: {model_info.version} (iteration {self.iteration})")
             else:
                 # No model available, create new network
@@ -274,7 +296,90 @@ class DistributedTrainer:
         )
         self.network_trainer = NetworkTrainer(self.network, config)
         print(f"[Trainer] Created trainer with Adam optimizer (lr={self.learning_rate})")
+
+        # Try to restore trainer state (optimizer, replay buffer)
+        self._load_trainer_state()
+
         return True
+
+    def _update_learning_rate(self):
+        """Update learning rate based on schedule and current iteration."""
+        # Find the appropriate LR for current iteration
+        target_lr = self.learning_rate  # default
+        for milestone_iter, lr in self.lr_schedule:
+            if self.iteration >= milestone_iter:
+                target_lr = lr
+
+        if target_lr != self.current_lr:
+            print(f"[Trainer] Adjusting learning rate: {self.current_lr} -> {target_lr}")
+            for param_group in self.network_trainer.optimizer.param_groups:
+                param_group['lr'] = target_lr
+            self.current_lr = target_lr
+
+    def _get_state_path(self) -> Path:
+        """Path to trainer state file."""
+        return self.output_dir / 'trainer_state.pt'
+
+    def _get_replay_buffer_path(self) -> Path:
+        """Path to replay buffer file."""
+        return self.output_dir / 'replay_buffer.npz'
+
+    def _save_trainer_state(self):
+        """Save optimizer state and metadata for resumption."""
+        state_path = self._get_state_path()
+        state = {
+            'iteration': self.iteration,
+            'total_games_trained': self.total_games_trained,
+            'optimizer_state_dict': self.network_trainer.optimizer.state_dict(),
+            'best_model_path': str(self.best_model_path) if self.best_model_path else None,
+        }
+        torch.save(state, state_path)
+
+        # Save replay buffer separately (numpy format for efficiency)
+        replay_path = self._get_replay_buffer_path()
+        if len(self.replay_buffer) > 0:
+            np.savez_compressed(
+                replay_path,
+                states=np.array(list(self.replay_buffer.states)),
+                policies=np.array(list(self.replay_buffer.policies)),
+                values=np.array(list(self.replay_buffer.values)),
+                legal_masks=np.array(list(self.replay_buffer.legal_masks)) if self.replay_buffer.legal_masks[0] is not None else None,
+            )
+            print(f"[Trainer] Saved trainer state and replay buffer ({len(self.replay_buffer)} positions)")
+
+    def _load_trainer_state(self):
+        """Load optimizer state and replay buffer if available."""
+        state_path = self._get_state_path()
+        if state_path.exists():
+            try:
+                state = torch.load(state_path, map_location=self.device)
+                self.network_trainer.optimizer.load_state_dict(state['optimizer_state_dict'])
+                self.total_games_trained = state.get('total_games_trained', 0)
+                if state.get('best_model_path'):
+                    self.best_model_path = Path(state['best_model_path'])
+                print(f"[Trainer] Restored optimizer state (iteration {state.get('iteration', '?')})")
+            except Exception as e:
+                print(f"[Trainer] Could not restore optimizer state: {e}")
+
+        # Load replay buffer
+        replay_path = self._get_replay_buffer_path()
+        if replay_path.exists():
+            try:
+                data = np.load(replay_path, allow_pickle=True)
+                states = data['states']
+                policies = data['policies']
+                values = data['values']
+                legal_masks = data['legal_masks'] if 'legal_masks' in data and data['legal_masks'] is not None else None
+
+                # Reconstruct replay buffer
+                self.replay_buffer = ReplayBuffer(max_positions=100_000)
+                if legal_masks is not None:
+                    self.replay_buffer.add(states, policies, values, legal_masks)
+                else:
+                    self.replay_buffer.add(states, policies, values, None)
+                print(f"[Trainer] Restored replay buffer ({len(self.replay_buffer)} positions)")
+            except Exception as e:
+                print(f"[Trainer] Could not restore replay buffer: {e}")
 
     def _save_games_to_log(self, games: list[TrainingGame], iteration: int):
         """Save games to JSONL log for later analysis."""
@@ -294,6 +399,9 @@ class DistributedTrainer:
         """
         Train on a batch of games.
 
+        Uses replay buffer to mix old and new positions, preventing
+        catastrophic forgetting.
+
         Returns training metrics.
         """
         print(f"[Trainer] Converting {len(games)} games to training data...")
@@ -302,10 +410,27 @@ class DistributedTrainer:
             network=self.network,
             device=self.device,
         )
-        print(f"[Trainer] Training examples: {len(states)}")
+        new_examples = len(states)
+        print(f"[Trainer] New training examples: {new_examples}")
         if difficulties is not None:
             avg_difficulty = difficulties.mean()
             print(f"[Trainer] Average difficulty target: {avg_difficulty:.3f}")
+
+        # Add new positions to replay buffer
+        self.replay_buffer.add(states, policies, values, legal_masks)
+        print(f"[Trainer] Replay buffer size: {len(self.replay_buffer)}")
+
+        # Sample from buffer (50% new, 50% buffer) if buffer has enough data
+        if len(self.replay_buffer) > 1000:
+            buf_states, buf_policies, buf_values, buf_masks = self.replay_buffer.sample(new_examples)
+            states = np.concatenate([states, buf_states])
+            policies = np.concatenate([policies, buf_policies])
+            values = np.concatenate([values, buf_values])
+            if legal_masks is not None and buf_masks is not None:
+                legal_masks = np.concatenate([legal_masks, buf_masks])
+            # Disable difficulty prediction when using buffer (sizes don't match)
+            difficulties = None
+            print(f"[Trainer] Training on {len(states)} examples ({new_examples} new + {len(buf_states)} from buffer)")
 
         # Reuse trainer to preserve optimizer momentum across iterations
         history = self.network_trainer.train(
@@ -328,22 +453,78 @@ class DistributedTrainer:
             'epochs': len(history),
         }
 
-    def save_and_upload_model(self, metrics: dict) -> str:
-        """Save model locally and upload to API."""
+    def validate_model(
+        self,
+        candidate_path: Path,
+        baseline_path: Path,
+        num_games: int = 20
+    ) -> float:
+        """
+        Play candidate vs baseline to validate improvement.
+
+        Args:
+            candidate_path: Path to candidate model checkpoint
+            baseline_path: Path to baseline (current best) model
+            num_games: Number of games to play
+
+        Returns:
+            Win rate of candidate model (0.0 to 1.0)
+        """
+        from scripts.model_arena import run_match
+
+        result = run_match(
+            str(candidate_path),
+            str(baseline_path),
+            num_games=num_games,
+            simulations=100,  # Faster for validation
+            device=self.device,
+            verbose=False,
+        )
+        return result.model1_win_rate()
+
+    def save_and_upload_model(self, metrics: dict) -> Optional[str]:
+        """
+        Save model locally and upload to API if it passes checkpoint gating.
+
+        Checkpoint gating: new model must beat current best by >55% win rate
+        before workers will use it. This prevents regression.
+
+        Returns:
+            Model version string if promoted, None if rejected.
+        """
         self.iteration += 1
         version = f"iter_{self.iteration:03d}"
 
-        # Save locally
-        model_path = self.models_dir / f"{version}.pt"
-        self.network.save(model_path)
-        print(f"[Trainer] Saved model: {model_path}")
+        # Save locally (always save for analysis, even if not promoted)
+        candidate_path = self.models_dir / f"{version}.pt"
+        self.network.save(candidate_path)
+        print(f"[Trainer] Saved candidate model: {candidate_path}")
 
-        # Upload to API
+        # Checkpoint gating: validate against current best
+        if self.best_model_path and self.best_model_path.exists():
+            print(f"[Trainer] Validating {version} vs {self.best_model_path.name}...")
+            try:
+                win_rate = self.validate_model(candidate_path, self.best_model_path, num_games=20)
+                print(f"[Trainer] Candidate win rate: {win_rate:.1%}")
+
+                if win_rate < 0.55:
+                    print(f"[Trainer] Model REJECTED (need >55% win rate)")
+                    # Don't upload - workers keep using current best
+                    return None
+
+                print(f"[Trainer] Model PROMOTED!")
+            except Exception as e:
+                print(f"[Trainer] Validation failed: {e}, promoting anyway")
+
+        # Update best model path
+        self.best_model_path = candidate_path
+
+        # Upload to API (only promoted models)
         try:
             self.api_client.upload_model(
                 version=version,
                 iteration=self.iteration,
-                file_path=model_path,
+                file_path=candidate_path,
                 games_trained_on=metrics.get('games'),
                 final_loss=metrics.get('final_loss'),
                 final_policy_loss=metrics.get('final_policy_loss'),
@@ -389,6 +570,9 @@ class DistributedTrainer:
                     if len(games) >= self.threshold:
                         print(f"\n[Trainer] Training on {len(games)} games (iteration {self.iteration + 1})")
 
+                        # Update learning rate based on schedule
+                        self._update_learning_rate()
+
                         # Now actually fetch and mark as used
                         games, _ = self.api_client.fetch_pending_games(
                             limit=len(games),
@@ -408,6 +592,9 @@ class DistributedTrainer:
 
                         # Save and upload
                         version = self.save_and_upload_model(metrics)
+
+                        # Save trainer state for resumption
+                        self._save_trainer_state()
 
                         print(f"[Trainer] Iteration {self.iteration} complete: "
                               f"loss={metrics['final_loss']:.4f}, "
@@ -450,10 +637,10 @@ def main():
                         help='Seconds between checking for games')
     parser.add_argument('--epochs', type=int, default=10,
                         help='Training epochs per iteration')
-    parser.add_argument('--batch-size', type=int, default=256,
-                        help='Training batch size')
+    parser.add_argument('--batch-size', type=int, default=512,
+                        help='Training batch size (default: 512)')
     parser.add_argument('--learning-rate', type=float, default=0.001,
-                        help='Learning rate')
+                        help='Initial learning rate (default: 0.001)')
     parser.add_argument('--filters', type=int, default=None,
                         help='Network filter count (overrides --network-size)')
     parser.add_argument('--blocks', type=int, default=None,

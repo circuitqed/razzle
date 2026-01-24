@@ -87,7 +87,7 @@ class TestGameRecordPlayerTracking:
         """GameRecord should use tracked players list for training examples."""
         # Create a GameRecord with explicit player tracking
         # Simulating: P0 move, P1 move, P1 pass (stays P1), P1 end_turn -> P0
-        states = [np.zeros((6, 8, 7), dtype=np.float32) for _ in range(4)]
+        states = [np.zeros((7, 8, 7), dtype=np.float32) for _ in range(4)]
         policies = [np.zeros(NUM_ACTIONS, dtype=np.float32) for _ in range(4)]
         players = [0, 1, 1, 0]  # P0, P1, P1 (after pass), P0 (after end_turn)
 
@@ -116,7 +116,7 @@ class TestGameRecordPlayerTracking:
     def test_gamerecord_without_players_falls_back(self):
         """GameRecord without players list should fall back to i % 2."""
         # This tests backward compatibility with old game records
-        states = [np.zeros((6, 8, 7), dtype=np.float32) for _ in range(3)]
+        states = [np.zeros((7, 8, 7), dtype=np.float32) for _ in range(3)]
         policies = [np.zeros(NUM_ACTIONS, dtype=np.float32) for _ in range(3)]
 
         record = GameRecord(

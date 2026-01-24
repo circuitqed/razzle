@@ -215,15 +215,16 @@ class GameState:
         """
         Convert state to neural network input tensor.
 
-        Returns (6, 8, 7) float32 array:
+        Returns (7, 8, 7) float32 array:
           - Plane 0: Current player's pieces
           - Plane 1: Current player's ball
           - Plane 2: Opponent's pieces
           - Plane 3: Opponent's ball
           - Plane 4: Touched mask (pieces that can't receive passes)
-          - Plane 5: Current player indicator (all 1s if player 1, all 0s if player 2)
+          - Plane 5: Current player indicator (all 1s if player 0, all 0s if player 1)
+          - Plane 6: Has passed indicator (all 1s if has_passed=True, all 0s otherwise)
         """
-        planes = np.zeros((6, ROWS, COLS), dtype=np.float32)
+        planes = np.zeros((7, ROWS, COLS), dtype=np.float32)
 
         p = self.current_player
         opp = 1 - p
@@ -250,6 +251,9 @@ class GameState:
 
         if p == 0:
             planes[5, :, :] = 1.0
+
+        if self.has_passed:
+            planes[6, :, :] = 1.0
 
         return planes
 
