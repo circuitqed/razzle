@@ -19,21 +19,21 @@
 - [x] Dummy evaluator for testing
 - [x] Self-play game generation
 - [x] Training loop
-- [ ] Train initial model
-- [ ] Optimize batched inference for faster self-play
+- [x] Train initial model
+- [x] Optimize batched inference for faster self-play
 
 ### Server
 - [x] FastAPI REST endpoints
 - [x] WebSocket support for real-time updates
 - [x] Game state management (in-memory)
-- [ ] Persistent game storage (database)
-- [ ] Authentication/user accounts
+- [x] Persistent game storage (database)
+- [x] Authentication/user accounts
 
 ### CLI
 - [x] Human vs AI mode
 - [x] AI vs AI watch mode
 - [x] Ball indicator display
-- [ ] Game save/load
+- [x] Game save/load
 
 ### Testing
 - [x] Bitboard tests
@@ -42,45 +42,45 @@
 - [x] MCTS tests
 - [x] Evaluator tests
 - [x] Server API tests
-- [ ] Integration tests
+- [x] Integration tests
 - [ ] Performance benchmarks
 
 ### Infrastructure
 - [x] Docker container with hot-reload
 - [x] Vast.ai cloud training integration
 - [ ] CI/CD pipeline
-- [ ] Model versioning/registry
+- [x] Model versioning/registry
 
 ---
 
 ## Webapp
 
 ### UI Components
-- [ ] Game board component
-- [ ] Piece rendering
-- [ ] Move highlighting
-- [ ] Game status display
-- [ ] Move history panel
+- [x] Game board component
+- [x] Piece rendering
+- [x] Move highlighting
+- [x] Game status display
+- [x] Move history panel
 
 ### Game Features
-- [ ] Single-player vs AI
-- [ ] Local two-player (hot seat)
+- [x] Single-player vs AI
+- [x] Local two-player (hot seat)
 - [ ] Online multiplayer
-- [ ] Difficulty levels (AI strength)
-- [ ] Undo/redo
+- [x] Difficulty levels (AI strength)
+- [x] Undo/redo
 
 ### UX
-- [ ] Mobile responsiveness
-- [ ] Touch controls
-- [ ] Animations
-- [ ] Sound effects
-- [ ] Dark mode
+- [x] Mobile responsiveness
+- [x] Touch controls
+- [x] Animations
+- [x] Sound effects
+- [x] Dark mode
 
 ### Infrastructure
-- [ ] API client for engine
-- [ ] WebSocket integration
-- [ ] State management
-- [ ] Error handling
+- [x] API client for engine
+- [x] WebSocket integration
+- [x] State management
+- [x] Error handling
 
 ---
 
@@ -91,12 +91,4 @@
 - [x] Official rules documentation (engine/docs/RULES.md)
 - [ ] API documentation
 - [ ] Landing page
-- [ ] Deployment (production hosting)
-
----
-
-## Current Priority
-
-1. **Train initial model** - Verify the training pipeline works end-to-end
-2. **Webapp board component** - Get basic game playable in browser
-3. **Online multiplayer** - Real-time games between players
+- [x] Deployment (production hosting)
