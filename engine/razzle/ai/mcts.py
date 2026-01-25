@@ -170,6 +170,22 @@ class Node:
             child.prior = (1 - epsilon) * child.prior + epsilon * noise[i]
 
 
+@dataclass
+class MCTSStats:
+    """Statistics from an MCTS search."""
+    total_evals: int = 0
+    pass_evals: int = 0  # Evals on positions where has_passed=True
+    knight_evals: int = 0  # Evals on positions where has_passed=False
+    quiescence_evals: int = 0  # Evals inside quiescence search
+
+    @property
+    def pass_eval_ratio(self) -> float:
+        """Ratio of evals spent on pass positions."""
+        if self.total_evals == 0:
+            return 0.0
+        return self.pass_evals / self.total_evals
+
+
 class MCTS:
     """
     Monte Carlo Tree Search with PUCT selection.
@@ -184,6 +200,21 @@ class MCTS:
     ):
         self.evaluator = evaluator
         self.config = config or MCTSConfig()
+        self.stats = MCTSStats()
+
+    def _reset_stats(self) -> None:
+        """Reset search statistics."""
+        self.stats = MCTSStats()
+
+    def _track_eval(self, state: GameState, in_quiescence: bool = False) -> None:
+        """Track an evaluation for statistics."""
+        self.stats.total_evals += 1
+        if state.has_passed:
+            self.stats.pass_evals += 1
+        else:
+            self.stats.knight_evals += 1
+        if in_quiescence:
+            self.stats.quiescence_evals += 1
 
     def search(self, state: GameState, add_noise: bool = True) -> Node:
         """
@@ -191,10 +222,12 @@ class MCTS:
 
         Returns the root node with visit statistics.
         """
+        self._reset_stats()
         root = Node(state=state.copy())
 
         # Evaluate and expand root
         policy, value = self.evaluator.evaluate(root.state)
+        self._track_eval(root.state)
         root.expand(policy)
 
         if add_noise and self.config.dirichlet_epsilon > 0:
@@ -227,6 +260,7 @@ class MCTS:
         # Safety limit to prevent infinite loops
         if depth >= self.config.pass_quiescence_max_depth:
             _, value = self.evaluator.evaluate(node.state)
+            self._track_eval(node.state, in_quiescence=True)
             return value
 
         # Terminal state - return actual result
@@ -237,6 +271,7 @@ class MCTS:
         # Turn ended (has_passed=False) - evaluate this position
         if not node.state.has_passed:
             _, value = self.evaluator.evaluate(node.state)
+            self._track_eval(node.state, in_quiescence=True)
             return value
 
         # Mid-pass: search all children and take max
@@ -244,6 +279,7 @@ class MCTS:
         if not node.children:
             # No children somehow - evaluate here
             _, value = self.evaluator.evaluate(node.state)
+            self._track_eval(node.state, in_quiescence=True)
             return value
 
         best_value = float('-inf')
@@ -251,6 +287,7 @@ class MCTS:
             # Expand child if needed
             if not child.is_expanded and not child.state.is_terminal():
                 policy, _ = self.evaluator.evaluate(child.state)
+                self._track_eval(child.state, in_quiescence=True)
                 child.expand(policy)
 
             child_value = self._quiescence_search(child, depth + 1)
@@ -279,6 +316,7 @@ class MCTS:
         else:
             # Expand the node first
             policy, value = self.evaluator.evaluate(node.state)
+            self._track_eval(node.state)
             node.expand(policy)
 
             # Pass quiescence: if we're mid-pass, search all continuations
@@ -373,10 +411,12 @@ class MCTS:
 
         Returns the root node with visit statistics.
         """
+        self._reset_stats()
         root = Node(state=state.copy())
 
         # Evaluate and expand root
         policy, value = self.evaluator.evaluate(root.state)
+        self._track_eval(root.state)
         root.expand(policy)
 
         if add_noise and self.config.dirichlet_epsilon > 0:
@@ -434,6 +474,10 @@ class MCTS:
         if leaves:
             states = [leaf.state for leaf in leaves]
             results = self.evaluator.evaluate_batch(states)
+
+            # Track evals for each leaf
+            for leaf in leaves:
+                self._track_eval(leaf.state)
 
             # EXPAND and BACKUP for each leaf
             for path, leaf, leaf_player, (policy, value) in zip(paths, leaves, leaf_players, results):
@@ -530,6 +574,7 @@ class MCTS:
             (root_node, info_dict) where info_dict contains search statistics
         """
         start_time = time.time()
+        self._reset_stats()
 
         root = Node(state=state.copy())
 
@@ -541,6 +586,7 @@ class MCTS:
             policy, value = self.evaluator.evaluate(root.state)
             difficulty = 0.5  # Neutral difficulty
 
+        self._track_eval(root.state)
         root.expand(policy)
 
         if add_noise and self.config.dirichlet_epsilon > 0:
