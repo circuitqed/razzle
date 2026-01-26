@@ -5,6 +5,8 @@ Used by workers to submit games and check for model updates,
 and by trainer to fetch games and upload models.
 """
 
+import gzip
+import io
 import os
 import time
 import logging
@@ -254,28 +256,40 @@ class TrainingAPIClient:
             final_policy_loss: Final policy loss
             final_value_loss: Final value loss
         """
+        # Read and compress the model file
         with open(file_path, "rb") as f:
-            files = {"file": (f"{version}.pt", f, "application/octet-stream")}
-            data = {
-                "version": version,
-                "iteration": str(iteration),
-            }
-            if games_trained_on is not None:
-                data["games_trained_on"] = str(games_trained_on)
-            if final_loss is not None:
-                data["final_loss"] = str(final_loss)
-            if final_policy_loss is not None:
-                data["final_policy_loss"] = str(final_policy_loss)
-            if final_value_loss is not None:
-                data["final_value_loss"] = str(final_value_loss)
+            raw_data = f.read()
 
-            response = self.session.post(
-                self._url("/training/models"),
-                data=data,
-                files=files,
-                timeout=self.timeout * 2,  # Longer timeout for upload
-            )
-            response.raise_for_status()
+        # Compress with gzip (typically reduces to ~30% of original size)
+        compressed = io.BytesIO()
+        with gzip.GzipFile(fileobj=compressed, mode='wb', compresslevel=6) as gz:
+            gz.write(raw_data)
+        compressed_data = compressed.getvalue()
+
+        logger.info(f"Model compression: {len(raw_data)/1024/1024:.1f}MB -> {len(compressed_data)/1024/1024:.1f}MB ({100*len(compressed_data)/len(raw_data):.0f}%)")
+
+        files = {"file": (f"{version}.pt.gz", compressed_data, "application/gzip")}
+        data = {
+            "version": version,
+            "iteration": str(iteration),
+            "compressed": "true",
+        }
+        if games_trained_on is not None:
+            data["games_trained_on"] = str(games_trained_on)
+        if final_loss is not None:
+            data["final_loss"] = str(final_loss)
+        if final_policy_loss is not None:
+            data["final_policy_loss"] = str(final_policy_loss)
+        if final_value_loss is not None:
+            data["final_value_loss"] = str(final_value_loss)
+
+        response = self.session.post(
+            self._url("/training/models"),
+            data=data,
+            files=files,
+            timeout=self.timeout * 4,  # Longer timeout for upload
+        )
+        response.raise_for_status()
 
     def get_dashboard(self) -> dict:
         """
@@ -290,6 +304,66 @@ class TrainingAPIClient:
         )
         response.raise_for_status()
         return response.json()
+
+    def submit_metrics(self, iteration: int, metrics: dict) -> bool:
+        """
+        Submit training metrics to API for dashboard.
+
+        Args:
+            iteration: Training iteration number
+            metrics: Dictionary of metric name -> value
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            response = self.session.post(
+                self._url("/training/metrics"),
+                json={
+                    "iteration": iteration,
+                    "metrics": metrics,
+                },
+                timeout=self.timeout,
+            )
+            return response.ok
+        except Exception as e:
+            logger.warning(f"Failed to submit metrics: {e}")
+            return False
+
+    def get_metrics(self, limit: int = 100, offset: int = 0) -> tuple[list[dict], int]:
+        """
+        Get training metrics history.
+
+        Args:
+            limit: Maximum number of records to return
+            offset: Number of records to skip
+
+        Returns:
+            Tuple of (list of metrics dicts, total count)
+        """
+        response = self.session.get(
+            self._url("/training/metrics"),
+            params={"limit": limit, "offset": offset},
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
+        data = response.json()
+        return data["metrics"], data["total"]
+
+    def get_latest_metrics(self) -> Optional[dict]:
+        """
+        Get the most recent training metrics.
+
+        Returns:
+            Metrics dict if available, None otherwise
+        """
+        response = self.session.get(
+            self._url("/training/metrics/latest"),
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
+        data = response.json()
+        return data.get("metrics")
 
     # --- Health Check ---
 

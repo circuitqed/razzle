@@ -143,3 +143,74 @@ export function algebraicToSquare(algebraic: string): number {
   const rank = parseInt(algebraic[1]) - 1;
   return coordsToSquare(rank, file);
 }
+
+// --- Training Metrics Types ---
+
+export interface TrainingMetrics {
+  id?: number;
+  iteration: number;
+  timestamp: string;
+  // Policy metrics
+  policy_top1_accuracy: number | null;
+  policy_top3_accuracy: number | null;
+  policy_entropy: number | null;
+  policy_legal_mass: number | null;
+  policy_ebf: number | null;
+  policy_confidence: number | null;
+  // Value metrics
+  value_mean: number | null;
+  value_std: number | null;
+  value_extremity: number | null;
+  value_calibration_error: number | null;
+  // Pass metrics
+  pass_decision_rate: number | null;
+  // Loss metrics
+  loss_total: number | null;
+  loss_policy: number | null;
+  loss_value: number | null;
+  loss_difficulty: number | null;
+  loss_illegal_penalty: number | null;
+  // Game stats
+  num_games: number | null;
+  num_examples: number | null;
+  avg_game_length: number | null;
+  // Meta
+  learning_rate: number | null;
+  model_version: string | null;
+  train_time_sec: number | null;
+}
+
+export interface TrainingMetricsResponse {
+  metrics: TrainingMetrics[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface LatestMetricsResponse {
+  metrics: TrainingMetrics | null;
+}
+
+// Training Dashboard (infrastructure) data
+export interface WorkerInfo {
+  games: number;
+  last_seen: string;
+}
+
+export interface ModelInfo {
+  version: string;
+  iteration: number;
+  games_trained_on: number | null;
+  final_loss: number | null;
+  download_url: string;
+  created_at: string;
+}
+
+export interface TrainingDashboardData {
+  status: 'idle' | 'active';
+  games_pending: number;
+  games_total: number;
+  latest_model: ModelInfo | null;
+  workers: Record<string, WorkerInfo>;
+  models: ModelInfo[];
+}

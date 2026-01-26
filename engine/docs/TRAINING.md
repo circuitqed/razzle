@@ -301,6 +301,154 @@ selfplay = SelfPlay(
 )
 ```
 
+## Distributed Training Infrastructure
+
+### Architecture Overview
+
+```
+┌────────────────────────────────────────────────────────────────────┐
+│                        LOCAL MACHINE                                │
+│  ┌──────────────────────────────────────────────────────────────┐  │
+│  │              Orchestrator (train_distributed.py)              │  │
+│  │  - Creates Vast.ai GPU instances                              │  │
+│  │  - Uploads code package to instances                          │  │
+│  │  - Monitors health via API dashboard                          │  │
+│  │  - Replaces failed/unresponsive workers                       │  │
+│  │  - Cleans up all instances on shutdown                        │  │
+│  └──────────────────────────────────────────────────────────────┘  │
+└────────────────────────────────────────────────────────────────────┘
+                              │
+                              │ Creates + SSH
+                              ▼
+┌────────────────────────────────────────────────────────────────────┐
+│                        VAST.AI CLOUD                                │
+│                                                                     │
+│  ┌─────────────┐ ┌─────────────┐ ┌─────────────┐ ┌─────────────┐  │
+│  │  Worker 0   │ │  Worker 1   │ │  Worker 2   │ │   Trainer   │  │
+│  │  3x GPU     │ │  3x GPU     │ │  3x GPU     │ │    GPU      │  │
+│  │  selfplay   │ │  selfplay   │ │  selfplay   │ │   train     │  │
+│  └──────┬──────┘ └──────┬──────┘ └──────┬──────┘ └──────┬──────┘  │
+│         │               │               │               │          │
+│         └───────────────┴───────┬───────┴───────────────┘          │
+│                                 │                                   │
+└─────────────────────────────────┼───────────────────────────────────┘
+                                  │ HTTPS
+                                  ▼
+┌────────────────────────────────────────────────────────────────────┐
+│                        API SERVER                                   │
+│            (razzledazzle.lazybrains.com/api)                       │
+│                                                                     │
+│  POST /training/games     - Workers submit completed games          │
+│  GET  /training/games     - Trainer fetches pending games           │
+│  POST /training/models    - Trainer uploads new model               │
+│  GET  /training/models    - Workers download latest model           │
+│  GET  /training/dashboard - Status monitoring                       │
+│  POST /training/metrics   - Trainer submits iteration metrics       │
+└────────────────────────────────────────────────────────────────────┘
+```
+
+### Component Responsibilities
+
+#### Orchestrator (`train_distributed.py`)
+
+The orchestrator runs on your local machine and manages the Vast.ai infrastructure:
+
+1. **Instance Creation**: Creates GPU instances on Vast.ai (workers + trainer)
+2. **Code Deployment**: Packages and uploads `razzle/`, worker, trainer, and model_arena scripts
+3. **Process Startup**: SSHs into each instance and starts worker/trainer processes
+4. **Health Monitoring**: Every 60s, checks API dashboard for worker activity
+5. **Auto-Recovery**: Replaces workers that haven't submitted games in 5 minutes
+6. **Cleanup**: Destroys all instances on Ctrl+C or after 10 minutes of no activity
+
+**Lifecycle**:
+```
+Start → Create Instances → Wait for SSH → Upload Package → Start Processes → Monitor → Cleanup
+```
+
+**Important**: The orchestrator must keep running! If you close the terminal or hit Ctrl+C, it will destroy all Vast.ai instances.
+
+#### Workers (`worker_selfplay.py`)
+
+Workers run on Vast.ai GPU instances and generate training data:
+
+1. Download latest model from API
+2. Generate self-play games using MCTS
+3. Submit completed games to API
+4. Check for model updates periodically
+5. Loop indefinitely
+
+**Multiple workers per instance**: By default, 3 worker processes share each GPU to maximize utilization.
+
+#### Trainer (`trainer.py`)
+
+The trainer runs on a Vast.ai GPU instance and trains the neural network:
+
+1. Poll API for pending games every 30s
+2. When games >= threshold (default 50), fetch and train
+3. After training:
+   - Save model locally
+   - **Checkpoint gating**: Validate against previous best (>55% win rate required)
+   - If promoted, upload to API
+   - Submit metrics to API
+4. Workers automatically pick up the new model
+
+**Checkpoint Gating**: Uses `model_arena.py` to play validation games. This prevents regression by ensuring new models are actually stronger.
+
+### Why the Trainer Might Stop
+
+Common issues:
+
+1. **Missing dependencies**: If `model_arena.py` import fails (now fixed by including it in package)
+2. **API connectivity**: Network issues can cause API calls to fail
+3. **Instance termination**: Vast.ai can terminate instances for various reasons
+4. **Out of memory**: Large networks may exceed GPU memory during validation games
+
+Check trainer status:
+```bash
+# Check API dashboard
+curl https://razzledazzle.lazybrains.com/api/training/dashboard | jq .
+
+# Check metrics (shows last successful iteration)
+curl https://razzledazzle.lazybrains.com/api/training/metrics/latest | jq .
+```
+
+### Launching Training
+
+```bash
+# Standard launch with large network (256f/15b)
+python scripts/train_distributed.py \
+  --workers 4 \
+  --workers-per-instance 3 \
+  --network-size large \
+  --threshold 50 \
+  --simulations 800
+
+# Or use the launcher script with presets
+python scripts/launch_training.py --fresh
+```
+
+### Monitoring
+
+1. **Web Dashboard**: Open webapp, press 'T' for training dashboard
+2. **API endpoints**:
+   - `/training/dashboard` - Worker status, game counts, models
+   - `/training/metrics` - Training metrics history
+   - `/training/metrics/latest` - Most recent iteration
+
+### Stopping Training
+
+Press Ctrl+C in the orchestrator terminal. This will:
+1. Signal shutdown
+2. Destroy all Vast.ai instances
+3. Exit cleanly
+
+If the orchestrator crashes without cleanup, manually destroy instances:
+```bash
+vastai destroy instance <id>
+# or destroy all
+vastai show instances | grep running | awk '{print $1}' | xargs -I{} vastai destroy instance {}
+```
+
 ## Files Reference
 
 | File | Purpose |
@@ -311,6 +459,9 @@ selfplay = SelfPlay(
 | `scripts/trainer.py` | Distributed trainer (fetches from API) |
 | `scripts/train_local.py` | Local training with replay buffer + gating |
 | `scripts/train_distributed.py` | Distributed training orchestrator |
+| `scripts/worker_selfplay.py` | Self-play worker for distributed training |
+| `scripts/model_arena.py` | Model vs model matches for checkpoint gating |
+| `scripts/launch_training.py` | Convenience launcher with presets |
 | `scripts/diagnose_policy.py` | Policy analysis tool |
 | `razzle/ai/mcts.py` | Monte Carlo Tree Search with pass quiescence |
 | `razzle/ai/network.py` | Neural network architecture (7 input planes) |

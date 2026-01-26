@@ -38,6 +38,10 @@ from razzle.core.moves import get_legal_moves
 from razzle.training.trainer import Trainer as NetworkTrainer, TrainingConfig
 from razzle.training.api_client import TrainingAPIClient, TrainingGame
 from razzle.training.replay_buffer import ReplayBuffer
+from razzle.training.metrics import (
+    compute_policy_metrics, compute_value_metrics,
+    compute_value_calibration, compute_calibration_error, compute_pass_stats
+)
 
 
 def compute_difficulty_target(raw_policy: np.ndarray, mcts_policy: np.ndarray) -> float:
@@ -324,6 +328,44 @@ class DistributedTrainer:
         """Path to replay buffer file."""
         return self.output_dir / 'replay_buffer.npz'
 
+    def _submit_iteration_metrics(self, metrics: dict, train_time: float, model_version: str = None):
+        """Submit iteration metrics to API for dashboard tracking."""
+        api_metrics = {
+            # Loss metrics
+            'loss_total': metrics.get('final_loss', 0),
+            'loss_policy': metrics.get('final_policy_loss', 0),
+            'loss_value': metrics.get('final_value_loss', 0),
+            'loss_difficulty': metrics.get('final_difficulty_loss', 0),
+            'loss_illegal_penalty': metrics.get('final_illegal_penalty', 0),
+            # Policy metrics
+            'policy_top1_accuracy': metrics.get('policy_top1_accuracy'),
+            'policy_top3_accuracy': metrics.get('policy_top3_accuracy'),
+            'policy_entropy': metrics.get('policy_entropy'),
+            'policy_legal_mass': metrics.get('policy_legal_mass'),
+            'policy_ebf': metrics.get('policy_ebf'),
+            'policy_confidence': metrics.get('policy_confidence'),
+            # Value metrics
+            'value_mean': metrics.get('value_mean'),
+            'value_std': metrics.get('value_std'),
+            'value_extremity': metrics.get('value_extremity'),
+            'value_calibration_error': metrics.get('value_calibration_error'),
+            # Pass metrics
+            'pass_decision_rate': metrics.get('pass_decision_rate'),
+            # Game stats
+            'num_games': metrics.get('games', 0),
+            'num_examples': metrics.get('examples', 0),
+            'avg_game_length': metrics.get('avg_game_length'),
+            # Meta
+            'learning_rate': self.current_lr,
+            'model_version': model_version,
+            'train_time_sec': train_time,
+        }
+
+        success = self.api_client.submit_metrics(self.iteration, api_metrics)
+        if success:
+            print(f"[Trainer] Metrics submitted to API")
+        # Silently ignore failures - metrics are logged locally anyway
+
     def _save_trainer_state(self):
         """Save optimizer state and metadata for resumption."""
         state_path = self._get_state_path()
@@ -443,6 +485,11 @@ class DistributedTrainer:
         # Get final metrics
         final = history[-1] if history else {}
 
+        # Compute additional metrics after training (pass games for pass stats)
+        extended_metrics = self._compute_extended_metrics(
+            states, policies, values, legal_masks, games=games
+        )
+
         return {
             'games': len(games),
             'examples': len(states),
@@ -450,7 +497,90 @@ class DistributedTrainer:
             'final_policy_loss': final.get('policy_loss', 0),
             'final_value_loss': final.get('value_loss', 0),
             'final_difficulty_loss': final.get('difficulty_loss', 0),
+            'final_illegal_penalty': final.get('illegal_penalty', 0),
             'epochs': len(history),
+            **extended_metrics,
+        }
+
+    def _compute_extended_metrics(
+        self,
+        states: np.ndarray,
+        policies: np.ndarray,
+        values: np.ndarray,
+        legal_masks: Optional[np.ndarray],
+        games: Optional[list] = None,
+    ) -> dict:
+        """
+        Compute extended metrics after training for analysis.
+
+        Returns dict with policy accuracy, value stats, calibration, pass stats, etc.
+        """
+        # Convert to tensors for network inference
+        states_tensor = torch.from_numpy(states).to(self.device)
+
+        self.network.eval()
+        with torch.no_grad():
+            pred_logits, pred_values, pred_difficulty = self.network(states_tensor)
+            pred_values = pred_values.squeeze(-1)
+
+        # Compute policy metrics
+        policy_metrics = compute_policy_metrics(
+            pred_logits.cpu().numpy(),
+            policies,
+            legal_masks,
+        )
+
+        # Compute value metrics
+        value_metrics = compute_value_metrics(pred_values.cpu().numpy())
+
+        # Compute value calibration
+        calibration = compute_value_calibration(pred_values.cpu().numpy(), values)
+        calibration_error = compute_calibration_error(calibration)
+
+        # Compute pass stats from games if available
+        pass_decision_rate = None
+        avg_game_length = None
+        if games:
+            total_pass_decisions = 0
+            total_knight_decisions = 0
+            total_length = 0
+            for game in games:
+                stats = compute_pass_stats(game.moves)
+                total_pass_decisions += stats['pass_decisions']
+                total_knight_decisions += stats['knight_decisions']
+                total_length += len(game.moves)
+            total_decisions = total_pass_decisions + total_knight_decisions
+            if total_decisions > 0:
+                pass_decision_rate = total_pass_decisions / total_decisions
+            avg_game_length = total_length / len(games) if games else 0
+
+        # Log extended metrics
+        print(f"[Trainer] Extended metrics:")
+        print(f"  Policy top-1 acc: {policy_metrics.top1_accuracy*100:.1f}%, "
+              f"top-3 acc: {policy_metrics.top3_accuracy*100:.1f}%")
+        print(f"  Policy entropy: {policy_metrics.entropy:.3f}, "
+              f"EBF: {policy_metrics.effective_branching_factor:.2f}, "
+              f"confidence: {policy_metrics.policy_confidence*100:.1f}%")
+        print(f"  Policy legal mass: {policy_metrics.legal_mass*100:.1f}%")
+        print(f"  Value mean: {value_metrics.mean:+.3f}, std: {value_metrics.std:.3f}, "
+              f"extremity: {value_metrics.extremity:.3f}")
+        print(f"  Value calibration error: {calibration_error:.4f}")
+        if pass_decision_rate is not None:
+            print(f"  Pass decision rate: {pass_decision_rate*100:.1f}%")
+
+        return {
+            'policy_top1_accuracy': policy_metrics.top1_accuracy,
+            'policy_top3_accuracy': policy_metrics.top3_accuracy,
+            'policy_entropy': policy_metrics.entropy,
+            'policy_legal_mass': policy_metrics.legal_mass,
+            'policy_ebf': policy_metrics.effective_branching_factor,
+            'policy_confidence': policy_metrics.policy_confidence,
+            'value_mean': value_metrics.mean,
+            'value_std': value_metrics.std,
+            'value_extremity': value_metrics.extremity,
+            'value_calibration_error': calibration_error,
+            'pass_decision_rate': pass_decision_rate,
+            'avg_game_length': avg_game_length,
         }
 
     def validate_model(
@@ -470,7 +600,11 @@ class DistributedTrainer:
         Returns:
             Win rate of candidate model (0.0 to 1.0)
         """
-        from scripts.model_arena import run_match
+        try:
+            from scripts.model_arena import run_match
+        except ImportError:
+            # On Vast.ai, model_arena.py is at workspace root
+            from model_arena import run_match
 
         result = run_match(
             str(candidate_path),
@@ -500,21 +634,10 @@ class DistributedTrainer:
         self.network.save(candidate_path)
         print(f"[Trainer] Saved candidate model: {candidate_path}")
 
-        # Checkpoint gating: validate against current best
-        if self.best_model_path and self.best_model_path.exists():
-            print(f"[Trainer] Validating {version} vs {self.best_model_path.name}...")
-            try:
-                win_rate = self.validate_model(candidate_path, self.best_model_path, num_games=20)
-                print(f"[Trainer] Candidate win rate: {win_rate:.1%}")
-
-                if win_rate < 0.55:
-                    print(f"[Trainer] Model REJECTED (need >55% win rate)")
-                    # Don't upload - workers keep using current best
-                    return None
-
-                print(f"[Trainer] Model PROMOTED!")
-            except Exception as e:
-                print(f"[Trainer] Validation failed: {e}, promoting anyway")
+        # Checkpoint gating disabled - always promote new models
+        # In AlphaZero-style training, each iteration makes incremental improvements
+        # and requiring 55% win rate is too aggressive for early training.
+        # The model will naturally improve through the training loop.
 
         # Update best model path
         self.best_model_path = candidate_path
@@ -596,6 +719,9 @@ class DistributedTrainer:
                         # Save trainer state for resumption
                         self._save_trainer_state()
 
+                        # Submit metrics to API for dashboard
+                        self._submit_iteration_metrics(metrics, train_time, model_version=version)
+
                         print(f"[Trainer] Iteration {self.iteration} complete: "
                               f"loss={metrics['final_loss']:.4f}, "
                               f"games={metrics['games']}, "
@@ -645,8 +771,8 @@ def main():
                         help='Network filter count (overrides --network-size)')
     parser.add_argument('--blocks', type=int, default=None,
                         help='Network residual blocks (overrides --network-size)')
-    parser.add_argument('--network-size', type=str, default='medium', choices=['small', 'medium', 'large'],
-                        help='Network size preset: small (64f/6b), medium (128f/10b), large (256f/15b)')
+    parser.add_argument('--network-size', type=str, default='medium', choices=['small', 'medium', 'large', 'alphazero'],
+                        help='Network size preset: small (64f/6b), medium (128f/10b), large (256f/15b), alphazero (256f/20b)')
     parser.add_argument('--output', type=Path, default=Path('output/trainer'),
                         help='Output directory')
 
@@ -654,9 +780,10 @@ def main():
 
     # Resolve network size presets
     NETWORK_PRESETS = {
-        'small': (64, 6),      # ~900K params, fast inference
-        'medium': (128, 10),   # ~3.5M params, balanced
-        'large': (256, 15),    # ~15M params, stronger but slower
+        'small': (64, 6),      # ~0.8M params, fast inference
+        'medium': (128, 10),   # ~3.3M params, balanced
+        'large': (256, 15),    # ~18M params, stronger but slower
+        'alphazero': (256, 20),  # ~24M params, AlphaZero-scale
     }
 
     if args.filters is not None and args.blocks is not None:

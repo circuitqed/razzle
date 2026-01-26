@@ -98,6 +98,9 @@ def create_package(output_dir: Path) -> Path:
         # Add trainer script
         tar.add(engine_dir / "scripts" / "trainer.py", arcname="trainer.py")
 
+        # Add model_arena script (needed for checkpoint gating validation)
+        tar.add(engine_dir / "scripts" / "model_arena.py", arcname="model_arena.py")
+
     print(f"Created package: {package_path}")
     return package_path
 
@@ -794,8 +797,8 @@ def main():
     parser.add_argument('--simulations', type=int, default=2000, help='MCTS simulations (default: 2000)')
     parser.add_argument('--filters', type=int, default=None, help='Network filters (overrides --network-size)')
     parser.add_argument('--blocks', type=int, default=None, help='Network blocks (overrides --network-size)')
-    parser.add_argument('--network-size', type=str, default='medium', choices=['small', 'medium', 'large'],
-                        help='Network size preset: small (64f/6b), medium (128f/10b), large (256f/15b)')
+    parser.add_argument('--network-size', type=str, default='medium', choices=['small', 'medium', 'large', 'alphazero'],
+                        help='Network size preset: small (64f/6b), medium (128f/10b), large (256f/15b), alphazero (256f/20b)')
     parser.add_argument('--output', type=Path, default=Path('output/distributed'),
                         help='Output directory')
     parser.add_argument('--no-trainer', action='store_true',
@@ -815,9 +818,10 @@ def main():
 
     # Resolve network size presets
     NETWORK_PRESETS = {
-        'small': (64, 6),      # ~900K params, fast inference
-        'medium': (128, 10),   # ~3.5M params, balanced
-        'large': (256, 15),    # ~15M params, stronger but slower
+        'small': (64, 6),      # ~0.8M params, fast inference
+        'medium': (128, 10),   # ~3.3M params, balanced
+        'large': (256, 15),    # ~18M params, stronger but slower
+        'alphazero': (256, 20),  # ~24M params, AlphaZero-scale
     }
 
     # Use explicit args if provided, otherwise use preset

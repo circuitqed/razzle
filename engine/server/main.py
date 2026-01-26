@@ -6,6 +6,7 @@ Provides REST and WebSocket APIs for game management and AI play.
 
 from __future__ import annotations
 import asyncio
+import gzip
 import logging
 import os
 import secrets
@@ -299,6 +300,68 @@ class LogEntry(BaseModel):
 class LogRequest(BaseModel):
     entries: list[LogEntry]
     session_id: Optional[str] = None
+
+
+# --- Training Metrics Models ---
+
+class TrainingMetricsData(BaseModel):
+    """Training metrics for a single iteration."""
+    id: Optional[int] = None
+    iteration: int
+    timestamp: Optional[str] = None
+    # Policy metrics
+    policy_top1_accuracy: Optional[float] = None
+    policy_top3_accuracy: Optional[float] = None
+    policy_entropy: Optional[float] = None
+    policy_legal_mass: Optional[float] = None
+    policy_ebf: Optional[float] = None
+    policy_confidence: Optional[float] = None
+    # Value metrics
+    value_mean: Optional[float] = None
+    value_std: Optional[float] = None
+    value_extremity: Optional[float] = None
+    value_calibration_error: Optional[float] = None
+    # Pass metrics
+    pass_decision_rate: Optional[float] = None
+    # Loss metrics
+    loss_total: Optional[float] = None
+    loss_policy: Optional[float] = None
+    loss_value: Optional[float] = None
+    loss_difficulty: Optional[float] = None
+    loss_illegal_penalty: Optional[float] = None
+    # Game stats
+    num_games: Optional[int] = None
+    num_examples: Optional[int] = None
+    avg_game_length: Optional[float] = None
+    # Meta
+    learning_rate: Optional[float] = None
+    model_version: Optional[str] = None
+    train_time_sec: Optional[float] = None
+
+
+class SubmitMetricsRequest(BaseModel):
+    """Request to submit training metrics."""
+    iteration: int
+    metrics: dict
+
+
+class SubmitMetricsResponse(BaseModel):
+    """Response after submitting metrics."""
+    id: int
+    status: str = "accepted"
+
+
+class TrainingMetricsHistoryResponse(BaseModel):
+    """Response with training metrics history."""
+    metrics: list[TrainingMetricsData]
+    total: int
+    limit: int
+    offset: int
+
+
+class LatestMetricsResponse(BaseModel):
+    """Response with latest training metrics."""
+    metrics: Optional[TrainingMetricsData] = None
 
 
 # --- Game Storage ---
@@ -986,17 +1049,29 @@ async def upload_training_model(
     final_loss: Optional[float] = Form(None),
     final_policy_loss: Optional[float] = Form(None),
     final_value_loss: Optional[float] = Form(None),
+    compressed: Optional[str] = Form(None),
     file: UploadFile = File(...),
 ):
     """Upload a new training model checkpoint."""
     # Validate filename
-    if not file.filename.endswith(".pt"):
-        raise HTTPException(status_code=400, detail="Model file must be a .pt file")
+    is_compressed = compressed == "true" or file.filename.endswith(".gz")
+    if not (file.filename.endswith(".pt") or file.filename.endswith(".pt.gz")):
+        raise HTTPException(status_code=400, detail="Model file must be a .pt or .pt.gz file")
 
-    # Save file
+    # Read the file content
+    content = await file.read()
+
+    # Decompress if needed
+    if is_compressed:
+        try:
+            content = gzip.decompress(content)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Failed to decompress: {e}")
+
+    # Save file (always save uncompressed)
     file_path = TRAINING_MODELS_DIR / f"{version}.pt"
     with open(file_path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
+        f.write(content)
 
     # Save to database
     persistence.save_training_model(
@@ -1088,14 +1163,66 @@ class ClearTrainingResponse(BaseModel):
     """Response after clearing training data."""
     games_deleted: int
     models_deleted: int
+    metrics_deleted: int
     files_deleted: int
 
 
 @app.delete("/training/clear")
 async def clear_training_data():
-    """Clear all training games and models to start fresh."""
+    """Clear all training games, models, and metrics to start fresh."""
     result = persistence.clear_training_data()
     return ClearTrainingResponse(**result)
+
+
+# --- Training Metrics API Endpoints ---
+
+@app.post("/training/metrics", response_model=SubmitMetricsResponse)
+async def submit_training_metrics(request: SubmitMetricsRequest):
+    """
+    Submit training metrics from the trainer.
+
+    Stores metrics in the database for historical tracking and dashboard visualization.
+    """
+    metrics_id = persistence.save_training_metrics(
+        iteration=request.iteration,
+        metrics=request.metrics,
+    )
+    return SubmitMetricsResponse(id=metrics_id, status="accepted")
+
+
+@app.get("/training/metrics", response_model=TrainingMetricsHistoryResponse)
+async def get_training_metrics(
+    limit: int = 100,
+    offset: int = 0,
+):
+    """
+    Get training metrics history.
+
+    Returns metrics for all iterations, ordered by iteration number (ascending).
+    """
+    metrics, total = persistence.get_training_metrics(limit=limit, offset=offset)
+
+    return TrainingMetricsHistoryResponse(
+        metrics=[TrainingMetricsData(**m) for m in metrics],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@app.get("/training/metrics/latest", response_model=LatestMetricsResponse)
+async def get_latest_training_metrics():
+    """
+    Get the most recent training metrics.
+
+    Returns null if no metrics have been recorded yet.
+    """
+    metrics = persistence.get_latest_training_metrics()
+
+    if metrics is None:
+        return LatestMetricsResponse(metrics=None)
+
+    return LatestMetricsResponse(metrics=TrainingMetricsData(**metrics))
 
 
 # Setup client logging

@@ -108,6 +108,44 @@ def init_db(db_path: Path = None) -> None:
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_training_models_iteration ON training_models(iteration)")
 
+        # Training metrics history
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS training_metrics (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                iteration INTEGER NOT NULL,
+                timestamp TEXT NOT NULL,
+                -- Policy metrics
+                policy_top1_accuracy REAL,
+                policy_top3_accuracy REAL,
+                policy_entropy REAL,
+                policy_legal_mass REAL,
+                policy_ebf REAL,
+                policy_confidence REAL,
+                -- Value metrics
+                value_mean REAL,
+                value_std REAL,
+                value_extremity REAL,
+                value_calibration_error REAL,
+                -- Pass metrics
+                pass_decision_rate REAL,
+                -- Loss metrics
+                loss_total REAL,
+                loss_policy REAL,
+                loss_value REAL,
+                loss_difficulty REAL,
+                loss_illegal_penalty REAL,
+                -- Game stats
+                num_games INTEGER,
+                num_examples INTEGER,
+                avg_game_length REAL,
+                -- Meta
+                learning_rate REAL,
+                model_version TEXT,
+                train_time_sec REAL
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_training_metrics_iteration ON training_metrics(iteration)")
+
         conn.commit()
 
 
@@ -989,6 +1027,7 @@ def clear_training_data(db_path: Path = None) -> dict:
         # Get counts before deletion
         games_count = conn.execute("SELECT COUNT(*) FROM training_games").fetchone()[0]
         models_count = conn.execute("SELECT COUNT(*) FROM training_models").fetchone()[0]
+        metrics_count = conn.execute("SELECT COUNT(*) FROM training_metrics").fetchone()[0]
 
         # Delete all training games
         conn.execute("DELETE FROM training_games")
@@ -999,6 +1038,9 @@ def clear_training_data(db_path: Path = None) -> dict:
 
         # Delete all training models from DB
         conn.execute("DELETE FROM training_models")
+
+        # Delete all training metrics
+        conn.execute("DELETE FROM training_metrics")
 
         conn.commit()
 
@@ -1016,5 +1058,173 @@ def clear_training_data(db_path: Path = None) -> dict:
         return {
             "games_deleted": games_count,
             "models_deleted": models_count,
+            "metrics_deleted": metrics_count,
             "files_deleted": deleted_files,
+        }
+
+
+# --- Training Metrics Management ---
+
+def save_training_metrics(
+    iteration: int,
+    metrics: dict,
+    db_path: Path = None
+) -> int:
+    """
+    Save training metrics for an iteration.
+
+    Args:
+        iteration: Training iteration number
+        metrics: Dictionary of metric values
+
+    Returns:
+        The metrics record ID.
+    """
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+    now = datetime.utcnow().isoformat()
+
+    with get_connection(db_path) as conn:
+        cursor = conn.execute("""
+            INSERT INTO training_metrics (
+                iteration, timestamp,
+                policy_top1_accuracy, policy_top3_accuracy, policy_entropy,
+                policy_legal_mass, policy_ebf, policy_confidence,
+                value_mean, value_std, value_extremity, value_calibration_error,
+                pass_decision_rate,
+                loss_total, loss_policy, loss_value, loss_difficulty, loss_illegal_penalty,
+                num_games, num_examples, avg_game_length,
+                learning_rate, model_version, train_time_sec
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            iteration, now,
+            metrics.get('policy_top1_accuracy'),
+            metrics.get('policy_top3_accuracy'),
+            metrics.get('policy_entropy'),
+            metrics.get('policy_legal_mass'),
+            metrics.get('policy_ebf'),
+            metrics.get('policy_confidence'),
+            metrics.get('value_mean'),
+            metrics.get('value_std'),
+            metrics.get('value_extremity'),
+            metrics.get('value_calibration_error'),
+            metrics.get('pass_decision_rate'),
+            metrics.get('loss_total') or metrics.get('loss'),
+            metrics.get('loss_policy') or metrics.get('policy_loss'),
+            metrics.get('loss_value') or metrics.get('value_loss'),
+            metrics.get('loss_difficulty') or metrics.get('difficulty_loss'),
+            metrics.get('loss_illegal_penalty') or metrics.get('illegal_penalty'),
+            metrics.get('num_games') or metrics.get('games'),
+            metrics.get('num_examples') or metrics.get('examples'),
+            metrics.get('avg_game_length'),
+            metrics.get('learning_rate'),
+            metrics.get('model_version'),
+            metrics.get('train_time_sec') or metrics.get('train_time'),
+        ))
+        conn.commit()
+        return cursor.lastrowid
+
+
+def get_training_metrics(
+    limit: int = 100,
+    offset: int = 0,
+    db_path: Path = None
+) -> tuple[list[dict], int]:
+    """
+    Get training metrics history.
+
+    Args:
+        limit: Maximum number of records to return
+        offset: Number of records to skip
+
+    Returns:
+        Tuple of (list of metrics dicts, total count)
+    """
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+
+    with get_connection(db_path) as conn:
+        # Get total count
+        total = conn.execute("SELECT COUNT(*) FROM training_metrics").fetchone()[0]
+
+        # Fetch metrics
+        rows = conn.execute("""
+            SELECT * FROM training_metrics
+            ORDER BY iteration ASC
+            LIMIT ? OFFSET ?
+        """, (limit, offset)).fetchall()
+
+        metrics = []
+        for row in rows:
+            metrics.append({
+                "id": row["id"],
+                "iteration": row["iteration"],
+                "timestamp": row["timestamp"],
+                "policy_top1_accuracy": row["policy_top1_accuracy"],
+                "policy_top3_accuracy": row["policy_top3_accuracy"],
+                "policy_entropy": row["policy_entropy"],
+                "policy_legal_mass": row["policy_legal_mass"],
+                "policy_ebf": row["policy_ebf"],
+                "policy_confidence": row["policy_confidence"],
+                "value_mean": row["value_mean"],
+                "value_std": row["value_std"],
+                "value_extremity": row["value_extremity"],
+                "value_calibration_error": row["value_calibration_error"],
+                "pass_decision_rate": row["pass_decision_rate"],
+                "loss_total": row["loss_total"],
+                "loss_policy": row["loss_policy"],
+                "loss_value": row["loss_value"],
+                "loss_difficulty": row["loss_difficulty"],
+                "loss_illegal_penalty": row["loss_illegal_penalty"],
+                "num_games": row["num_games"],
+                "num_examples": row["num_examples"],
+                "avg_game_length": row["avg_game_length"],
+                "learning_rate": row["learning_rate"],
+                "model_version": row["model_version"],
+                "train_time_sec": row["train_time_sec"],
+            })
+
+        return metrics, total
+
+
+def get_latest_training_metrics(db_path: Path = None) -> Optional[dict]:
+    """Get the most recent training metrics."""
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+
+    with get_connection(db_path) as conn:
+        row = conn.execute("""
+            SELECT * FROM training_metrics ORDER BY iteration DESC LIMIT 1
+        """).fetchone()
+
+        if row is None:
+            return None
+
+        return {
+            "id": row["id"],
+            "iteration": row["iteration"],
+            "timestamp": row["timestamp"],
+            "policy_top1_accuracy": row["policy_top1_accuracy"],
+            "policy_top3_accuracy": row["policy_top3_accuracy"],
+            "policy_entropy": row["policy_entropy"],
+            "policy_legal_mass": row["policy_legal_mass"],
+            "policy_ebf": row["policy_ebf"],
+            "policy_confidence": row["policy_confidence"],
+            "value_mean": row["value_mean"],
+            "value_std": row["value_std"],
+            "value_extremity": row["value_extremity"],
+            "value_calibration_error": row["value_calibration_error"],
+            "pass_decision_rate": row["pass_decision_rate"],
+            "loss_total": row["loss_total"],
+            "loss_policy": row["loss_policy"],
+            "loss_value": row["loss_value"],
+            "loss_difficulty": row["loss_difficulty"],
+            "loss_illegal_penalty": row["loss_illegal_penalty"],
+            "num_games": row["num_games"],
+            "num_examples": row["num_examples"],
+            "avg_game_length": row["avg_game_length"],
+            "learning_rate": row["learning_rate"],
+            "model_version": row["model_version"],
+            "train_time_sec": row["train_time_sec"],
         }

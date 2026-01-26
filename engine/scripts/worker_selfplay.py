@@ -450,8 +450,8 @@ def main():
                         help='Network filter count (overrides --network-size)')
     parser.add_argument('--blocks', type=int, default=None,
                         help='Network residual blocks (overrides --network-size)')
-    parser.add_argument('--network-size', type=str, default='medium', choices=['small', 'medium', 'large'],
-                        help='Network size preset: small (64f/6b), medium (128f/10b), large (256f/15b)')
+    parser.add_argument('--network-size', type=str, default='medium', choices=['small', 'medium', 'large', 'alphazero'],
+                        help='Network size preset: small (64f/6b), medium (128f/10b), large (256f/15b), alphazero (256f/20b)')
     parser.add_argument('--batch-size', type=int, default=32,
                         help='MCTS batch size for GPU parallelism')
     parser.add_argument('--model-check-interval', type=int, default=5,
@@ -465,9 +465,10 @@ def main():
 
     # Resolve network size presets
     NETWORK_PRESETS = {
-        'small': (64, 6),      # ~900K params, fast inference
-        'medium': (128, 10),   # ~3.5M params, balanced
-        'large': (256, 15),    # ~15M params, stronger but slower
+        'small': (64, 6),      # ~0.8M params, fast inference
+        'medium': (128, 10),   # ~3.3M params, balanced
+        'large': (256, 15),    # ~18M params, stronger but slower
+        'alphazero': (256, 20),  # ~24M params, AlphaZero-scale
     }
 
     if args.filters is not None and args.blocks is not None:

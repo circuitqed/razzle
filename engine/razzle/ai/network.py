@@ -93,6 +93,15 @@ class RazzleNet(nn.Module):
         self.difficulty_fc1 = nn.Linear(c.value_filters * ROWS * COLS, c.value_hidden)
         self.difficulty_fc2 = nn.Linear(c.value_hidden, 1)
 
+        # Initialize final layers with small weights to prevent saturation
+        # Value head uses tanh, which has vanishing gradients when |x| is large
+        # Small init ensures outputs start near 0 where tanh gradient ≈ 1
+        nn.init.normal_(self.value_fc2.weight, mean=0.0, std=0.01)
+        nn.init.zeros_(self.value_fc2.bias)
+        # Difficulty head uses sigmoid, same concern
+        nn.init.normal_(self.difficulty_fc2.weight, mean=0.0, std=0.01)
+        nn.init.zeros_(self.difficulty_fc2.bias)
+
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Forward pass.

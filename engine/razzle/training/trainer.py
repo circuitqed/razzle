@@ -25,7 +25,8 @@ class TrainingConfig:
     weight_decay: float = 1e-4
     epochs: int = 10
     policy_weight: float = 1.0
-    value_weight: float = 1.0
+    value_weight: float = 1.0  # Weight for quadratic (MSE) value loss
+    value_weight_quartic: float = 0.25  # Weight for quartic value loss (calibration)
     difficulty_weight: float = 0.5  # Weight for difficulty prediction loss
     illegal_penalty_weight: float = 1.0  # Lagrange multiplier for illegal move constraint
     device: str = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -109,6 +110,7 @@ class Trainer:
         total_loss = 0.0
         total_policy_loss = 0.0
         total_value_loss = 0.0
+        total_value_loss_quartic = 0.0
         total_difficulty_loss = 0.0
         total_illegal_penalty = 0.0
         num_batches = 0
@@ -169,8 +171,17 @@ class Trainer:
                 policy_loss = -torch.sum(target_policies * log_policies, dim=1).mean()
                 illegal_penalty = torch.tensor(0.0, device=self.config.device)
 
-            # Value loss: MSE
-            value_loss = F.mse_loss(values, target_values)
+            # Value loss: MSE (quadratic) + quartic term for calibration
+            # Quartic term penalizes large errors more heavily, encouraging
+            # the network to be less confident when uncertain
+            value_diff = values - target_values
+            value_loss_quadratic = torch.mean(value_diff ** 2)
+            value_loss_quartic = torch.mean(value_diff ** 4)
+            value_loss = value_loss_quadratic  # For logging, report quadratic only
+            value_loss_combined = (
+                self.config.value_weight * value_loss_quadratic +
+                self.config.value_weight_quartic * value_loss_quartic
+            )
 
             # Difficulty loss: Binary cross-entropy (target is in [0, 1])
             if target_difficulties is not None:
@@ -181,7 +192,7 @@ class Trainer:
             # Combined loss
             loss = (
                 self.config.policy_weight * policy_loss +
-                self.config.value_weight * value_loss +
+                value_loss_combined +  # Already weighted (quadratic + quartic)
                 self.config.difficulty_weight * difficulty_loss +
                 illegal_penalty
             )
@@ -194,7 +205,8 @@ class Trainer:
             # Track metrics
             total_loss += loss.item()
             total_policy_loss += policy_loss.item()
-            total_value_loss += value_loss.item()
+            total_value_loss += value_loss.item()  # Quadratic only (for comparison)
+            total_value_loss_quartic += value_loss_quartic.item()
             total_difficulty_loss += difficulty_loss.item()
             total_illegal_penalty += illegal_penalty.item()
             num_batches += 1
@@ -202,7 +214,8 @@ class Trainer:
         metrics = {
             'loss': total_loss / num_batches,
             'policy_loss': total_policy_loss / num_batches,
-            'value_loss': total_value_loss / num_batches,
+            'value_loss': total_value_loss / num_batches,  # Quadratic (MSE)
+            'value_loss_quartic': total_value_loss_quartic / num_batches,
         }
         if has_legal_masks:
             metrics['illegal_penalty'] = total_illegal_penalty / num_batches
