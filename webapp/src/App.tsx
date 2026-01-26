@@ -72,7 +72,7 @@ function AppContent() {
     canEndTurn,
     mustPass,
     lastMove,
-    moveHistory,
+    rawMoves,
     startNewGame,
     handleSquareClick,
     handleDragMove,
@@ -351,7 +351,7 @@ function AppContent() {
               lastMove={lastMove}
             />
             <div className="hidden sm:block">
-              <MoveHistory moves={moveHistory} />
+              <MoveHistory moves={rawMoves} />
             </div>
           </div>
 

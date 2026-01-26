@@ -5,7 +5,7 @@
  * repeated server calls during replay navigation.
  */
 
-import { BoardState, decodeMove } from '../types';
+import { BoardState, decodeMove, squareToAlgebraic } from '../types';
 
 // Initial board configuration
 // Blue (P1) has 5 pieces on row 0 (b1-f1), ball on d1
@@ -171,4 +171,125 @@ export function getLastMoveAtPosition(moves: number[], ply: number): { from: num
 
   const { src, dst } = decodeMove(move);
   return { from: src, to: dst };
+}
+
+/**
+ * A formatted turn for display purposes.
+ * Pass chains are combined into a single notation like "c1-d2-d7".
+ * End turns are not displayed separately.
+ */
+export interface FormattedTurn {
+  blue: string;  // Blue player's move notation (e.g., "b1-c3" or "d1-c1-b1")
+  red: string;   // Red player's move notation
+}
+
+/**
+ * Format moves into turn-based notation with pass chains.
+ * - Pass chains are shown as "c1-d2-d7" (continuous chain)
+ * - Knight moves are shown as "b1-c3"
+ * - End turns are implicit (not displayed)
+ *
+ * @param moves Array of raw move integers
+ * @param upToPly Only format moves up to this ply (for partial display)
+ * @returns Array of formatted turns for display
+ */
+export function formatMovesForDisplay(moves: number[], upToPly?: number): FormattedTurn[] {
+
+  const movesToProcess = upToPly !== undefined ? moves.slice(0, upToPly) : moves;
+  const turns: FormattedTurn[] = [];
+  let currentTurn: FormattedTurn = { blue: '', red: '' };
+
+  let state = getInitialState();
+  let passChain: string[] = [];  // Accumulates squares for pass chain notation
+
+  for (const move of movesToProcess) {
+    // End turn move - flush pass chain and switch player
+    if (move === -1) {
+      if (passChain.length > 0) {
+        const chainStr = passChain.join('-');
+        if (state.currentPlayer === 0) {
+          currentTurn.blue = chainStr;
+        } else {
+          currentTurn.red = chainStr;
+        }
+        passChain = [];
+      }
+
+      state = applyMove(state, move);
+
+      // If red just finished, push the turn
+      if (state.currentPlayer === 0 && (currentTurn.blue || currentTurn.red)) {
+        turns.push(currentTurn);
+        currentTurn = { blue: '', red: '' };
+      }
+      continue;
+    }
+
+    const { src, dst } = decodeMove(move);
+    const srcAlg = squareToAlgebraic(src);
+    const dstAlg = squareToAlgebraic(dst);
+
+    // Determine if this is a pass (ball at source)
+    const p1Ball = BigInt(state.board.p1_ball);
+    const p2Ball = BigInt(state.board.p2_ball);
+    const srcMask = BigInt(1) << BigInt(src);
+    const isPass = state.currentPlayer === 0
+      ? (p1Ball & srcMask) !== BigInt(0)
+      : (p2Ball & srcMask) !== BigInt(0);
+
+    const playerBefore = state.currentPlayer;
+    state = applyMove(state, move);
+
+    if (isPass) {
+      // Add to pass chain
+      if (passChain.length === 0) {
+        passChain = [srcAlg, dstAlg];
+      } else {
+        passChain.push(dstAlg);
+      }
+    } else {
+      // Knight move - flush any pending pass chain first (shouldn't normally happen)
+      if (passChain.length > 0) {
+        const chainStr = passChain.join('-');
+        if (playerBefore === 0) {
+          currentTurn.blue = chainStr;
+        } else {
+          currentTurn.red = chainStr;
+        }
+        passChain = [];
+      }
+
+      // Format knight move
+      const moveStr = `${srcAlg}-${dstAlg}`;
+      if (playerBefore === 0) {
+        currentTurn.blue = moveStr;
+      } else {
+        currentTurn.red = moveStr;
+      }
+
+      // Knight move ends turn - if red just moved, push the turn
+      if (state.currentPlayer === 0 && (currentTurn.blue || currentTurn.red)) {
+        turns.push(currentTurn);
+        currentTurn = { blue: '', red: '' };
+      }
+    }
+  }
+
+  // Handle incomplete turn at end
+  if (passChain.length > 0) {
+    const chainStr = passChain.join('-');
+    if (state.currentPlayer === 0) {
+      // Still blue's turn (hasn't ended yet)
+      currentTurn.blue = chainStr;
+    } else {
+      // Blue finished with pass, still ongoing
+      currentTurn.blue = chainStr;
+    }
+  }
+
+  if (currentTurn.blue || currentTurn.red) {
+    turns.push(currentTurn);
+  }
+
+  return turns;
 }

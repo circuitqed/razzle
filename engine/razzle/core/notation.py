@@ -9,16 +9,19 @@ Format example:
 [Black "Player 2"]
 [Result "1-0"]
 
-1. d1-c1 d8-e8 2. c1-b1 end 3. b1-c3 e8-f8 4. end c6-e5 ...
+1. d1-c1 d8-e8 2. b1-c3 e8-f8-g6 3. c3-e4 g6-f4 ...
 ```
 
 Moves:
 - Knight moves: "b1-c3" (piece moves from b1 to c3)
-- Ball passes: "d1-e1" (ball passes from d1 to e1)
-- End turn: "end" (end turn after passing)
+- Pass chains: "d1-c1-b1" (ball passes from d1 to c1 to b1, then turn ends)
+- Single pass: "d1-e1" (ball passes from d1 to e1, then turn ends)
+
+End turns are implicit (not shown in notation). Each token represents
+a complete turn: either a knight move (which auto-ends the turn) or
+a pass chain (which implicitly ends after the last pass).
 
 Move numbers increment after both players have moved (like chess).
-Multiple actions in a turn are space-separated.
 """
 
 from __future__ import annotations
@@ -30,7 +33,7 @@ from typing import Optional
 from .state import GameState
 from .moves import (
     get_legal_moves, move_to_algebraic, algebraic_to_move,
-    END_TURN_MOVE, decode_move
+    END_TURN_MOVE, decode_move, encode_move
 )
 
 
@@ -110,47 +113,85 @@ class GameRecord:
         return '\n'.join(lines)
 
     def _format_moves(self) -> str:
-        """Format moves into notation string."""
+        """Format moves into notation string.
+
+        Pass chains are formatted as "c1-d2-d7" (continuous chain notation).
+        End turns are implicit (not shown in output).
+        Knight moves are shown as "b1-c3".
+        """
         parts = []
         move_num = 1
         ply = 0
 
         # Group moves by turn
         # Player 1 moves first, then Player 2, then move number increments
-        current_turn_moves = []
         current_player = 0
 
+        # For pass chains: track chain squares
+        pass_chain: list[str] = []  # e.g., ["c1", "d2", "d7"]
+
         for move in self.moves:
-            alg = move_to_algebraic(move)
+            # Skip END_TURN moves - they're implicit after pass chains
+            if move == END_TURN_MOVE:
+                # Flush any pending pass chain
+                if pass_chain:
+                    chain_str = '-'.join(pass_chain)
+                    if current_player == 0:
+                        parts.append(f"{move_num}. {chain_str}")
+                    else:
+                        parts.append(chain_str)
+                        move_num += 1
+                    pass_chain = []
+                    current_player = 1 - current_player
+                ply += 1
+                continue
 
-            # Check if this move ends the turn
-            is_turn_end = (move == END_TURN_MOVE or
-                          (move >= 0 and not self._is_pass_move(move, ply)))
+            # Check if this is a pass move
+            is_pass = self._is_pass_move(move, ply)
+            src, dst = decode_move(move)
 
-            current_turn_moves.append(alg)
+            from .bitboard import sq_to_algebraic
+            src_alg = sq_to_algebraic(src)
+            dst_alg = sq_to_algebraic(dst)
 
-            if is_turn_end:
-                # Format this player's turn
-                turn_str = ' '.join(current_turn_moves)
-
-                if current_player == 0:
-                    parts.append(f"{move_num}. {turn_str}")
+            if is_pass:
+                # Add to pass chain
+                if not pass_chain:
+                    # Start new chain with source
+                    pass_chain = [src_alg, dst_alg]
                 else:
-                    parts.append(turn_str)
-                    move_num += 1
+                    # Continue chain (source should match previous dest)
+                    pass_chain.append(dst_alg)
+            else:
+                # Knight move - flush any pending pass chain first (shouldn't happen normally)
+                if pass_chain:
+                    chain_str = '-'.join(pass_chain)
+                    if current_player == 0:
+                        parts.append(f"{move_num}. {chain_str}")
+                    else:
+                        parts.append(chain_str)
+                        move_num += 1
+                    pass_chain = []
+                    current_player = 1 - current_player
 
+                # Format knight move
+                alg = f"{src_alg}-{dst_alg}"
+                if current_player == 0:
+                    parts.append(f"{move_num}. {alg}")
+                else:
+                    parts.append(alg)
+                    move_num += 1
                 current_player = 1 - current_player
-                current_turn_moves = []
 
             ply += 1
 
-        # Handle incomplete turn at end
-        if current_turn_moves:
-            turn_str = ' '.join(current_turn_moves)
+        # Handle incomplete turn at end (pending pass chain)
+        if pass_chain:
+            chain_str = '-'.join(pass_chain)
             if current_player == 0:
-                parts.append(f"{move_num}. {turn_str}")
+                parts.append(f"{move_num}. {chain_str}")
             else:
-                parts.append(turn_str)
+                parts.append(chain_str)
 
         return ' '.join(parts)
 
@@ -167,7 +208,11 @@ class GameRecord:
 
     @classmethod
     def from_pgn(cls, pgn_text: str) -> GameRecord:
-        """Parse PGN-like format."""
+        """Parse PGN-like format.
+
+        Handles both old format (with explicit 'end' tokens) and new format
+        (with pass chains like 'c1-d2-d7' and implicit end turns).
+        """
         record = cls()
 
         # Parse tags
@@ -194,20 +239,47 @@ class GameRecord:
         move_text = re.sub(tag_pattern, '', pgn_text)
         move_text = re.sub(r'\s*(1-0|0-1|1/2-1/2|\*)\s*$', '', move_text)
 
-        # Parse move tokens
+        # Parse move tokens - track game state to determine pass vs knight
         tokens = move_text.split()
+        state = GameState.new_game()
+        from .bitboard import algebraic_to_sq
+
         for token in tokens:
             # Skip move numbers like "1." or "12."
             if re.match(r'^\d+\.$', token):
                 continue
 
-            # Parse move
+            # Parse move - handle pass chains like "c1-d2-d7"
             if token.lower() == 'end':
+                # Legacy format support - explicit end turn
                 record.moves.append(END_TURN_MOVE)
+                state.apply_move(END_TURN_MOVE)
             else:
                 try:
-                    move = algebraic_to_move(token)
-                    record.moves.append(move)
+                    parts = token.strip().split('-')
+                    if len(parts) >= 2:
+                        # Could be simple move "b1-c3" or pass chain "c1-d2-d7"
+                        # Apply each segment and track if any were passes
+                        did_pass = False
+                        for i in range(len(parts) - 1):
+                            src = algebraic_to_sq(parts[i])
+                            dst = algebraic_to_sq(parts[i + 1])
+                            move = encode_move(src, dst)
+
+                            # Check if this is a pass (source has ball)
+                            is_pass = bool(state.balls[state.current_player] & (1 << src))
+
+                            record.moves.append(move)
+                            state.apply_move(move)
+
+                            if is_pass:
+                                did_pass = True
+
+                        # After processing the token, if we passed, add END_TURN
+                        # (Knight moves auto-end turn in game state, passes don't)
+                        if did_pass and state.has_passed:
+                            record.moves.append(END_TURN_MOVE)
+                            state.apply_move(END_TURN_MOVE)
                 except (ValueError, IndexError):
                     # Skip unparseable tokens
                     pass

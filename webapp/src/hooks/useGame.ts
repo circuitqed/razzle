@@ -32,6 +32,8 @@ interface UseGameReturn {
   mustPass: boolean;
   lastMove: LastMove | null;
   moveHistory: MoveRecord[];
+  /** Raw move integers including END_TURN (-1) for proper notation display */
+  rawMoves: number[];
   startNewGame: () => Promise<void>;
   handleSquareClick: (square: number) => void;
   handleDragMove: (from: number, to: number) => void;
@@ -51,6 +53,7 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
   const [aiThinking, setAiThinking] = useState(false);
   const [lastMove, setLastMove] = useState<LastMove | null>(null);
   const [moveHistory, setMoveHistory] = useState<MoveRecord[]>([]);
+  const [rawMoves, setRawMoves] = useState<number[]>([]);
 
   // Ref to track move-in-progress synchronously (avoids closure staleness)
   const moveInProgress = useRef(false);
@@ -121,6 +124,7 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
     setSelectedSquare(null);
     setLastMove(null);
     setMoveHistory([]);
+    setRawMoves([]);
 
     try {
       const { game_id } = await api.createGame({
@@ -139,7 +143,10 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
 
   // Helper to record a move and play sound
   const recordMove = useCallback((move: number, player: Player, isPass: boolean) => {
-    if (move === END_TURN_MOVE) return; // Don't record end turn as a move
+    // Always add to rawMoves for proper notation display
+    setRawMoves(prev => [...prev, move]);
+
+    if (move === END_TURN_MOVE) return; // Don't record end turn in formatted history
     const { src, dst } = decodeMove(move);
     const algebraic = `${squareToAlgebraic(src)}-${squareToAlgebraic(dst)}`;
     setLastMove({ from: src, to: dst });
@@ -213,6 +220,7 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
       const newState = await api.makeMove(gameState.game_id, END_TURN_MOVE);
       setGameState(newState);
       setSelectedSquare(null);
+      setRawMoves(prev => [...prev, END_TURN_MOVE]);
       playEndTurnSound();
 
       // If vs AI and it's now AI's turn
@@ -324,9 +332,11 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
     try {
       let state = await api.undoMove(gameState.game_id);
       setMoveHistory(prev => prev.slice(0, -1)); // Remove last move
+      setRawMoves(prev => prev.slice(0, -1)); // Remove from raw moves too
       if (vsAI && state.current_player === 1) {
         state = await api.undoMove(gameState.game_id);
         setMoveHistory(prev => prev.slice(0, -1)); // Remove AI's move too
+        setRawMoves(prev => prev.slice(0, -1));
       }
       setGameState(state);
       // Update lastMove to previous move or null
@@ -392,6 +402,7 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
     mustPass,
     lastMove,
     moveHistory,
+    rawMoves,
     startNewGame,
     handleSquareClick,
     handleDragMove,

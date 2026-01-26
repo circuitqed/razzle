@@ -5,7 +5,6 @@ import MoveHistory from './MoveHistory';
 import * as gamesApi from '../api/games';
 import type { GameFull, MoveClassification } from '../api/games';
 import { reconstructPositions, getLastMoveAtPosition, type ReplayState } from '../utils/replay';
-import { decodeMove, squareToAlgebraic } from '../types';
 
 interface ReplayViewerProps {
   gameId: string;
@@ -112,26 +111,11 @@ export default function ReplayViewer({ gameId, onClose }: ReplayViewerProps) {
     ? getLastMoveAtPosition(gameData.moves, currentPly)
     : null;
 
-  // Convert moves to move history format
-  const moveHistory = useMemo(() => {
+  // Get moves up to current ply for display
+  const movesUpToPly = useMemo(() => {
     if (!gameData) return [];
-    return gameData.moves.slice(0, currentPly).map((move, idx) => {
-      if (move === -1) {
-        return {
-          move,
-          algebraic: 'End Turn',
-          player: (idx % 2 === 0 ? 0 : 1) as 0 | 1,
-        };
-      }
-      const { src, dst } = decodeMove(move);
-      const player = positions[idx]?.currentPlayer;
-      return {
-        move,
-        algebraic: `${squareToAlgebraic(src)}-${squareToAlgebraic(dst)}`,
-        player: (player === 0 || player === 1 ? player : 0) as 0 | 1,
-      };
-    });
-  }, [gameData, currentPly, positions]);
+    return gameData.moves.slice(0, currentPly);
+  }, [gameData, currentPly]);
 
   // Get analysis for current move
   const currentMoveAnalysis = currentPly > 0 && analysis
@@ -232,7 +216,7 @@ export default function ReplayViewer({ gameId, onClose }: ReplayViewerProps) {
 
             {/* Move History */}
             <div className="hidden lg:block">
-              <MoveHistory moves={moveHistory} />
+              <MoveHistory moves={movesUpToPly} />
             </div>
 
             {/* Analyze button */}
