@@ -121,10 +121,12 @@ def init_db(db_path: Path = None) -> None:
                 policy_legal_mass REAL,
                 policy_ebf REAL,
                 policy_confidence REAL,
-                -- Value metrics
+                -- Value metrics (validation - computed before training)
                 value_mean REAL,
                 value_std REAL,
                 value_extremity REAL,
+                value_mse REAL,
+                value_sign_accuracy REAL,
                 value_calibration_error REAL,
                 -- Pass metrics
                 pass_decision_rate REAL,
@@ -145,6 +147,86 @@ def init_db(db_path: Path = None) -> None:
             )
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_training_metrics_iteration ON training_metrics(iteration)")
+
+        # Arena matches table - results of model vs model matches
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS arena_matches (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                model1_version TEXT NOT NULL,
+                model2_version TEXT NOT NULL,
+                model1_wins INTEGER NOT NULL DEFAULT 0,
+                model2_wins INTEGER NOT NULL DEFAULT 0,
+                draws INTEGER NOT NULL DEFAULT 0,
+                simulations INTEGER NOT NULL DEFAULT 200,
+                created_at TEXT NOT NULL,
+                UNIQUE(model1_version, model2_version, simulations)
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_arena_matches_model1 ON arena_matches(model1_version)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_arena_matches_model2 ON arena_matches(model2_version)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_arena_matches_sims ON arena_matches(simulations)")
+
+        # Arena ratings table - ELO ratings per model per simulation count
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS arena_ratings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                model_version TEXT NOT NULL,
+                iteration INTEGER NOT NULL,
+                simulations INTEGER NOT NULL DEFAULT 800,
+                elo_rating REAL NOT NULL DEFAULT 1000.0,
+                games_played INTEGER NOT NULL DEFAULT 0,
+                last_updated TEXT NOT NULL,
+                UNIQUE(model_version, simulations)
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_arena_ratings_version ON arena_ratings(model_version)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_arena_ratings_sims ON arena_ratings(simulations)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_arena_ratings_elo ON arena_ratings(elo_rating DESC)")
+
+        # Players table - unified humans and AI models with ELO ratings
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS players (
+                player_id TEXT PRIMARY KEY,
+                player_type TEXT NOT NULL,
+                user_id TEXT,
+                model_version TEXT,
+                simulations INTEGER,
+                display_name TEXT NOT NULL,
+                elo_rating REAL NOT NULL DEFAULT 1000.0,
+                elo_games_played INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                UNIQUE(player_type, model_version, simulations)
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_players_type ON players(player_type)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_players_user ON players(user_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_players_elo ON players(elo_rating DESC)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_players_model ON players(model_version)")
+
+        # Add player_id columns to games table (migration)
+        games_migrations = [
+            "ALTER TABLE games ADD COLUMN player1_player_id TEXT REFERENCES players(player_id)",
+            "ALTER TABLE games ADD COLUMN player2_player_id TEXT REFERENCES players(player_id)",
+            "ALTER TABLE games ADD COLUMN winner INTEGER",  # 0, 1, or NULL for draw/ongoing
+        ]
+        for sql in games_migrations:
+            try:
+                conn.execute(sql)
+            except sqlite3.OperationalError:
+                pass  # Column already exists
+
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_games_player1_pid ON games(player1_player_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_games_player2_pid ON games(player2_player_id)")
+
+        # Migration: add new columns if they don't exist
+        try:
+            conn.execute("ALTER TABLE training_metrics ADD COLUMN value_mse REAL")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+        try:
+            conn.execute("ALTER TABLE training_metrics ADD COLUMN value_sign_accuracy REAL")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
 
         conn.commit()
 
@@ -213,7 +295,7 @@ def save_game(
     """
     if db_path is None:
         db_path = DEFAULT_DB_PATH
-    now = datetime.utcnow().isoformat()
+    now = datetime.utcnow().isoformat() + 'Z'
     state_json = state_to_json(state)
     # Default bot_type for backward compatibility
     if bot_type is None:
@@ -253,7 +335,7 @@ def append_move(game_id: str, move: int, db_path: Path = None) -> None:
     """Append a move to a game's move history."""
     if db_path is None:
         db_path = DEFAULT_DB_PATH
-    now = datetime.utcnow().isoformat()
+    now = datetime.utcnow().isoformat() + 'Z'
 
     with get_connection(db_path) as conn:
         # Get current moves
@@ -309,7 +391,7 @@ def pop_move(game_id: str, db_path: Path = None) -> Optional[int]:
     """Remove and return the last move from a game's history (for undo)."""
     if db_path is None:
         db_path = DEFAULT_DB_PATH
-    now = datetime.utcnow().isoformat()
+    now = datetime.utcnow().isoformat() + 'Z'
 
     with get_connection(db_path) as conn:
         row = conn.execute("SELECT moves_json FROM games WHERE game_id = ?", (game_id,)).fetchone()
@@ -414,8 +496,8 @@ def cleanup_old_games(max_age_days: int = 7, empty_game_max_age_hours: int = 1, 
         db_path = DEFAULT_DB_PATH
     from datetime import timedelta
 
-    old_cutoff = (datetime.utcnow() - timedelta(days=max_age_days)).isoformat()
-    empty_cutoff = (datetime.utcnow() - timedelta(hours=empty_game_max_age_hours)).isoformat()
+    old_cutoff = (datetime.utcnow() - timedelta(days=max_age_days)).isoformat() + 'Z'
+    empty_cutoff = (datetime.utcnow() - timedelta(hours=empty_game_max_age_hours)).isoformat() + 'Z'
 
     with get_connection(db_path) as conn:
         # Delete old games
@@ -480,7 +562,7 @@ def create_user(
         db_path = DEFAULT_DB_PATH
     user_id = secrets.token_hex(8)
     password_hash = hash_password(password)
-    now = datetime.utcnow().isoformat()
+    now = datetime.utcnow().isoformat() + 'Z'
 
     with get_connection(db_path) as conn:
         try:
@@ -524,7 +606,7 @@ def authenticate_user(
             return None
 
         # Update last login
-        now = datetime.utcnow().isoformat()
+        now = datetime.utcnow().isoformat() + 'Z'
         conn.execute(
             "UPDATE users SET last_login_at = ? WHERE user_id = ?",
             (now, row["user_id"])
@@ -759,7 +841,7 @@ def save_training_game(
     """
     if db_path is None:
         db_path = DEFAULT_DB_PATH
-    now = datetime.utcnow().isoformat()
+    now = datetime.utcnow().isoformat() + 'Z'
 
     with get_connection(db_path) as conn:
         cursor = conn.execute("""
@@ -925,7 +1007,7 @@ def save_training_model(
     """
     if db_path is None:
         db_path = DEFAULT_DB_PATH
-    now = datetime.utcnow().isoformat()
+    now = datetime.utcnow().isoformat() + 'Z'
 
     with get_connection(db_path) as conn:
         cursor = conn.execute("""
@@ -1082,7 +1164,7 @@ def save_training_metrics(
     """
     if db_path is None:
         db_path = DEFAULT_DB_PATH
-    now = datetime.utcnow().isoformat()
+    now = datetime.utcnow().isoformat() + 'Z'
 
     with get_connection(db_path) as conn:
         cursor = conn.execute("""
@@ -1090,13 +1172,13 @@ def save_training_metrics(
                 iteration, timestamp,
                 policy_top1_accuracy, policy_top3_accuracy, policy_entropy,
                 policy_legal_mass, policy_ebf, policy_confidence,
-                value_mean, value_std, value_extremity, value_calibration_error,
+                value_mean, value_std, value_extremity, value_mse, value_sign_accuracy, value_calibration_error,
                 pass_decision_rate,
                 loss_total, loss_policy, loss_value, loss_difficulty, loss_illegal_penalty,
                 num_games, num_examples, avg_game_length,
                 learning_rate, model_version, train_time_sec
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             iteration, now,
             metrics.get('policy_top1_accuracy'),
@@ -1108,6 +1190,8 @@ def save_training_metrics(
             metrics.get('value_mean'),
             metrics.get('value_std'),
             metrics.get('value_extremity'),
+            metrics.get('value_mse'),
+            metrics.get('value_sign_accuracy'),
             metrics.get('value_calibration_error'),
             metrics.get('pass_decision_rate'),
             metrics.get('loss_total') or metrics.get('loss'),
@@ -1170,6 +1254,8 @@ def get_training_metrics(
                 "value_mean": row["value_mean"],
                 "value_std": row["value_std"],
                 "value_extremity": row["value_extremity"],
+                "value_mse": row["value_mse"] if "value_mse" in row.keys() else None,
+                "value_sign_accuracy": row["value_sign_accuracy"] if "value_sign_accuracy" in row.keys() else None,
                 "value_calibration_error": row["value_calibration_error"],
                 "pass_decision_rate": row["pass_decision_rate"],
                 "loss_total": row["loss_total"],
@@ -1214,6 +1300,8 @@ def get_latest_training_metrics(db_path: Path = None) -> Optional[dict]:
             "value_mean": row["value_mean"],
             "value_std": row["value_std"],
             "value_extremity": row["value_extremity"],
+            "value_mse": row["value_mse"] if "value_mse" in row.keys() else None,
+            "value_sign_accuracy": row["value_sign_accuracy"] if "value_sign_accuracy" in row.keys() else None,
             "value_calibration_error": row["value_calibration_error"],
             "pass_decision_rate": row["pass_decision_rate"],
             "loss_total": row["loss_total"],
@@ -1228,3 +1316,644 @@ def get_latest_training_metrics(db_path: Path = None) -> Optional[dict]:
             "model_version": row["model_version"],
             "train_time_sec": row["train_time_sec"],
         }
+
+
+# --- Arena Management ---
+
+def save_arena_match(
+    model1_version: str,
+    model2_version: str,
+    model1_wins: int,
+    model2_wins: int,
+    draws: int,
+    simulations: int = 800,
+    db_path: Path = None
+) -> int:
+    """
+    Save or update an arena match result.
+
+    If a match between these two models at this simulation count already exists,
+    the results are added to the existing record.
+
+    Returns:
+        The match record ID.
+    """
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+    now = datetime.utcnow().isoformat() + 'Z'
+
+    with get_connection(db_path) as conn:
+        # Check if match already exists
+        existing = conn.execute("""
+            SELECT id, model1_wins, model2_wins, draws FROM arena_matches
+            WHERE model1_version = ? AND model2_version = ? AND simulations = ?
+        """, (model1_version, model2_version, simulations)).fetchone()
+
+        if existing:
+            # Update existing match
+            cursor = conn.execute("""
+                UPDATE arena_matches SET
+                    model1_wins = model1_wins + ?,
+                    model2_wins = model2_wins + ?,
+                    draws = draws + ?,
+                    created_at = ?
+                WHERE id = ?
+            """, (model1_wins, model2_wins, draws, now, existing["id"]))
+            conn.commit()
+            return existing["id"]
+        else:
+            # Insert new match
+            cursor = conn.execute("""
+                INSERT INTO arena_matches
+                    (model1_version, model2_version, model1_wins, model2_wins, draws, simulations, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (model1_version, model2_version, model1_wins, model2_wins, draws, simulations, now))
+            conn.commit()
+            return cursor.lastrowid
+
+
+def get_arena_matches(
+    model_version: Optional[str] = None,
+    simulations: Optional[int] = None,
+    limit: int = 100,
+    db_path: Path = None
+) -> list[dict]:
+    """
+    Get arena match history.
+
+    Args:
+        model_version: Filter to matches involving this model
+        simulations: Filter by simulation count
+        limit: Maximum number of matches to return
+
+    Returns:
+        List of match dictionaries.
+    """
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+
+    conditions = []
+    params = []
+
+    if model_version:
+        conditions.append("(model1_version = ? OR model2_version = ?)")
+        params.extend([model_version, model_version])
+
+    if simulations is not None:
+        conditions.append("simulations = ?")
+        params.append(simulations)
+
+    where_clause = " AND ".join(conditions) if conditions else "1=1"
+
+    with get_connection(db_path) as conn:
+        rows = conn.execute(f"""
+            SELECT * FROM arena_matches
+            WHERE {where_clause}
+            ORDER BY created_at DESC
+            LIMIT ?
+        """, params + [limit]).fetchall()
+
+        return [{
+            "id": row["id"],
+            "model1_version": row["model1_version"],
+            "model2_version": row["model2_version"],
+            "model1_wins": row["model1_wins"],
+            "model2_wins": row["model2_wins"],
+            "draws": row["draws"],
+            "simulations": row["simulations"],
+            "created_at": row["created_at"],
+        } for row in rows]
+
+
+def get_all_arena_matches(
+    simulations: Optional[int] = None,
+    db_path: Path = None
+) -> list[dict]:
+    """
+    Get all arena matches for ELO computation.
+
+    Args:
+        simulations: Filter by simulation count (None = all)
+
+    Returns:
+        List of all match dictionaries.
+    """
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+
+    with get_connection(db_path) as conn:
+        if simulations is not None:
+            rows = conn.execute("""
+                SELECT * FROM arena_matches
+                WHERE simulations = ?
+                ORDER BY created_at ASC
+            """, (simulations,)).fetchall()
+        else:
+            rows = conn.execute("""
+                SELECT * FROM arena_matches
+                ORDER BY created_at ASC
+            """).fetchall()
+
+        return [{
+            "id": row["id"],
+            "model1_version": row["model1_version"],
+            "model2_version": row["model2_version"],
+            "model1_wins": row["model1_wins"],
+            "model2_wins": row["model2_wins"],
+            "draws": row["draws"],
+            "simulations": row["simulations"],
+            "created_at": row["created_at"],
+        } for row in rows]
+
+
+def save_arena_rating(
+    model_version: str,
+    iteration: int,
+    elo_rating: float,
+    games_played: int,
+    simulations: int = 800,
+    db_path: Path = None
+) -> int:
+    """
+    Save or update an arena ELO rating.
+
+    Returns:
+        The rating record ID.
+    """
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+    now = datetime.utcnow().isoformat() + 'Z'
+
+    with get_connection(db_path) as conn:
+        cursor = conn.execute("""
+            INSERT INTO arena_ratings
+                (model_version, iteration, simulations, elo_rating, games_played, last_updated)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(model_version, simulations) DO UPDATE SET
+                elo_rating = excluded.elo_rating,
+                games_played = excluded.games_played,
+                last_updated = excluded.last_updated
+        """, (model_version, iteration, simulations, elo_rating, games_played, now))
+        conn.commit()
+        return cursor.lastrowid
+
+
+def get_arena_ratings(
+    simulations: Optional[int] = None,
+    limit: int = 100,
+    db_path: Path = None
+) -> list[dict]:
+    """
+    Get arena ELO ratings sorted by rating (descending).
+
+    Args:
+        simulations: Filter by simulation count (None = all)
+        limit: Maximum number of ratings to return
+
+    Returns:
+        List of rating dictionaries.
+    """
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+
+    with get_connection(db_path) as conn:
+        if simulations is not None:
+            rows = conn.execute("""
+                SELECT * FROM arena_ratings
+                WHERE simulations = ?
+                ORDER BY elo_rating DESC
+                LIMIT ?
+            """, (simulations, limit)).fetchall()
+        else:
+            rows = conn.execute("""
+                SELECT * FROM arena_ratings
+                ORDER BY elo_rating DESC
+                LIMIT ?
+            """, (limit,)).fetchall()
+
+        return [{
+            "id": row["id"],
+            "model_version": row["model_version"],
+            "iteration": row["iteration"],
+            "simulations": row["simulations"],
+            "elo_rating": row["elo_rating"],
+            "games_played": row["games_played"],
+            "last_updated": row["last_updated"],
+        } for row in rows]
+
+
+def get_arena_rating_by_version(
+    model_version: str,
+    simulations: int = 800,
+    db_path: Path = None
+) -> Optional[dict]:
+    """
+    Get the arena rating for a specific model version at a given simulation count.
+
+    Returns:
+        Rating dictionary or None if not found.
+    """
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+
+    with get_connection(db_path) as conn:
+        row = conn.execute("""
+            SELECT * FROM arena_ratings
+            WHERE model_version = ? AND simulations = ?
+        """, (model_version, simulations)).fetchone()
+
+        if row is None:
+            return None
+
+        return {
+            "id": row["id"],
+            "model_version": row["model_version"],
+            "iteration": row["iteration"],
+            "simulations": row["simulations"],
+            "elo_rating": row["elo_rating"],
+            "games_played": row["games_played"],
+            "last_updated": row["last_updated"],
+        }
+
+
+def clear_arena_data(db_path: Path = None) -> dict:
+    """
+    Clear all arena matches and ratings.
+
+    Returns:
+        Dictionary with counts of deleted items.
+    """
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+
+    with get_connection(db_path) as conn:
+        matches_count = conn.execute("SELECT COUNT(*) FROM arena_matches").fetchone()[0]
+        ratings_count = conn.execute("SELECT COUNT(*) FROM arena_ratings").fetchone()[0]
+
+        conn.execute("DELETE FROM arena_matches")
+        conn.execute("DELETE FROM arena_ratings")
+        conn.commit()
+
+        return {
+            "matches_deleted": matches_count,
+            "ratings_deleted": ratings_count,
+        }
+
+
+# --- Player Management ---
+
+def generate_ai_player_id(model_version: str, simulations: int) -> str:
+    """Generate a consistent player ID for an AI model+sims combo."""
+    return f"ai_{model_version}_{simulations}"
+
+
+def generate_human_player_id(user_id: str) -> str:
+    """Generate a player ID for a human user."""
+    return f"human_{user_id}"
+
+
+def create_player(
+    player_id: str,
+    player_type: str,
+    display_name: str,
+    user_id: Optional[str] = None,
+    model_version: Optional[str] = None,
+    simulations: Optional[int] = None,
+    elo_rating: float = 1000.0,
+    db_path: Path = None
+) -> Optional[dict]:
+    """
+    Create a new player (human or AI).
+
+    Returns player dict on success, None if already exists.
+    """
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+    now = datetime.utcnow().isoformat() + 'Z'
+
+    with get_connection(db_path) as conn:
+        try:
+            conn.execute("""
+                INSERT INTO players
+                    (player_id, player_type, user_id, model_version, simulations,
+                     display_name, elo_rating, elo_games_played, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)
+            """, (player_id, player_type, user_id, model_version, simulations,
+                  display_name, elo_rating, now))
+            conn.commit()
+            return {
+                "player_id": player_id,
+                "player_type": player_type,
+                "user_id": user_id,
+                "model_version": model_version,
+                "simulations": simulations,
+                "display_name": display_name,
+                "elo_rating": elo_rating,
+                "elo_games_played": 0,
+                "created_at": now,
+            }
+        except sqlite3.IntegrityError:
+            return None  # Player already exists
+
+
+def get_player(player_id: str, db_path: Path = None) -> Optional[dict]:
+    """Get a player by ID."""
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+
+    with get_connection(db_path) as conn:
+        row = conn.execute(
+            "SELECT * FROM players WHERE player_id = ?",
+            (player_id,)
+        ).fetchone()
+
+        if row is None:
+            return None
+
+        return {
+            "player_id": row["player_id"],
+            "player_type": row["player_type"],
+            "user_id": row["user_id"],
+            "model_version": row["model_version"],
+            "simulations": row["simulations"],
+            "display_name": row["display_name"],
+            "elo_rating": row["elo_rating"],
+            "elo_games_played": row["elo_games_played"],
+            "created_at": row["created_at"],
+        }
+
+
+def get_or_create_ai_player(
+    model_version: str,
+    simulations: int,
+    db_path: Path = None
+) -> dict:
+    """
+    Get or create an AI player for a model+sims combo.
+
+    Always returns a player dict.
+    """
+    player_id = generate_ai_player_id(model_version, simulations)
+    player = get_player(player_id, db_path)
+
+    if player is not None:
+        return player
+
+    # Create display name
+    display_name = f"{model_version} ({simulations} sims)"
+
+    player = create_player(
+        player_id=player_id,
+        player_type="ai",
+        display_name=display_name,
+        model_version=model_version,
+        simulations=simulations,
+        db_path=db_path,
+    )
+
+    # If creation failed (race condition), fetch again
+    if player is None:
+        player = get_player(player_id, db_path)
+
+    return player
+
+
+def get_or_create_human_player(
+    user_id: str,
+    display_name: str,
+    db_path: Path = None
+) -> dict:
+    """
+    Get or create a human player for a user.
+
+    Always returns a player dict.
+    """
+    player_id = generate_human_player_id(user_id)
+    player = get_player(player_id, db_path)
+
+    if player is not None:
+        return player
+
+    player = create_player(
+        player_id=player_id,
+        player_type="human",
+        display_name=display_name,
+        user_id=user_id,
+        db_path=db_path,
+    )
+
+    # If creation failed (race condition), fetch again
+    if player is None:
+        player = get_player(player_id, db_path)
+
+    return player
+
+
+def update_player_elo(
+    player_id: str,
+    new_rating: float,
+    games_increment: int = 1,
+    db_path: Path = None
+) -> bool:
+    """
+    Update a player's ELO rating.
+
+    Returns True if updated, False if player not found.
+    """
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+
+    with get_connection(db_path) as conn:
+        cursor = conn.execute("""
+            UPDATE players
+            SET elo_rating = ?,
+                elo_games_played = elo_games_played + ?
+            WHERE player_id = ?
+        """, (new_rating, games_increment, player_id))
+        conn.commit()
+        return cursor.rowcount > 0
+
+
+def update_game_result(
+    game_id: str,
+    winner: Optional[int],
+    player1_player_id: Optional[str] = None,
+    player2_player_id: Optional[str] = None,
+    db_path: Path = None
+) -> bool:
+    """
+    Update a game's result and player references.
+
+    Args:
+        game_id: The game ID
+        winner: 0 for player1 win, 1 for player2 win, None for draw
+        player1_player_id: Player ID for player 1
+        player2_player_id: Player ID for player 2
+
+    Returns True if updated.
+    """
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+    now = datetime.utcnow().isoformat() + 'Z'
+
+    with get_connection(db_path) as conn:
+        cursor = conn.execute("""
+            UPDATE games
+            SET winner = ?,
+                player1_player_id = COALESCE(?, player1_player_id),
+                player2_player_id = COALESCE(?, player2_player_id),
+                updated_at = ?
+            WHERE game_id = ?
+        """, (winner, player1_player_id, player2_player_id, now, game_id))
+        conn.commit()
+        return cursor.rowcount > 0
+
+
+def get_leaderboard(
+    player_type: Optional[str] = None,
+    limit: int = 100,
+    min_games: int = 0,
+    db_path: Path = None
+) -> list[dict]:
+    """
+    Get leaderboard sorted by ELO rating.
+
+    Args:
+        player_type: Filter by 'human' or 'ai' (None = all)
+        limit: Maximum number of players to return
+        min_games: Minimum games played to be included
+
+    Returns:
+        List of player dicts sorted by ELO descending.
+    """
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+
+    conditions = ["elo_games_played >= ?"]
+    params = [min_games]
+
+    if player_type:
+        conditions.append("player_type = ?")
+        params.append(player_type)
+
+    where_clause = " AND ".join(conditions)
+
+    with get_connection(db_path) as conn:
+        rows = conn.execute(f"""
+            SELECT * FROM players
+            WHERE {where_clause}
+            ORDER BY elo_rating DESC
+            LIMIT ?
+        """, params + [limit]).fetchall()
+
+        return [{
+            "player_id": row["player_id"],
+            "player_type": row["player_type"],
+            "user_id": row["user_id"],
+            "model_version": row["model_version"],
+            "simulations": row["simulations"],
+            "display_name": row["display_name"],
+            "elo_rating": row["elo_rating"],
+            "elo_games_played": row["elo_games_played"],
+            "created_at": row["created_at"],
+        } for row in rows]
+
+
+def get_player_recent_games(
+    player_id: str,
+    limit: int = 20,
+    db_path: Path = None
+) -> list[dict]:
+    """
+    Get a player's recent games.
+
+    Returns list of game summaries.
+    """
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+
+    with get_connection(db_path) as conn:
+        rows = conn.execute("""
+            SELECT g.game_id, g.player1_player_id, g.player2_player_id, g.winner,
+                   g.created_at, g.updated_at,
+                   p1.display_name as player1_name, p1.elo_rating as player1_elo,
+                   p2.display_name as player2_name, p2.elo_rating as player2_elo
+            FROM games g
+            LEFT JOIN players p1 ON g.player1_player_id = p1.player_id
+            LEFT JOIN players p2 ON g.player2_player_id = p2.player_id
+            WHERE g.player1_player_id = ? OR g.player2_player_id = ?
+            ORDER BY g.updated_at DESC
+            LIMIT ?
+        """, (player_id, player_id, limit)).fetchall()
+
+        return [{
+            "game_id": row["game_id"],
+            "player1_player_id": row["player1_player_id"],
+            "player2_player_id": row["player2_player_id"],
+            "player1_name": row["player1_name"],
+            "player2_name": row["player2_name"],
+            "player1_elo": row["player1_elo"],
+            "player2_elo": row["player2_elo"],
+            "winner": row["winner"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        } for row in rows]
+
+
+def apply_elo_update(
+    player1_id: str,
+    player2_id: str,
+    winner: Optional[int],
+    db_path: Path = None
+) -> tuple[float, float]:
+    """
+    Apply ELO rating updates after a game.
+
+    Args:
+        player1_id: Player 1's ID
+        player2_id: Player 2's ID
+        winner: 0 if player1 won, 1 if player2 won, None for draw
+
+    Returns:
+        Tuple of (player1_new_rating, player2_new_rating)
+    """
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+
+    # Import here to avoid circular dependency
+    from razzle.training.elo import expected_score, EloRating
+
+    p1 = get_player(player1_id, db_path)
+    p2 = get_player(player2_id, db_path)
+
+    if not p1 or not p2:
+        raise ValueError("Player not found")
+
+    # Same player = no rating change
+    if player1_id == player2_id:
+        return p1["elo_rating"], p2["elo_rating"]
+
+    r1 = EloRating(rating=p1["elo_rating"], games_played=p1["elo_games_played"])
+    r2 = EloRating(rating=p2["elo_rating"], games_played=p2["elo_games_played"])
+
+    # Determine scores
+    if winner == 0:
+        score1, score2 = 1.0, 0.0
+    elif winner == 1:
+        score1, score2 = 0.0, 1.0
+    else:
+        score1, score2 = 0.5, 0.5
+
+    # Calculate expected scores
+    exp1 = expected_score(r1.rating, r2.rating)
+    exp2 = expected_score(r2.rating, r1.rating)
+
+    # Update ratings
+    new_r1 = r1.rating + r1.k_factor * (score1 - exp1)
+    new_r2 = r2.rating + r2.k_factor * (score2 - exp2)
+
+    # Save updates
+    update_player_elo(player1_id, new_r1, games_increment=1, db_path=db_path)
+    update_player_elo(player2_id, new_r2, games_increment=1, db_path=db_path)
+
+    return new_r1, new_r2

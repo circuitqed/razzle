@@ -10,16 +10,19 @@ import {
   ResponsiveContainer,
   AreaChart,
   Area,
+  ReferenceLine,
 } from 'recharts';
 import { getAllTrainingMetrics, getDashboardData } from '../api/metrics';
-import type { TrainingMetrics, TrainingDashboardData } from '../types';
+import { getArenaRatings, getArenaMatches, getUniqueSimulationCounts, filterRatingsBySimulations, sortRatingsByElo, sortRatingsByIteration } from '../api/arena';
+import { getLeaderboard } from '../api/leaderboard';
+import type { TrainingMetrics, TrainingDashboardData, ArenaRating, ArenaMatch, PlayerProfile } from '../types';
 
 interface Props {
   onClose?: () => void;
   refreshInterval?: number;
 }
 
-type TabType = 'overview' | 'policy' | 'value' | 'pass' | 'loss' | 'infra';
+type TabType = 'overview' | 'policy' | 'value' | 'pass' | 'loss' | 'infra' | 'arena' | 'leaderboard';
 
 interface InfraSnapshot {
   timestamp: number;
@@ -40,6 +43,9 @@ export default function TrainingDashboard({ onClose, refreshInterval = 10000 }: 
   const [metrics, setMetrics] = useState<TrainingMetrics[]>([]);
   const [dashboard, setDashboard] = useState<TrainingDashboardData | null>(null);
   const [infraHistory, setInfraHistory] = useState<InfraSnapshot[]>([]);
+  const [arenaRatings, setArenaRatings] = useState<ArenaRating[]>([]);
+  const [arenaMatches, setArenaMatches] = useState<ArenaMatch[]>([]);
+  const [leaderboard, setLeaderboard] = useState<PlayerProfile[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [lastUpdate, setLastUpdate] = useState<Date | null>(null);
   const [isPaused, setIsPaused] = useState(false);
@@ -54,13 +60,19 @@ export default function TrainingDashboard({ onClose, refreshInterval = 10000 }: 
 
   const fetchData = useCallback(async () => {
     try {
-      const [metricsData, dashboardData] = await Promise.all([
+      const [metricsData, dashboardData, ratingsData, matchesData, leaderboardData] = await Promise.all([
         getAllTrainingMetrics(),
         getDashboardData(),
+        getArenaRatings().catch(() => []),  // Gracefully handle if arena data doesn't exist
+        getArenaMatches().catch(() => []),
+        getLeaderboard(undefined, 100, 0).catch(() => []),  // Get all players with any games
       ]);
 
       setMetrics(metricsData);
       setDashboard(dashboardData);
+      setArenaRatings(ratingsData);
+      setArenaMatches(matchesData);
+      setLeaderboard(leaderboardData);
       setError(null);
       setLastUpdate(new Date());
 
@@ -186,6 +198,8 @@ export default function TrainingDashboard({ onClose, refreshInterval = 10000 }: 
     value_std: m.value_std,
     value_extremity: m.value_extremity,
     calibration_error: m.value_calibration_error,
+    value_sign_accuracy: m.value_sign_accuracy ? m.value_sign_accuracy * 100 : null,
+    value_mse: m.value_mse,
     // Pass
     pass_decision_rate: m.pass_decision_rate ? m.pass_decision_rate * 100 : null,
     // Loss
@@ -243,6 +257,8 @@ export default function TrainingDashboard({ onClose, refreshInterval = 10000 }: 
     { id: 'pass', label: 'Pass Stats' },
     { id: 'loss', label: 'Loss' },
     { id: 'infra', label: 'Infrastructure' },
+    { id: 'arena', label: 'Arena' },
+    { id: 'leaderboard', label: 'Leaderboard' },
   ];
 
   return (
@@ -383,6 +399,8 @@ export default function TrainingDashboard({ onClose, refreshInterval = 10000 }: 
           {activeTab === 'pass' && <PassTab data={chartData} />}
           {activeTab === 'loss' && <LossTab data={chartData} />}
           {activeTab === 'infra' && <InfrastructureTab dashboard={dashboard} infraHistory={infraHistory} />}
+          {activeTab === 'arena' && <ArenaTab ratings={arenaRatings} matches={arenaMatches} />}
+          {activeTab === 'leaderboard' && <LeaderboardTab players={leaderboard} />}
         </div>
 
         {/* Footer */}
@@ -552,6 +570,27 @@ function PolicyTab({ data }: { data: any[] }) {
 function ValueTab({ data }: { data: any[] }) {
   return (
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+      <ChartCard title="Sign Accuracy (%) - Key Validation Metric">
+        <LineChart data={data}>
+          <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
+          <XAxis dataKey="iteration" stroke="#9CA3AF" type="number" domain={['dataMin', 'dataMax']} />
+          <YAxis stroke="#9CA3AF" domain={[40, 60]} />
+          <Tooltip {...tooltipStyle} formatter={(v: number) => `${v?.toFixed(1)}%`} />
+          <ReferenceLine y={50} stroke="#6B7280" strokeDasharray="5 5" label={{ value: 'Random', fill: '#6B7280', fontSize: 10 }} />
+          <Line type="monotone" dataKey="value_sign_accuracy" stroke="#22C55E" strokeWidth={2} dot={false} name="Sign Accuracy" />
+        </LineChart>
+      </ChartCard>
+
+      <ChartCard title="Value MSE (Validation)">
+        <LineChart data={data}>
+          <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
+          <XAxis dataKey="iteration" stroke="#9CA3AF" type="number" domain={['dataMin', 'dataMax']} />
+          <YAxis stroke="#9CA3AF" />
+          <Tooltip {...tooltipStyle} formatter={(v: number) => v?.toFixed(4)} />
+          <Line type="monotone" dataKey="value_mse" stroke="#3B82F6" strokeWidth={2} dot={false} name="MSE" />
+        </LineChart>
+      </ChartCard>
+
       <ChartCard title="Value Predictions">
         <LineChart data={data}>
           <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
@@ -561,16 +600,6 @@ function ValueTab({ data }: { data: any[] }) {
           <Legend />
           <Line type="monotone" dataKey="value_mean" stroke="#3B82F6" strokeWidth={2} dot={false} name="Mean" />
         </LineChart>
-      </ChartCard>
-
-      <ChartCard title="Value Standard Deviation">
-        <AreaChart data={data}>
-          <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
-          <XAxis dataKey="iteration" stroke="#9CA3AF" type="number" domain={['dataMin', 'dataMax']} />
-          <YAxis stroke="#9CA3AF" />
-          <Tooltip {...tooltipStyle} formatter={(v: number) => v?.toFixed(3)} />
-          <Area type="monotone" dataKey="value_std" stroke="#8B5CF6" fill="#8B5CF640" name="Std Dev" />
-        </AreaChart>
       </ChartCard>
 
       <ChartCard title="Value Extremity">
@@ -591,6 +620,16 @@ function ValueTab({ data }: { data: any[] }) {
           <Tooltip {...tooltipStyle} formatter={(v: number) => v?.toFixed(4)} />
           <Line type="monotone" dataKey="calibration_error" stroke="#EC4899" strokeWidth={2} dot={false} name="Error" />
         </LineChart>
+      </ChartCard>
+
+      <ChartCard title="Value Standard Deviation">
+        <AreaChart data={data}>
+          <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
+          <XAxis dataKey="iteration" stroke="#9CA3AF" type="number" domain={['dataMin', 'dataMax']} />
+          <YAxis stroke="#9CA3AF" />
+          <Tooltip {...tooltipStyle} formatter={(v: number) => v?.toFixed(3)} />
+          <Area type="monotone" dataKey="value_std" stroke="#8B5CF6" fill="#8B5CF640" name="Std Dev" />
+        </AreaChart>
       </ChartCard>
     </div>
   );
@@ -729,9 +768,16 @@ function InfrastructureTab({
     );
   }
 
-  const workers = Object.entries(dashboard.workers);
-  const activeWorkers = workers.length;
-  const totalWorkerGames = workers.reduce((sum, [, w]) => sum + w.games, 0);
+  // Filter workers: only show those seen in the last 5 minutes
+  const WORKER_EXPIRY_MS = 5 * 60 * 1000; // 5 minutes
+  const now = Date.now();
+  const allWorkers = Object.entries(dashboard.workers);
+  const activeWorkers = allWorkers.filter(([, w]) => {
+    const lastSeen = new Date(w.last_seen).getTime();
+    return (now - lastSeen) < WORKER_EXPIRY_MS;
+  });
+  const staleWorkers = allWorkers.length - activeWorkers.length;
+  const totalWorkerGames = activeWorkers.reduce((sum, [, w]) => sum + w.games, 0);
 
   // Get current games per hour (Kalman filtered for stable display)
   const currentGamesPerHour = infraHistory.length > 0
@@ -757,6 +803,8 @@ function InfrastructureTab({
     const now = Date.now();
     const then = new Date(ts).getTime();
     const diffSec = Math.floor((now - then) / 1000);
+    // Handle negative values (clock drift between server and client)
+    if (diffSec < 0) return 'just now';
     if (diffSec < 60) return `${diffSec}s ago`;
     if (diffSec < 3600) return `${Math.floor(diffSec / 60)}m ago`;
     return `${Math.floor(diffSec / 3600)}h ago`;
@@ -786,7 +834,7 @@ function InfrastructureTab({
         </div>
         <div className="bg-gray-700 rounded-lg p-3">
           <div className="text-xs text-gray-400">Active Workers</div>
-          <div className="text-lg font-bold text-purple-400">{activeWorkers}</div>
+          <div className="text-lg font-bold text-purple-400">{activeWorkers.length}</div>
         </div>
       </div>
 
@@ -818,9 +866,12 @@ function InfrastructureTab({
       </div>
 
       {/* Workers Table */}
-      {workers.length > 0 && (
+      {activeWorkers.length > 0 && (
         <div className="bg-gray-700 rounded-lg p-4">
-          <h3 className="text-sm font-semibold text-white mb-3">Workers ({activeWorkers})</h3>
+          <h3 className="text-sm font-semibold text-white mb-3">
+            Active Workers ({activeWorkers.length})
+            {staleWorkers > 0 && <span className="text-gray-500 font-normal ml-2">({staleWorkers} stale)</span>}
+          </h3>
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
@@ -831,7 +882,7 @@ function InfrastructureTab({
                 </tr>
               </thead>
               <tbody>
-                {workers.sort((a, b) => b[1].games - a[1].games).map(([workerId, worker]) => (
+                {activeWorkers.sort((a, b) => b[1].games - a[1].games).map(([workerId, worker]) => (
                   <tr key={workerId} className="text-gray-300 border-t border-gray-600">
                     <td className="py-2 pr-4 font-mono text-xs">{workerId}</td>
                     <td className="py-2 pr-4">{worker.games}</td>
@@ -883,12 +934,405 @@ function InfrastructureTab({
       )}
 
       {/* Empty state */}
-      {workers.length === 0 && dashboard.models.length === 0 && (
+      {activeWorkers.length === 0 && dashboard.models.length === 0 && (
         <div className="text-center text-gray-400 py-8">
           <p>No workers or models yet.</p>
           <p className="text-sm mt-2">Start distributed training to see infrastructure metrics.</p>
         </div>
       )}
+    </div>
+  );
+}
+
+// Arena Tab
+function ArenaTab({
+  ratings,
+  matches,
+}: {
+  ratings: ArenaRating[];
+  matches: ArenaMatch[];
+}) {
+  const [selectedSims, setSelectedSims] = useState<number | 'all'>('all');
+
+  // Get unique simulation counts
+  const simCounts = useMemo(() => getUniqueSimulationCounts(ratings), [ratings]);
+
+  // Filter ratings by selected simulation count
+  const filteredRatings = useMemo(() => {
+    if (selectedSims === 'all') return ratings;
+    return filterRatingsBySimulations(ratings, selectedSims);
+  }, [ratings, selectedSims]);
+
+  // Sort by ELO for rankings table
+  const rankedRatings = useMemo(() => sortRatingsByElo(filteredRatings), [filteredRatings]);
+
+  // Sort by iteration for chart
+  const chartRatings = useMemo(() => sortRatingsByIteration(filteredRatings), [filteredRatings]);
+
+  // Prepare chart data - group by simulation count for multi-line chart
+  const chartData = useMemo(() => {
+    if (selectedSims !== 'all') {
+      // Single line
+      return chartRatings.map(r => ({
+        iteration: r.iteration,
+        elo: r.elo_rating,
+        version: r.model_version,
+      }));
+    }
+
+    // Multiple lines - one per simulation count
+    // Group ratings by iteration
+    const byIteration: Record<number, Record<number, number>> = {};
+    for (const r of ratings) {
+      if (!byIteration[r.iteration]) {
+        byIteration[r.iteration] = {};
+      }
+      byIteration[r.iteration][r.simulations] = r.elo_rating;
+    }
+
+    return Object.entries(byIteration)
+      .map(([iter, sims]) => ({
+        iteration: parseInt(iter),
+        ...Object.fromEntries(
+          Object.entries(sims).map(([s, elo]) => [`elo_${s}`, elo])
+        ),
+      }))
+      .sort((a, b) => a.iteration - b.iteration);
+  }, [selectedSims, chartRatings, ratings]);
+
+  // Filter matches by selected simulation count
+  const filteredMatches = useMemo(() => {
+    if (selectedSims === 'all') return matches.slice(0, 20);
+    return matches.filter(m => m.simulations === selectedSims).slice(0, 20);
+  }, [matches, selectedSims]);
+
+  // Colors for different simulation counts
+  const simColors: Record<number, string> = {
+    400: '#EF4444',
+    800: '#3B82F6',
+    1600: '#22C55E',
+    3200: '#F59E0B',
+  };
+
+  if (ratings.length === 0) {
+    return (
+      <div className="text-center text-gray-400 py-8">
+        <p className="text-xl mb-4">No arena data available</p>
+        <p className="text-sm">
+          Run the arena tournament to measure model strength:
+          <code className="bg-gray-700 px-2 py-1 rounded ml-2">
+            python scripts/run_arena.py --stride 10 --games 20
+          </code>
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      {/* Simulation Count Selector */}
+      <div className="flex items-center gap-4">
+        <span className="text-gray-400 text-sm">Search Depth:</span>
+        <select
+          value={selectedSims}
+          onChange={(e) => setSelectedSims(e.target.value === 'all' ? 'all' : parseInt(e.target.value))}
+          className="bg-gray-700 text-white rounded px-3 py-1 text-sm"
+        >
+          <option value="all">All Depths</option>
+          {simCounts.map(s => (
+            <option key={s} value={s}>{s} simulations</option>
+          ))}
+        </select>
+        <span className="text-gray-500 text-xs">
+          ({rankedRatings.length} models)
+        </span>
+      </div>
+
+      {/* ELO Chart */}
+      <ChartCard title={`ELO Rating Over Iterations${selectedSims !== 'all' ? ` (${selectedSims} sims)` : ''}`}>
+        <LineChart data={chartData}>
+          <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
+          <XAxis dataKey="iteration" stroke="#9CA3AF" type="number" domain={['dataMin', 'dataMax']} />
+          <YAxis stroke="#9CA3AF" domain={['auto', 'auto']} />
+          <Tooltip {...tooltipStyle} formatter={(v: number) => v?.toFixed(0)} />
+          <Legend />
+          <ReferenceLine y={1000} stroke="#6B7280" strokeDasharray="5 5" label={{ value: 'Anchor', fill: '#6B7280', fontSize: 10 }} />
+          {selectedSims !== 'all' ? (
+            <Line
+              type="monotone"
+              dataKey="elo"
+              stroke="#3B82F6"
+              strokeWidth={2}
+              dot={true}
+              name="ELO"
+            />
+          ) : (
+            simCounts.map(s => (
+              <Line
+                key={s}
+                type="monotone"
+                dataKey={`elo_${s}`}
+                stroke={simColors[s] || '#9CA3AF'}
+                strokeWidth={2}
+                dot={false}
+                name={`${s} sims`}
+                connectNulls
+              />
+            ))
+          )}
+        </LineChart>
+      </ChartCard>
+
+      {/* Rankings Table */}
+      <div className="bg-gray-700 rounded-lg p-4">
+        <h3 className="text-sm font-semibold text-white mb-3">
+          ELO Rankings {selectedSims !== 'all' && `(${selectedSims} sims)`}
+        </h3>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-gray-400 text-left">
+                <th className="pb-2 pr-4">Rank</th>
+                <th className="pb-2 pr-4">Model</th>
+                <th className="pb-2 pr-4">Iteration</th>
+                {selectedSims === 'all' && <th className="pb-2 pr-4">Sims</th>}
+                <th className="pb-2 pr-4">ELO</th>
+                <th className="pb-2">Games</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rankedRatings.slice(0, 20).map((rating, idx) => (
+                <tr key={`${rating.model_version}-${rating.simulations}`} className="text-gray-300 border-t border-gray-600">
+                  <td className="py-2 pr-4 text-gray-500">{idx + 1}</td>
+                  <td className="py-2 pr-4 font-mono text-xs">{rating.model_version}</td>
+                  <td className="py-2 pr-4">{rating.iteration}</td>
+                  {selectedSims === 'all' && <td className="py-2 pr-4">{rating.simulations}</td>}
+                  <td className="py-2 pr-4 font-semibold" style={{ color: rating.elo_rating >= 1000 ? '#22C55E' : '#EF4444' }}>
+                    {rating.elo_rating.toFixed(0)}
+                  </td>
+                  <td className="py-2">{rating.games_played}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* Recent Matches Table */}
+      {filteredMatches.length > 0 && (
+        <div className="bg-gray-700 rounded-lg p-4">
+          <h3 className="text-sm font-semibold text-white mb-3">
+            Recent Matches {selectedSims !== 'all' && `(${selectedSims} sims)`}
+          </h3>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-gray-400 text-left">
+                  <th className="pb-2 pr-4">Model 1</th>
+                  <th className="pb-2 pr-4">Result</th>
+                  <th className="pb-2 pr-4">Model 2</th>
+                  {selectedSims === 'all' && <th className="pb-2 pr-4">Sims</th>}
+                  <th className="pb-2">Win Rate</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filteredMatches.map((match, idx) => {
+                  const total = match.model1_wins + match.model2_wins + match.draws;
+                  const winRate1 = total > 0 ? (match.model1_wins / total * 100).toFixed(0) : '-';
+                  return (
+                    <tr key={idx} className="text-gray-300 border-t border-gray-600">
+                      <td className="py-2 pr-4 font-mono text-xs">{match.model1_version}</td>
+                      <td className="py-2 pr-4">
+                        <span className={match.model1_wins > match.model2_wins ? 'text-green-400' : 'text-gray-400'}>
+                          {match.model1_wins}
+                        </span>
+                        <span className="text-gray-500"> - </span>
+                        <span className={match.model2_wins > match.model1_wins ? 'text-green-400' : 'text-gray-400'}>
+                          {match.model2_wins}
+                        </span>
+                        {match.draws > 0 && (
+                          <span className="text-gray-500 ml-1">({match.draws}d)</span>
+                        )}
+                      </td>
+                      <td className="py-2 pr-4 font-mono text-xs">{match.model2_version}</td>
+                      {selectedSims === 'all' && <td className="py-2 pr-4">{match.simulations}</td>}
+                      <td className="py-2 text-gray-400">{winRate1}%</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Leaderboard Tab - Unified human/AI player rankings
+function LeaderboardTab({ players }: { players: PlayerProfile[] }) {
+  const [filterType, setFilterType] = useState<'all' | 'human' | 'ai'>('all');
+
+  // Filter players by type
+  const filteredPlayers = useMemo(() => {
+    if (filterType === 'all') return players;
+    return players.filter(p => p.player_type === filterType);
+  }, [players, filterType]);
+
+  // Separate stats
+  const humanCount = players.filter(p => p.player_type === 'human').length;
+  const aiCount = players.filter(p => p.player_type === 'ai').length;
+  const topElo = players.length > 0 ? Math.max(...players.map(p => p.elo_rating)) : 0;
+  const avgElo = players.length > 0
+    ? players.reduce((sum, p) => sum + p.elo_rating, 0) / players.length
+    : 0;
+
+  // Format player name based on type
+  const formatPlayerName = (player: PlayerProfile): string => {
+    if (player.player_type === 'ai') {
+      const modelPart = player.model_version || 'unknown';
+      const simsPart = player.simulations ? ` (${player.simulations}s)` : '';
+      return `${modelPart}${simsPart}`;
+    }
+    return player.display_name;
+  };
+
+  // Get ELO color
+  const getEloColor = (elo: number): string => {
+    if (elo >= 1200) return 'text-yellow-400';  // Gold
+    if (elo >= 1100) return 'text-purple-400';  // Purple
+    if (elo >= 1000) return 'text-green-400';   // Green
+    if (elo >= 900) return 'text-blue-400';     // Blue
+    return 'text-gray-400';                      // Gray
+  };
+
+  // Get player type badge
+  const getTypeBadge = (type: string) => {
+    if (type === 'human') {
+      return <span className="px-1.5 py-0.5 bg-blue-600 text-blue-100 rounded text-xs">Human</span>;
+    }
+    return <span className="px-1.5 py-0.5 bg-purple-600 text-purple-100 rounded text-xs">AI</span>;
+  };
+
+  if (players.length === 0) {
+    return (
+      <div className="text-center text-gray-400 py-8">
+        <p className="text-xl mb-4">No players yet</p>
+        <p className="text-sm">
+          Play some games to see the leaderboard!
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      {/* Summary Stats */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <div className="bg-gray-700 rounded-lg p-3">
+          <div className="text-xs text-gray-400">Total Players</div>
+          <div className="text-lg font-bold text-white">{players.length}</div>
+        </div>
+        <div className="bg-gray-700 rounded-lg p-3">
+          <div className="text-xs text-gray-400">Humans / AIs</div>
+          <div className="text-lg font-bold">
+            <span className="text-blue-400">{humanCount}</span>
+            <span className="text-gray-500"> / </span>
+            <span className="text-purple-400">{aiCount}</span>
+          </div>
+        </div>
+        <div className="bg-gray-700 rounded-lg p-3">
+          <div className="text-xs text-gray-400">Top ELO</div>
+          <div className="text-lg font-bold text-yellow-400">{topElo.toFixed(0)}</div>
+        </div>
+        <div className="bg-gray-700 rounded-lg p-3">
+          <div className="text-xs text-gray-400">Average ELO</div>
+          <div className="text-lg font-bold text-gray-300">{avgElo.toFixed(0)}</div>
+        </div>
+      </div>
+
+      {/* Filter Controls */}
+      <div className="flex items-center gap-4">
+        <span className="text-gray-400 text-sm">Filter:</span>
+        <div className="flex gap-2">
+          {(['all', 'human', 'ai'] as const).map(type => (
+            <button
+              key={type}
+              onClick={() => setFilterType(type)}
+              className={`px-3 py-1 rounded text-sm ${
+                filterType === type
+                  ? 'bg-blue-600 text-white'
+                  : 'bg-gray-700 text-gray-400 hover:text-white'
+              }`}
+            >
+              {type === 'all' ? 'All' : type === 'human' ? 'Humans' : 'AIs'}
+            </button>
+          ))}
+        </div>
+        <span className="text-gray-500 text-xs ml-2">
+          ({filteredPlayers.length} players)
+        </span>
+      </div>
+
+      {/* Leaderboard Table */}
+      <div className="bg-gray-700 rounded-lg p-4">
+        <h3 className="text-sm font-semibold text-white mb-3">
+          ELO Leaderboard
+        </h3>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-gray-400 text-left">
+                <th className="pb-2 pr-4 w-12">Rank</th>
+                <th className="pb-2 pr-4">Player</th>
+                <th className="pb-2 pr-4 w-20">Type</th>
+                <th className="pb-2 pr-4 w-20 text-right">ELO</th>
+                <th className="pb-2 w-20 text-right">Games</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filteredPlayers.map((player, idx) => (
+                <tr key={player.player_id} className="text-gray-300 border-t border-gray-600">
+                  <td className="py-2 pr-4 text-gray-500">
+                    {idx === 0 && filteredPlayers.length > 2 && <span className="text-yellow-400">1</span>}
+                    {idx === 1 && filteredPlayers.length > 2 && <span className="text-gray-300">2</span>}
+                    {idx === 2 && filteredPlayers.length > 2 && <span className="text-orange-400">3</span>}
+                    {(idx > 2 || filteredPlayers.length <= 2) && idx + 1}
+                  </td>
+                  <td className="py-2 pr-4">
+                    <span className={player.player_type === 'ai' ? 'font-mono text-xs' : ''}>
+                      {formatPlayerName(player)}
+                    </span>
+                  </td>
+                  <td className="py-2 pr-4">
+                    {getTypeBadge(player.player_type)}
+                  </td>
+                  <td className={`py-2 pr-4 font-semibold text-right ${getEloColor(player.elo_rating)}`}>
+                    {player.elo_rating.toFixed(0)}
+                  </td>
+                  <td className="py-2 text-right text-gray-400">
+                    {player.elo_games_played}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* ELO Distribution Info */}
+      <div className="bg-gray-700 rounded-lg p-4 text-sm text-gray-400">
+        <h4 className="font-semibold text-white mb-2">ELO Rating Guide</h4>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+          <div><span className="text-yellow-400">1200+</span> - Elite</div>
+          <div><span className="text-purple-400">1100-1199</span> - Expert</div>
+          <div><span className="text-green-400">1000-1099</span> - Skilled</div>
+          <div><span className="text-blue-400">900-999</span> - Intermediate</div>
+        </div>
+        <p className="mt-2 text-xs">
+          All players start at 1000 ELO. Win against stronger opponents to gain more rating.
+        </p>
+      </div>
     </div>
   );
 }

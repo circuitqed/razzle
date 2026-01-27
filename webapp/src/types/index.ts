@@ -157,10 +157,12 @@ export interface TrainingMetrics {
   policy_legal_mass: number | null;
   policy_ebf: number | null;
   policy_confidence: number | null;
-  // Value metrics
+  // Value metrics (validation - computed on unseen games before training)
   value_mean: number | null;
   value_std: number | null;
   value_extremity: number | null;
+  value_mse: number | null;  // True validation MSE
+  value_sign_accuracy: number | null;  // How often prediction sign matches outcome
   value_calibration_error: number | null;
   // Pass metrics
   pass_decision_rate: number | null;
@@ -213,4 +215,80 @@ export interface TrainingDashboardData {
   latest_model: ModelInfo | null;
   workers: Record<string, WorkerInfo>;
   models: ModelInfo[];
+}
+
+// --- Arena Types ---
+
+export interface ArenaMatch {
+  id?: number;
+  model1_version: string;
+  model2_version: string;
+  model1_wins: number;
+  model2_wins: number;
+  draws: number;
+  simulations: number;
+  created_at?: string;
+}
+
+export interface ArenaRating {
+  id?: number;
+  model_version: string;
+  iteration: number;
+  simulations: number;
+  elo_rating: number;
+  games_played: number;
+  last_updated?: string;
+}
+
+export interface ArenaMatchesResponse {
+  matches: ArenaMatch[];
+  count: number;
+}
+
+export interface ArenaRatingsResponse {
+  ratings: ArenaRating[];
+  count: number;
+}
+
+// --- Player Profile/Leaderboard Types ---
+// Note: 'Player' is already defined as 0 | 1 for game player index
+// So we use 'PlayerProfile' for the user/AI profile type
+
+export interface PlayerProfile {
+  player_id: string;
+  player_type: 'human' | 'ai';
+  user_id?: string | null;
+  model_version?: string | null;
+  simulations?: number | null;
+  display_name: string;
+  elo_rating: number;
+  elo_games_played: number;
+  created_at: string;
+}
+
+export interface PlayerProfileWithGames extends PlayerProfile {
+  recent_games: PlayerGameSummary[];
+}
+
+export interface PlayerGameSummary {
+  game_id: string;
+  player1_player_id: string | null;
+  player2_player_id: string | null;
+  player1_name: string | null;
+  player2_name: string | null;
+  player1_elo: number | null;
+  player2_elo: number | null;
+  winner: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PlayersListResponse {
+  players: PlayerProfile[];
+  count: number;
+}
+
+export interface LeaderboardResponse {
+  players: PlayerProfile[];
+  count: number;
 }

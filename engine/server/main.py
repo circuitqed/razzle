@@ -316,10 +316,12 @@ class TrainingMetricsData(BaseModel):
     policy_legal_mass: Optional[float] = None
     policy_ebf: Optional[float] = None
     policy_confidence: Optional[float] = None
-    # Value metrics
+    # Value metrics (validation - computed before training on unseen games)
     value_mean: Optional[float] = None
     value_std: Optional[float] = None
     value_extremity: Optional[float] = None
+    value_mse: Optional[float] = None  # True validation MSE
+    value_sign_accuracy: Optional[float] = None  # Sign match rate
     value_calibration_error: Optional[float] = None
     # Pass metrics
     pass_decision_rate: Optional[float] = None
@@ -386,6 +388,10 @@ class Game:
         self.time_control = time_control
         self.websockets: list[WebSocket] = []
 
+        # Player IDs for ELO tracking (set when game starts)
+        self.player_ids: list[Optional[str]] = [None, None]
+        self.elo_updated: bool = False  # Track if ELO has been updated for this game
+
         # Create time managers if time control is enabled
         self.time_managers: list[Optional[TimeManager]] = [None, None]
         if time_control is not None:
@@ -430,6 +436,84 @@ class Game:
             time_control=self.time_control,
             time_remaining=time_remaining
         )
+
+    def check_and_update_elo(self) -> Optional[tuple[float, float]]:
+        """
+        Check if game is over and update ELO ratings.
+
+        Returns tuple of (p1_new_rating, p2_new_rating) if updated, None otherwise.
+        """
+        if self.elo_updated:
+            return None
+
+        if not self.state.is_terminal():
+            return None
+
+        # Need both player IDs to update ELO
+        if not self.player_ids[0] or not self.player_ids[1]:
+            return None
+
+        winner = self.state.get_winner()
+
+        try:
+            new_r1, new_r2 = persistence.apply_elo_update(
+                self.player_ids[0],
+                self.player_ids[1],
+                winner
+            )
+            self.elo_updated = True
+
+            # Update game record with winner
+            persistence.update_game_result(
+                self.game_id,
+                winner=winner,
+                player1_player_id=self.player_ids[0],
+                player2_player_id=self.player_ids[1]
+            )
+
+            logging.info(f"Game {self.game_id} ended. Winner: {winner}. "
+                        f"ELO: {self.player_ids[0]}={new_r1:.0f}, {self.player_ids[1]}={new_r2:.0f}")
+            return (new_r1, new_r2)
+        except Exception as e:
+            logging.error(f"Failed to update ELO for game {self.game_id}: {e}")
+            return None
+
+
+def setup_game_players(
+    game: Game,
+    user: Optional[dict],
+    model_version: Optional[str]
+) -> None:
+    """
+    Set up player IDs for a game based on player types.
+
+    Args:
+        game: The game to set up
+        user: Current authenticated user (for human player 1)
+        model_version: AI model version being used
+    """
+    # Player 1 (usually human)
+    if game.player_types[0] == "human":
+        if user:
+            player1 = persistence.get_or_create_human_player(
+                user["user_id"],
+                user.get("display_name") or user.get("username")
+            )
+            game.player_ids[0] = player1["player_id"]
+        # Else: anonymous human, no ELO tracking
+    elif game.player_types[0] == "ai":
+        if model_version:
+            player1 = persistence.get_or_create_ai_player(model_version, game.ai_simulations)
+            game.player_ids[0] = player1["player_id"]
+
+    # Player 2 (usually AI)
+    if game.player_types[1] == "ai":
+        if model_version:
+            player2 = persistence.get_or_create_ai_player(model_version, game.ai_simulations)
+            game.player_ids[1] = player2["player_id"]
+    elif game.player_types[1] == "human":
+        # Human vs human - would need second user to join
+        pass
 
 
 # Global game storage (in production, use Redis or database)
@@ -1285,6 +1369,9 @@ async def create_game(
     # Get current model version (only relevant for neural bot type)
     model_version = get_model_info() if bot_type == "neural" else None
 
+    # Set up player IDs for ELO tracking
+    setup_game_players(game, user, model_version)
+
     # Persist to database
     persistence.save_game(
         game_id=game_id,
@@ -1296,6 +1383,15 @@ async def create_game(
         ai_model_version=model_version if request.player2_type == "ai" else None,
         bot_type=bot_type,
     )
+
+    # Update game record with player IDs
+    if game.player_ids[0] or game.player_ids[1]:
+        persistence.update_game_result(
+            game_id,
+            winner=None,
+            player1_player_id=game.player_ids[0],
+            player2_player_id=game.player_ids[1]
+        )
 
     return CreateGameResponse(game_id=game_id)
 
@@ -1339,6 +1435,9 @@ async def make_move(
     # Persist state and record move
     persistence.save_game(game_id, game.state)
     persistence.append_move(game_id, request.move)
+
+    # Check for game over and update ELO
+    game.check_and_update_elo()
 
     # Notify WebSocket clients
     response = game.to_response()
@@ -1485,6 +1584,9 @@ async def get_ai_move(
     # Persist state and record move
     persistence.save_game(game_id, game.state)
     persistence.append_move(game_id, move)
+
+    # Check for game over and update ELO
+    game.check_and_update_elo()
 
     # Notify WebSocket clients
     game_response = game.to_response()
@@ -1876,6 +1978,342 @@ async def convert_move(encoded: Optional[int] = None, algebraic: Optional[str] =
         raise HTTPException(status_code=400, detail="Provide either 'encoded' or 'algebraic' parameter")
 
 
+# --- Arena API Models ---
+
+class ArenaMatchData(BaseModel):
+    """Arena match result data."""
+    id: Optional[int] = None
+    model1_version: str
+    model2_version: str
+    model1_wins: int
+    model2_wins: int
+    draws: int
+    simulations: int = 800
+    created_at: Optional[str] = None
+
+
+class ArenaRatingData(BaseModel):
+    """Arena ELO rating data."""
+    id: Optional[int] = None
+    model_version: str
+    iteration: int
+    simulations: int = 800
+    elo_rating: float = 1000.0
+    games_played: int = 0
+    last_updated: Optional[str] = None
+
+
+class ArenaMatchesResponse(BaseModel):
+    """Response with arena matches."""
+    matches: list[ArenaMatchData]
+    count: int
+
+
+class ArenaRatingsResponse(BaseModel):
+    """Response with arena ratings."""
+    ratings: list[ArenaRatingData]
+    count: int
+
+
+class ArenaSubmitMatchRequest(BaseModel):
+    """Request to submit an arena match result."""
+    model1_version: str
+    model2_version: str
+    model1_wins: int
+    model2_wins: int
+    draws: int
+    simulations: int = 800
+
+
+class ArenaSubmitMatchResponse(BaseModel):
+    """Response after submitting arena match."""
+    id: int
+    status: str = "accepted"
+
+
+class ArenaSubmitRatingRequest(BaseModel):
+    """Request to submit/update an arena rating."""
+    model_version: str
+    iteration: int
+    simulations: int = 800
+    elo_rating: float
+    games_played: int
+
+
+class ArenaSubmitRatingResponse(BaseModel):
+    """Response after submitting arena rating."""
+    id: int
+    status: str = "accepted"
+
+
+class ArenaComputeRequest(BaseModel):
+    """Request to compute ELO ratings."""
+    anchor_model: str = "initial"
+    simulations: Optional[int] = None
+
+
+class ArenaClearResponse(BaseModel):
+    """Response after clearing arena data."""
+    matches_deleted: int
+    ratings_deleted: int
+
+
+# --- Arena API Endpoints ---
+
+@app.get("/arena/matches", response_model=ArenaMatchesResponse)
+async def get_arena_matches(
+    model: Optional[str] = None,
+    simulations: Optional[int] = None,
+    limit: int = 100,
+):
+    """
+    Get arena match history.
+
+    Args:
+        model: Filter to matches involving this model
+        simulations: Filter by simulation count
+        limit: Maximum number of matches to return
+    """
+    matches = persistence.get_arena_matches(
+        model_version=model,
+        simulations=simulations,
+        limit=limit,
+    )
+
+    return ArenaMatchesResponse(
+        matches=[ArenaMatchData(**m) for m in matches],
+        count=len(matches),
+    )
+
+
+@app.post("/arena/matches", response_model=ArenaSubmitMatchResponse)
+async def submit_arena_match(request: ArenaSubmitMatchRequest):
+    """Submit an arena match result."""
+    match_id = persistence.save_arena_match(
+        model1_version=request.model1_version,
+        model2_version=request.model2_version,
+        model1_wins=request.model1_wins,
+        model2_wins=request.model2_wins,
+        draws=request.draws,
+        simulations=request.simulations,
+    )
+
+    return ArenaSubmitMatchResponse(id=match_id, status="accepted")
+
+
+@app.get("/arena/ratings", response_model=ArenaRatingsResponse)
+async def get_arena_ratings(
+    simulations: Optional[int] = None,
+    limit: int = 100,
+):
+    """
+    Get arena ELO ratings sorted by rating (descending).
+
+    Args:
+        simulations: Filter by simulation count (None = all)
+        limit: Maximum number of ratings to return
+    """
+    ratings = persistence.get_arena_ratings(
+        simulations=simulations,
+        limit=limit,
+    )
+
+    return ArenaRatingsResponse(
+        ratings=[ArenaRatingData(**r) for r in ratings],
+        count=len(ratings),
+    )
+
+
+@app.post("/arena/ratings", response_model=ArenaSubmitRatingResponse)
+async def submit_arena_rating(request: ArenaSubmitRatingRequest):
+    """Submit or update an arena ELO rating."""
+    rating_id = persistence.save_arena_rating(
+        model_version=request.model_version,
+        iteration=request.iteration,
+        elo_rating=request.elo_rating,
+        games_played=request.games_played,
+        simulations=request.simulations,
+    )
+
+    return ArenaSubmitRatingResponse(id=rating_id, status="accepted")
+
+
+@app.post("/arena/compute")
+async def compute_arena_ratings(request: ArenaComputeRequest = None):
+    """
+    Recompute all ELO ratings from match history.
+
+    Args:
+        anchor_model: Model to anchor at 1000 ELO (default: "initial")
+        simulations: Compute only for this simulation count (None = all)
+    """
+    if request is None:
+        request = ArenaComputeRequest()
+
+    from razzle.training.elo import compute_all_ratings, get_iteration_from_version
+
+    # Get all simulation counts or just the specified one
+    if request.simulations is not None:
+        sim_counts = [request.simulations]
+    else:
+        all_matches = persistence.get_all_arena_matches()
+        sim_counts = list(set(m["simulations"] for m in all_matches))
+        sim_counts.sort()
+
+    results = {}
+    for sims in sim_counts:
+        matches = persistence.get_all_arena_matches(simulations=sims)
+        if not matches:
+            continue
+
+        ratings = compute_all_ratings(matches, anchor_model=request.anchor_model)
+
+        # Save ratings to database
+        for version, rating in ratings.items():
+            iteration = get_iteration_from_version(version)
+            persistence.save_arena_rating(
+                model_version=version,
+                iteration=iteration,
+                elo_rating=rating.rating,
+                games_played=rating.games_played,
+                simulations=sims,
+            )
+
+        results[sims] = {
+            version: {"elo": rating.rating, "games": rating.games_played}
+            for version, rating in ratings.items()
+        }
+
+    return {
+        "status": "computed",
+        "simulation_counts": sim_counts,
+        "ratings": results,
+    }
+
+
+@app.delete("/arena/clear", response_model=ArenaClearResponse)
+async def clear_arena_data():
+    """Clear all arena matches and ratings."""
+    result = persistence.clear_arena_data()
+    return ArenaClearResponse(**result)
+
+
+# --- Player/Leaderboard API Models ---
+
+class PlayerData(BaseModel):
+    """Player data (human or AI)."""
+    player_id: str
+    player_type: str  # 'human' or 'ai'
+    user_id: Optional[str] = None
+    model_version: Optional[str] = None
+    simulations: Optional[int] = None
+    display_name: str
+    elo_rating: float
+    elo_games_played: int
+    created_at: str
+
+
+class PlayerWithGamesData(PlayerData):
+    """Player data with recent games."""
+    recent_games: list[dict] = []
+
+
+class PlayersListResponse(BaseModel):
+    """Response with list of players."""
+    players: list[PlayerData]
+    count: int
+
+
+class LeaderboardResponse(BaseModel):
+    """Leaderboard response."""
+    players: list[PlayerData]
+    count: int
+
+
+# --- Player/Leaderboard API Endpoints ---
+
+@app.get("/players", response_model=PlayersListResponse)
+async def list_players(
+    player_type: Optional[str] = None,
+    limit: int = 100,
+    min_games: int = 0,
+):
+    """
+    List all players.
+
+    Args:
+        player_type: Filter by 'human' or 'ai' (None = all)
+        limit: Maximum number of players to return
+        min_games: Minimum games played to be included
+    """
+    if player_type and player_type not in ("human", "ai"):
+        raise HTTPException(status_code=400, detail="player_type must be 'human' or 'ai'")
+
+    players = persistence.get_leaderboard(
+        player_type=player_type,
+        limit=limit,
+        min_games=min_games,
+    )
+
+    return PlayersListResponse(
+        players=[PlayerData(**p) for p in players],
+        count=len(players),
+    )
+
+
+@app.get("/players/{player_id}", response_model=PlayerWithGamesData)
+async def get_player(player_id: str, include_games: bool = True, games_limit: int = 20):
+    """
+    Get a player by ID with optional recent games.
+
+    Args:
+        player_id: The player ID
+        include_games: Whether to include recent games (default: True)
+        games_limit: Maximum recent games to include (default: 20)
+    """
+    player = persistence.get_player(player_id)
+    if player is None:
+        raise HTTPException(status_code=404, detail="Player not found")
+
+    recent_games = []
+    if include_games:
+        recent_games = persistence.get_player_recent_games(player_id, limit=games_limit)
+
+    return PlayerWithGamesData(
+        **player,
+        recent_games=recent_games,
+    )
+
+
+@app.get("/leaderboard", response_model=LeaderboardResponse)
+async def get_leaderboard(
+    player_type: Optional[str] = None,
+    limit: int = 50,
+    min_games: int = 1,
+):
+    """
+    Get the ELO leaderboard.
+
+    Args:
+        player_type: Filter by 'human' or 'ai' (None = all)
+        limit: Maximum number of players to return (default: 50)
+        min_games: Minimum games played to be included (default: 1)
+    """
+    if player_type and player_type not in ("human", "ai"):
+        raise HTTPException(status_code=400, detail="player_type must be 'human' or 'ai'")
+
+    players = persistence.get_leaderboard(
+        player_type=player_type,
+        limit=limit,
+        min_games=min_games,
+    )
+
+    return LeaderboardResponse(
+        players=[PlayerData(**p) for p in players],
+        count=len(players),
+    )
+
+
 # --- WebSocket ---
 
 async def broadcast_state(game: Game, state: GameStateResponse):
@@ -1961,6 +2399,10 @@ async def websocket_endpoint(websocket: WebSocket, game_id: str):
                 game.state.apply_move(move)
                 persistence.save_game(game_id, game.state)  # Persist state
                 persistence.append_move(game_id, move)  # Record move
+
+                # Check for game over and update ELO
+                game.check_and_update_elo()
+
                 response = game.to_response()
                 await broadcast_state(game, response)
 
@@ -1990,6 +2432,10 @@ async def websocket_endpoint(websocket: WebSocket, game_id: str):
                 game.state.apply_move(move)
                 persistence.save_game(game_id, game.state)  # Persist state
                 persistence.append_move(game_id, move)  # Record move
+
+                # Check for game over and update ELO
+                game.check_and_update_elo()
+
                 response = game.to_response()
                 await broadcast_state(game, response)
 
