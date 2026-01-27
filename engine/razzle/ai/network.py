@@ -33,8 +33,8 @@ class NetworkConfig:
     num_filters: int = 64
     num_blocks: int = 6
     policy_filters: int = 2
-    value_filters: int = 1
-    value_hidden: int = 64
+    value_filters: int = 32   # Increased from 1 for stronger value head
+    value_hidden: int = 256   # Increased from 64 for stronger value head
 
 
 class ResidualBlock(nn.Module):
