@@ -35,6 +35,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from razzle.ai.network import RazzleNet, create_network, NUM_ACTIONS, END_TURN_ACTION
 from razzle.core.state import GameState
 from razzle.core.moves import get_legal_moves
+from razzle.core.symmetry import rotate_policy_180
 from razzle.training.trainer import Trainer as NetworkTrainer, TrainingConfig
 from razzle.training.api_client import TrainingAPIClient, TrainingGame
 from razzle.training.replay_buffer import ReplayBuffer
@@ -42,6 +43,7 @@ from razzle.training.metrics import (
     compute_policy_metrics, compute_value_metrics,
     compute_value_calibration, compute_calibration_error, compute_pass_stats
 )
+from razzle.training.game_archive import GameArchive
 
 
 def compute_difficulty_target(raw_policy: np.ndarray, mcts_policy: np.ndarray) -> float:
@@ -75,6 +77,7 @@ def games_to_training_data(
     temperature: float = 1.0,
     network: Optional[RazzleNet] = None,
     device: str = 'cpu',
+    value_discount: float = 0.995,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, Optional[np.ndarray]]:
     """
     Convert API games to training arrays.
@@ -93,6 +96,10 @@ def games_to_training_data(
         network: Optional network for computing difficulty targets.
                  If provided, computes KL divergence between raw and MCTS policies.
         device: Device for network inference when computing difficulty.
+        value_discount: Temporal discount for value targets (default 0.99).
+                       Early positions get softer targets: v = result * discount^(L-t)
+                       where L is game length and t is position index.
+                       Set to 1.0 to disable (all positions get ±1).
 
     Returns (states, policies, values, legal_masks, difficulties) arrays.
             difficulties is None if network is not provided.
@@ -150,7 +157,8 @@ def games_to_training_data(
             state.apply_move(move)
 
         # Calculate values for each position using ACTUAL player
-        for i in range(len(states)):
+        game_length = len(states)
+        for i in range(game_length):
             player_to_move = players[i]  # Use tracked player, NOT i % 2
 
             # Value from perspective of player to move
@@ -163,10 +171,26 @@ def games_to_training_data(
                 # Player 1 was to move; flip the result
                 value = -game.result
 
-            all_states.append(states[i])
-            all_policies.append(policies[i])
+            # Clip to ±0.99 to avoid tanh saturation (tanh(±3) ≈ ±0.995)
+            value = max(-0.99, min(0.99, value))
+
+            # Apply temporal discount if enabled (disabled by default)
+            if value_discount < 1.0:
+                moves_to_end = game_length - i - 1
+                discount_factor = value_discount ** moves_to_end
+                value = value * discount_factor
+
+            # State tensor from to_tensor() is already normalized (rotated for player 1)
+            # But policy and legal_mask from MCTS are in original coordinates,
+            # so we need to rotate them for player 1 to match the state orientation
+            all_states.append(states[i])  # Already normalized by to_tensor()
+            if player_to_move == 1:
+                all_policies.append(rotate_policy_180(policies[i]))
+                all_legal_masks.append(rotate_policy_180(legal_masks[i]))
+            else:
+                all_policies.append(policies[i])
+                all_legal_masks.append(legal_masks[i])
             all_values.append(value)
-            all_legal_masks.append(legal_masks[i])
 
     # Compute difficulty targets if network provided
     if network is not None and all_states:
@@ -212,7 +236,7 @@ class DistributedTrainer:
         threshold: int = 50,
         poll_interval: int = 30,
         epochs: int = 10,
-        batch_size: int = 512,  # Increased from 256
+        batch_size: int = 2048,  # AlphaZero-scale batch size
         learning_rate: float = 0.001,  # Starting LR (proven to work well)
         filters: int = 64,
         blocks: int = 6,
@@ -254,7 +278,10 @@ class DistributedTrainer:
         self.games_log_path = self.output_dir / 'games_log.jsonl'
 
         # Replay buffer for preventing catastrophic forgetting
-        self.replay_buffer = ReplayBuffer(max_positions=100_000)
+        self.replay_buffer = ReplayBuffer(max_positions=500_000)
+
+        # Game archive for permanent storage of training data
+        self.game_archive = GameArchive(archive_dir=str(self.output_dir / 'games_archive'))
 
         # Checkpoint gating - track best model
         self.best_model_path: Optional[Path] = None
@@ -344,10 +371,12 @@ class DistributedTrainer:
             'policy_legal_mass': metrics.get('policy_legal_mass'),
             'policy_ebf': metrics.get('policy_ebf'),
             'policy_confidence': metrics.get('policy_confidence'),
-            # Value metrics
+            # Value metrics (validation - computed before training)
             'value_mean': metrics.get('value_mean'),
             'value_std': metrics.get('value_std'),
             'value_extremity': metrics.get('value_extremity'),
+            'value_mse': metrics.get('value_mse'),  # True validation MSE
+            'value_sign_accuracy': metrics.get('value_sign_accuracy'),  # Sign match rate
             'value_calibration_error': metrics.get('value_calibration_error'),
             # Pass metrics
             'pass_decision_rate': metrics.get('pass_decision_rate'),
@@ -414,7 +443,7 @@ class DistributedTrainer:
                 legal_masks = data['legal_masks'] if 'legal_masks' in data and data['legal_masks'] is not None else None
 
                 # Reconstruct replay buffer
-                self.replay_buffer = ReplayBuffer(max_positions=100_000)
+                self.replay_buffer = ReplayBuffer(max_positions=500_000)
                 if legal_masks is not None:
                     self.replay_buffer.add(states, policies, values, legal_masks)
                 else:
@@ -451,12 +480,40 @@ class DistributedTrainer:
             games,
             network=self.network,
             device=self.device,
+            value_discount=1.0,  # No discount - use raw game outcomes (±1)
         )
         new_examples = len(states)
         print(f"[Trainer] New training examples: {new_examples}")
+
+        # Archive training data for permanent storage
+        try:
+            game_results = [g.result for g in games]
+            model_version = f"iter_{self.iteration + 1:03d}"
+            batch_id = self.game_archive.archive_games(
+                states=states,
+                policies=policies,
+                values=values,
+                legal_masks=legal_masks,
+                model_version=model_version,
+                num_games=len(games),
+                game_results=game_results,
+                simulations=800,  # TODO: get from game metadata
+            )
+            archive_stats = self.game_archive.get_stats()
+            print(f"[Trainer] Archived to {batch_id} "
+                  f"(total: {archive_stats['total_games']:,} games, "
+                  f"{archive_stats['total_examples']:,} examples)")
+        except Exception as e:
+            print(f"[Trainer] Warning: Failed to archive games: {e}")
         if difficulties is not None:
             avg_difficulty = difficulties.mean()
             print(f"[Trainer] Average difficulty target: {avg_difficulty:.3f}")
+
+        # Compute VALIDATION metrics BEFORE training (network hasn't seen these games yet)
+        # This gives us true generalization metrics, not training metrics
+        validation_metrics = self._compute_validation_metrics(
+            states, policies, values, legal_masks
+        )
 
         # Add new positions to replay buffer
         self.replay_buffer.add(states, policies, values, legal_masks)
@@ -464,7 +521,8 @@ class DistributedTrainer:
 
         # Sample from buffer (50% new, 50% buffer) if buffer has enough data
         if len(self.replay_buffer) > 1000:
-            buf_states, buf_policies, buf_values, buf_masks = self.replay_buffer.sample(new_examples)
+            buffer_samples = new_examples  # 50% new / 50% buffer ratio
+            buf_states, buf_policies, buf_values, buf_masks = self.replay_buffer.sample(buffer_samples)
             states = np.concatenate([states, buf_states])
             policies = np.concatenate([policies, buf_policies])
             values = np.concatenate([values, buf_values])
@@ -472,7 +530,7 @@ class DistributedTrainer:
                 legal_masks = np.concatenate([legal_masks, buf_masks])
             # Disable difficulty prediction when using buffer (sizes don't match)
             difficulties = None
-            print(f"[Trainer] Training on {len(states)} examples ({new_examples} new + {len(buf_states)} from buffer)")
+            print(f"[Trainer] Training on {len(states)} examples ({new_examples} new + {len(buf_states)} from buffer, {100*new_examples/len(states):.0f}%/{100*len(buf_states)/len(states):.0f}%)")
 
         # Reuse trainer to preserve optimizer momentum across iterations
         history = self.network_trainer.train(
@@ -482,24 +540,46 @@ class DistributedTrainer:
             verbose=True
         )
 
-        # Get final metrics
-        final = history[-1] if history else {}
+        # Get final epoch training metrics (after training on this data)
+        # This shows how well the network fit the training data.
+        # Compare with validation_metrics (computed BEFORE training) to see
+        # the generalization gap - as training improves, these should converge.
+        final_epoch = history[-1] if history else {}
 
-        # Compute additional metrics after training (pass games for pass stats)
-        extended_metrics = self._compute_extended_metrics(
-            states, policies, values, legal_masks, games=games
-        )
+        # Compute pass stats from games
+        pass_decision_rate = None
+        avg_game_length = None
+        if games:
+            total_pass_decisions = 0
+            total_knight_decisions = 0
+            total_length = 0
+            for game in games:
+                stats = compute_pass_stats(game.moves)
+                total_pass_decisions += stats['pass_decisions']
+                total_knight_decisions += stats['knight_decisions']
+                total_length += len(game.moves)
+            total_decisions = total_pass_decisions + total_knight_decisions
+            if total_decisions > 0:
+                pass_decision_rate = total_pass_decisions / total_decisions
+            avg_game_length = total_length / len(games) if games else 0
 
         return {
             'games': len(games),
             'examples': len(states),
-            'final_loss': final.get('loss', 0),
-            'final_policy_loss': final.get('policy_loss', 0),
-            'final_value_loss': final.get('value_loss', 0),
-            'final_difficulty_loss': final.get('difficulty_loss', 0),
-            'final_illegal_penalty': final.get('illegal_penalty', 0),
+            # Training loss (from final epoch, after fitting this data)
+            # Compare with validation metrics to see generalization gap
+            'final_loss': final_epoch.get('loss', 0),
+            'final_policy_loss': final_epoch.get('policy_loss', 0),
+            'final_value_loss': final_epoch.get('value_loss', 0),
+            'final_difficulty_loss': final_epoch.get('difficulty_loss', 0),
+            'final_illegal_penalty': final_epoch.get('illegal_penalty', 0),
             'epochs': len(history),
-            **extended_metrics,
+            # Validation metrics (computed BEFORE training on these games)
+            # These show true generalization to unseen data
+            **validation_metrics,
+            # Game stats
+            'pass_decision_rate': pass_decision_rate,
+            'avg_game_length': avg_game_length,
         }
 
     def _compute_extended_metrics(
@@ -581,6 +661,69 @@ class DistributedTrainer:
             'value_calibration_error': calibration_error,
             'pass_decision_rate': pass_decision_rate,
             'avg_game_length': avg_game_length,
+        }
+
+    def _compute_validation_metrics(
+        self,
+        states: np.ndarray,
+        policies: np.ndarray,
+        values: np.ndarray,
+        legal_masks: Optional[np.ndarray],
+    ) -> dict:
+        """
+        Compute validation metrics BEFORE training on these games.
+
+        This measures how well the current network generalizes to unseen data,
+        giving true validation metrics rather than training metrics.
+        """
+        states_tensor = torch.from_numpy(states).to(self.device)
+
+        self.network.eval()
+        with torch.no_grad():
+            pred_logits, pred_values, _ = self.network(states_tensor)
+            pred_values = pred_values.squeeze(-1).cpu().numpy()
+
+        # Policy metrics
+        policy_metrics = compute_policy_metrics(
+            pred_logits.cpu().numpy(),
+            policies,
+            legal_masks,
+        )
+
+        # Value metrics
+        value_metrics = compute_value_metrics(pred_values)
+
+        # Value MSE (the key validation metric)
+        value_mse = float(np.mean((pred_values - values) ** 2))
+
+        # Sign accuracy: how often does prediction sign match target sign?
+        sign_match = np.sign(pred_values) == np.sign(values)
+        sign_accuracy = float(np.mean(sign_match))
+
+        # Calibration
+        calibration = compute_value_calibration(pred_values, values)
+        calibration_error = compute_calibration_error(calibration)
+
+        print(f"[Trainer] Validation metrics (before training):")
+        print(f"  Policy top-1: {policy_metrics.top1_accuracy*100:.1f}%, "
+              f"top-3: {policy_metrics.top3_accuracy*100:.1f}%")
+        print(f"  Value MSE: {value_mse:.4f}, sign accuracy: {sign_accuracy*100:.1f}%")
+        print(f"  Value mean: {value_metrics.mean:+.3f}, extremity: {value_metrics.extremity:.3f}")
+        print(f"  Calibration error: {calibration_error:.4f}")
+
+        return {
+            'policy_top1_accuracy': policy_metrics.top1_accuracy,
+            'policy_top3_accuracy': policy_metrics.top3_accuracy,
+            'policy_entropy': policy_metrics.entropy,
+            'policy_legal_mass': policy_metrics.legal_mass,
+            'policy_ebf': policy_metrics.effective_branching_factor,
+            'policy_confidence': policy_metrics.policy_confidence,
+            'value_mean': value_metrics.mean,
+            'value_std': value_metrics.std,
+            'value_extremity': value_metrics.extremity,
+            'value_mse': value_mse,  # True validation MSE
+            'value_sign_accuracy': sign_accuracy,  # New: sign match rate
+            'value_calibration_error': calibration_error,
         }
 
     def validate_model(
@@ -763,8 +906,8 @@ def main():
                         help='Seconds between checking for games')
     parser.add_argument('--epochs', type=int, default=10,
                         help='Training epochs per iteration')
-    parser.add_argument('--batch-size', type=int, default=512,
-                        help='Training batch size (default: 512)')
+    parser.add_argument('--batch-size', type=int, default=2048,
+                        help='Training batch size (default: 2048)')
     parser.add_argument('--learning-rate', type=float, default=0.001,
                         help='Initial learning rate (default: 0.001)')
     parser.add_argument('--filters', type=int, default=None,
