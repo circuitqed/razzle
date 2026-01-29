@@ -55,7 +55,7 @@ New `/training/metrics` endpoints store and serve historical metrics. Dashboard 
 | Games per iteration | 50 | Train frequently |
 | Policy weight | 1.0 | Standard |
 | Value weight (quadratic) | 1.0 | Standard MSE |
-| Value weight (quartic) | 0.25 | Calibration penalty |
+| Value weight (quartic) | 0| Calibration penalty |
 | Difficulty weight | 0.5 | Auxiliary task |
 | Illegal penalty | 1.0 | Lagrange multiplier |
 
@@ -64,7 +64,7 @@ New `/training/metrics` endpoints store and serve historical metrics. Dashboard 
 |-----------|-------|
 | Workers | 4-8 |
 | Workers per instance | 3 |
-| GPU type | RTX 3060 or better |
+| GPU type | RTX 3060  |
 | Max price | $0.15/hr |
 
 ## Pre-Flight Checklist
