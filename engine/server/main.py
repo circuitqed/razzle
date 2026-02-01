@@ -46,7 +46,7 @@ from . import persistence
 # - "mcts": Pure MCTS with uniform priors over legal moves (good baseline)
 # - "random": Picks random legal moves (weakest, useful for testing)
 BOT_TYPES = ["neural", "mcts", "random"]
-DEFAULT_BOT_TYPE = "mcts"  # Use vanilla MCTS as default until we have a good trained model
+DEFAULT_BOT_TYPE = "neural"  # Use trained neural network model
 
 
 # --- Pydantic Models ---
@@ -54,7 +54,7 @@ DEFAULT_BOT_TYPE = "mcts"  # Use vanilla MCTS as default until we have a good tr
 class CreateGameRequest(BaseModel):
     player1_type: str = "human"
     player2_type: str = "ai"
-    ai_simulations: int = 800
+    ai_simulations: int = 1024
     bot_type: str = Field(default=DEFAULT_BOT_TYPE, description="AI bot type: 'neural', 'mcts', or 'random'")
     time_control: Optional[float] = Field(default=None, description="Total time per player in seconds. If set, enables dynamic time management.")
 
@@ -376,9 +376,11 @@ class Game:
         game_id: str,
         player1_type: str = "human",
         player2_type: str = "ai",
-        ai_simulations: int = 800,
+        ai_simulations: int = 1024,
         bot_type: str = DEFAULT_BOT_TYPE,
-        time_control: Optional[float] = None
+        time_control: Optional[float] = None,
+        online_status: str = "local",
+        join_code: Optional[str] = None
     ):
         self.game_id = game_id
         self.state = GameState.new_game()
@@ -392,6 +394,14 @@ class Game:
         self.player_ids: list[Optional[str]] = [None, None]
         self.elo_updated: bool = False  # Track if ELO has been updated for this game
 
+        # Online multiplayer state
+        self.online_status = online_status  # 'local', 'waiting', 'playing', 'finished', 'abandoned'
+        self.join_code = join_code
+        self.player_user_ids: list[Optional[str]] = [None, None]  # User IDs for players
+        self.player_websockets: dict[str, WebSocket] = {}  # user_id -> WebSocket
+        self.player_connected: list[bool] = [False, False]  # Connection status per player
+        self.disconnect_timers: dict[str, asyncio.Task] = {}  # user_id -> disconnect grace timer
+
         # Create time managers if time control is enabled
         self.time_managers: list[Optional[TimeManager]] = [None, None]
         if time_control is not None:
@@ -402,6 +412,27 @@ class Game:
                     max_sims=ai_simulations,
                     default_sims=ai_simulations
                 )
+
+    def is_online_game(self) -> bool:
+        """Check if this is an online multiplayer game."""
+        return self.online_status != "local"
+
+    def get_player_color(self, user_id: str) -> Optional[int]:
+        """Get the player color (0 or 1) for a user ID, or None if not a player."""
+        if user_id == self.player_user_ids[0]:
+            return 0
+        elif user_id == self.player_user_ids[1]:
+            return 1
+        return None
+
+    def can_user_move(self, user_id: str) -> bool:
+        """Check if the user is allowed to make a move."""
+        if not self.is_online_game():
+            return True  # Local games allow any client to move
+        player_color = self.get_player_color(user_id)
+        if player_color is None:
+            return False  # User is not a player
+        return player_color == self.state.current_player
 
     def to_response(self) -> GameStateResponse:
         """Convert to API response."""
@@ -1125,6 +1156,32 @@ async def get_latest_model():
     )
 
 
+class ModelsListResponse(BaseModel):
+    """Response containing list of available models."""
+    models: list[ModelInfo]
+    total: int
+
+
+@app.get("/training/models", response_model=ModelsListResponse)
+async def list_training_models_endpoint(limit: int = 100):
+    """List all available training models."""
+    models = persistence.list_training_models(limit=limit)
+    model_infos = [
+        ModelInfo(
+            version=m["version"],
+            iteration=m["iteration"],
+            games_trained_on=m["games_trained_on"],
+            final_loss=m["final_loss"],
+            final_policy_loss=m["final_policy_loss"],
+            final_value_loss=m["final_value_loss"],
+            download_url=f"/training/models/{m['version']}/download",
+            created_at=m["created_at"],
+        )
+        for m in models
+    ]
+    return ModelsListResponse(models=model_infos, total=len(model_infos))
+
+
 @app.post("/training/models", response_model=UploadModelResponse)
 async def upload_training_model(
     version: str = Form(...),
@@ -1309,6 +1366,26 @@ async def get_latest_training_metrics():
     return LatestMetricsResponse(metrics=TrainingMetricsData(**metrics))
 
 
+class ResetTrainingResponse(BaseModel):
+    """Response from training reset."""
+    games_deleted: int
+    models_deleted: int
+    metrics_deleted: int
+    files_deleted: int
+
+
+@app.post("/training/reset", response_model=ResetTrainingResponse)
+async def reset_training():
+    """
+    Reset all training data (games, models, metrics).
+
+    WARNING: This permanently deletes all training progress!
+    Use this to start fresh training from scratch.
+    """
+    result = persistence.clear_training_data()
+    return ResetTrainingResponse(**result)
+
+
 # Setup client logging
 LOG_DIR = Path("/tmp/razzle-logs")
 LOG_DIR.mkdir(exist_ok=True)
@@ -1366,8 +1443,12 @@ async def create_game(
     )
     games[game_id] = game
 
-    # Get current model version (only relevant for neural bot type)
-    model_version = get_model_info() if bot_type == "neural" else None
+    # Get model version for ELO tracking
+    # Neural bots use actual model version, others use bot_type as identifier
+    if bot_type == "neural":
+        model_version = get_model_info()
+    else:
+        model_version = bot_type  # e.g., "mcts", "random"
 
     # Set up player IDs for ELO tracking
     setup_game_players(game, user, model_version)
@@ -1546,9 +1627,14 @@ async def get_ai_move(
         else:  # "neural"
             ev = get_evaluator_for_model(request.model)
 
+        # Use temperature for opening diversity (first ~5 moves = ~10 ply)
+        temperature = request.temperature
+        if game.state.ply < 10 and temperature == 0.0:
+            temperature = 1.0  # Opening diversity
+
         config = MCTSConfig(
             num_simulations=request.simulations,
-            temperature=request.temperature,
+            temperature=temperature,
             batch_size=16 if bot_type == "neural" else 1  # Batching only helps with NN
         )
         mcts = MCTS(ev, config)
@@ -1592,17 +1678,26 @@ async def get_ai_move(
     game_response = game.to_response()
     await broadcast_state(game, game_response)
 
+    # Convert numpy types to Python native types for JSON serialization
     return AIMoveResponse(
-        move=move,
+        move=int(move),
         algebraic=move_to_algebraic(move),
         policy=policy if isinstance(policy, list) else policy.tolist(),
-        value=value,
-        visits=total_visits,
-        time_ms=elapsed_ms,
-        top_moves=top_moves,
+        value=float(value) if value is not None else None,
+        visits=int(total_visits),
+        time_ms=int(elapsed_ms),
+        top_moves=[
+            TopMove(
+                move=int(tm.move),
+                algebraic=tm.algebraic,
+                visits=int(tm.visits),
+                value=float(tm.value) if tm.value is not None else None
+            )
+            for tm in top_moves
+        ],
         game_state=game_response,
-        difficulty=difficulty,
-        remaining_time=remaining_time
+        difficulty=float(difficulty) if difficulty is not None else None,
+        remaining_time=float(remaining_time) if remaining_time is not None else None
     )
 
 
@@ -1659,6 +1754,304 @@ async def undo_move(game_id: str):
     await broadcast_state(game, response)
 
     return response
+
+
+# --- Online Multiplayer API Endpoints ---
+
+class CreateOnlineGameRequest(BaseModel):
+    host_color: int = Field(0, description="0 for blue (player 1), 1 for red (player 2)")
+
+
+class OnlineOpponentInfo(BaseModel):
+    user_id: str
+    display_name: Optional[str]
+    elo_rating: float = 1000.0
+
+
+class CreateOnlineGameResponse(BaseModel):
+    game_id: str
+    join_code: str
+    host_color: int
+    status: str
+
+
+class JoinOnlineGameRequest(BaseModel):
+    join_code: str = Field(..., min_length=4, max_length=8)
+
+
+class JoinOnlineGameResponse(BaseModel):
+    game_id: str
+    your_color: int
+    opponent: Optional[OnlineOpponentInfo]
+    status: str
+
+
+class OnlineGameStatusResponse(BaseModel):
+    game_id: str
+    join_code: str
+    status: str
+    your_color: int
+    opponent: Optional[OnlineOpponentInfo]
+    is_your_turn: bool
+    winner: Optional[int]
+    game_state: GameStateResponse
+
+
+class LeaveOnlineGameResponse(BaseModel):
+    status: str
+    winner: Optional[int]
+
+
+class OnlineGameSummary(BaseModel):
+    game_id: str
+    join_code: str
+    status: str
+    your_color: int
+    is_your_turn: bool
+    ply: int
+    opponent_name: Optional[str] = None
+    created_at: str
+    updated_at: str
+
+
+class MyOnlineGamesResponse(BaseModel):
+    active: list[OnlineGameSummary]
+    waiting: list[OnlineGameSummary]
+
+
+@app.post("/games/online", response_model=CreateOnlineGameResponse)
+async def create_online_game(
+    request: CreateOnlineGameRequest,
+    user: dict = Depends(require_auth)
+):
+    """
+    Create a new online game and get a shareable join code.
+
+    Requires authentication. The host chooses their color (0=blue, 1=red).
+    """
+    if request.host_color not in (0, 1):
+        raise HTTPException(status_code=400, detail="host_color must be 0 (blue) or 1 (red)")
+
+    result = persistence.create_online_game(
+        host_user_id=user["user_id"],
+        host_color=request.host_color,
+    )
+
+    # Also create an in-memory Game object for WebSocket support
+    game = Game(
+        game_id=result["game_id"],
+        player1_type="human",
+        player2_type="human",
+        ai_simulations=0,
+        bot_type="mcts",
+        online_status="waiting",
+        join_code=result["join_code"]
+    )
+    # Set host's user ID in the appropriate slot
+    if request.host_color == 0:
+        game.player_user_ids[0] = user["user_id"]
+    else:
+        game.player_user_ids[1] = user["user_id"]
+
+    games[result["game_id"]] = game
+
+    return CreateOnlineGameResponse(**result)
+
+
+@app.post("/games/online/join", response_model=JoinOnlineGameResponse)
+async def join_online_game(
+    request: JoinOnlineGameRequest,
+    user: dict = Depends(require_auth)
+):
+    """
+    Join an existing online game using a join code.
+
+    Requires authentication. Returns game info and opponent details.
+    """
+    result = persistence.join_online_game(
+        join_code=request.join_code,
+        guest_user_id=user["user_id"],
+    )
+
+    if result is None:
+        raise HTTPException(status_code=404, detail="Game not found")
+
+    if "error" in result:
+        if result["error"] == "game_not_waiting":
+            raise HTTPException(status_code=409, detail=f"Game is not waiting for players (status: {result.get('status')})")
+        elif result["error"] == "game_full":
+            raise HTTPException(status_code=409, detail="Game is already full")
+        raise HTTPException(status_code=400, detail=result["error"])
+
+    # Load game into memory if not already
+    game_id = result["game_id"]
+    if game_id not in games:
+        game_data = persistence.load_game(game_id)
+        if game_data:
+            game = Game(
+                game_id=game_id,
+                player1_type="human",
+                player2_type="human",
+                ai_simulations=0,
+                bot_type="mcts",
+                online_status="playing",
+                join_code=request.join_code.upper().strip()
+            )
+            game.state = game_data["state"]
+            games[game_id] = game
+
+    # Update the in-memory Game object with user IDs
+    if game_id in games:
+        game = games[game_id]
+        game.online_status = "playing"
+        # Set guest user ID
+        game.player_user_ids[result["your_color"]] = user["user_id"]
+        # Set host user ID (opponent)
+        if result.get("opponent"):
+            host_color = 1 - result["your_color"]
+            game.player_user_ids[host_color] = result["opponent"]["user_id"]
+
+        # Notify host via WebSocket
+        await broadcast_online_event(game, "player_joined", {
+            "user_id": user["user_id"],
+            "display_name": user.get("display_name") or user.get("username"),
+            "color": result["your_color"],
+        })
+
+    opponent = None
+    if result.get("opponent"):
+        opponent = OnlineOpponentInfo(**result["opponent"])
+
+    return JoinOnlineGameResponse(
+        game_id=result["game_id"],
+        your_color=result["your_color"],
+        opponent=opponent,
+        status=result["status"],
+    )
+
+
+@app.get("/games/online/{game_id}", response_model=OnlineGameStatusResponse)
+async def get_online_game_status(
+    game_id: str,
+    user: dict = Depends(require_auth)
+):
+    """
+    Get the current status of an online game.
+
+    Requires authentication. User must be a participant in the game.
+    """
+    result = persistence.get_online_game_status(game_id, user["user_id"])
+
+    if result is None:
+        raise HTTPException(status_code=404, detail="Game not found")
+
+    if "error" in result:
+        if result["error"] == "not_authorized":
+            raise HTTPException(status_code=403, detail="You are not a participant in this game")
+        raise HTTPException(status_code=400, detail=result["error"])
+
+    # Build game state response
+    state = result["state"]
+
+    # Load into memory if needed
+    if game_id not in games:
+        game = Game(
+            game_id=game_id,
+            player1_type="human",
+            player2_type="human",
+            ai_simulations=0,
+            bot_type="mcts"
+        )
+        game.state = state
+        games[game_id] = game
+    else:
+        game = games[game_id]
+
+    opponent = None
+    if result.get("opponent"):
+        opponent = OnlineOpponentInfo(**result["opponent"])
+
+    return OnlineGameStatusResponse(
+        game_id=result["game_id"],
+        join_code=result["join_code"],
+        status=result["status"],
+        your_color=result["your_color"],
+        opponent=opponent,
+        is_your_turn=result["is_your_turn"],
+        winner=result["winner"],
+        game_state=game.to_response(),
+    )
+
+
+@app.post("/games/online/{game_id}/leave", response_model=LeaveOnlineGameResponse)
+async def leave_online_game(
+    game_id: str,
+    user: dict = Depends(require_auth)
+):
+    """
+    Leave/abandon an online game. This forfeits the game.
+
+    For waiting games, the game is simply cancelled.
+    For playing games, the opponent wins by forfeit.
+    """
+    result = persistence.abandon_online_game(game_id, user["user_id"])
+
+    if result is None:
+        raise HTTPException(status_code=404, detail="Game not found")
+
+    if "error" in result:
+        if result["error"] == "not_authorized":
+            raise HTTPException(status_code=403, detail="You are not a participant in this game")
+        elif result["error"] == "cannot_abandon":
+            raise HTTPException(status_code=409, detail=f"Cannot abandon game (status: {result.get('status')})")
+        raise HTTPException(status_code=400, detail=result["error"])
+
+    # Notify opponent via WebSocket
+    if game_id in games:
+        game = games[game_id]
+        await broadcast_online_event(game, "game_abandoned", {
+            "abandoning_user_id": user["user_id"],
+            "winner": result.get("winner"),
+        })
+
+    return LeaveOnlineGameResponse(
+        status=result["status"],
+        winner=result.get("winner"),
+    )
+
+
+@app.get("/games/online/mine", response_model=MyOnlineGamesResponse)
+async def get_my_online_games(
+    user: dict = Depends(require_auth)
+):
+    """
+    List all online games for the current user.
+
+    Returns active (playing) and waiting games separately.
+    """
+    result = persistence.get_user_online_games(user["user_id"])
+
+    return MyOnlineGamesResponse(
+        active=[OnlineGameSummary(**g) for g in result["active"]],
+        waiting=[OnlineGameSummary(**g) for g in result["waiting"]],
+    )
+
+
+async def broadcast_online_event(game: Game, event_type: str, data: dict):
+    """Broadcast an online game event to all connected WebSocket clients."""
+    message = {
+        "type": event_type,
+        "data": data
+    }
+    disconnected = []
+    for ws in game.websockets:
+        try:
+            await ws.send_json(message)
+        except Exception:
+            disconnected.append(ws)
+
+    for ws in disconnected:
+        game.websockets.remove(ws)
 
 
 # --- Game Browser Endpoints ---
@@ -2359,21 +2752,123 @@ async def send_error(ws: WebSocket, message: str, code: str):
     })
 
 
+# Grace period for disconnect before auto-forfeit (in seconds)
+DISCONNECT_GRACE_PERIOD = 120  # 2 minutes
+
+
+async def handle_player_disconnect(game: Game, user_id: str):
+    """Handle player disconnect with grace period."""
+    player_color = game.get_player_color(user_id)
+    if player_color is not None:
+        game.player_connected[player_color] = False
+
+        # Notify opponent
+        await broadcast_online_event(game, "opponent_disconnected", {
+            "user_id": user_id,
+            "color": player_color,
+            "grace_period": DISCONNECT_GRACE_PERIOD,
+        })
+
+        # Start grace period timer
+        async def disconnect_timer():
+            await asyncio.sleep(DISCONNECT_GRACE_PERIOD)
+            # Check if still disconnected
+            if not game.player_connected[player_color] and game.online_status == "playing":
+                # Auto-forfeit
+                winner = 1 - player_color  # Opponent wins
+                game.online_status = "abandoned"
+                persistence.update_online_game_status(game.game_id, "abandoned", winner)
+
+                await broadcast_online_event(game, "game_abandoned", {
+                    "reason": "disconnect_timeout",
+                    "abandoning_user_id": user_id,
+                    "winner": winner,
+                })
+
+        # Cancel existing timer if any
+        if user_id in game.disconnect_timers:
+            game.disconnect_timers[user_id].cancel()
+
+        game.disconnect_timers[user_id] = asyncio.create_task(disconnect_timer())
+
+
+async def handle_player_reconnect(game: Game, user_id: str):
+    """Handle player reconnection."""
+    player_color = game.get_player_color(user_id)
+    if player_color is not None:
+        game.player_connected[player_color] = True
+
+        # Cancel disconnect timer
+        if user_id in game.disconnect_timers:
+            game.disconnect_timers[user_id].cancel()
+            del game.disconnect_timers[user_id]
+
+        # Notify opponent
+        await broadcast_online_event(game, "opponent_reconnected", {
+            "user_id": user_id,
+            "color": player_color,
+        })
+
+
+def extract_user_from_websocket(websocket: WebSocket) -> Optional[str]:
+    """Extract user_id from WebSocket cookies (JWT auth)."""
+    cookies = websocket.cookies
+    token = cookies.get(AUTH_COOKIE_NAME)
+    if token:
+        return decode_jwt_token(token)
+    return None
+
+
 @app.websocket("/games/{game_id}/ws")
 async def websocket_endpoint(websocket: WebSocket, game_id: str):
-    """WebSocket endpoint for real-time game updates."""
+    """WebSocket endpoint for real-time game updates.
+
+    For online games, authentication is required and only the current player can make moves.
+    For local games (AI/PvP), authentication is optional.
+    """
     if game_id not in games:
         await websocket.close(code=4004, reason="Game not found")
         return
 
     game = games[game_id]
-    await websocket.accept()
+    user_id = None
+
+    # For online games, require authentication
+    if game.is_online_game():
+        await websocket.accept()
+        user_id = extract_user_from_websocket(websocket)
+
+        if not user_id:
+            await send_error(websocket, "Authentication required for online games", "AUTH_REQUIRED")
+            await websocket.close(code=4001, reason="Authentication required")
+            return
+
+        # Check if user is a player in this game
+        player_color = game.get_player_color(user_id)
+        if player_color is None:
+            await send_error(websocket, "You are not a participant in this game", "NOT_AUTHORIZED")
+            await websocket.close(code=4003, reason="Not authorized")
+            return
+
+        # Register connection
+        game.player_websockets[user_id] = websocket
+        game.player_connected[player_color] = True
+        await handle_player_reconnect(game, user_id)
+    else:
+        await websocket.accept()
+
     game.websockets.append(websocket)
 
-    # Send initial state
+    # Send initial state with online game info
+    initial_data = game.to_response().model_dump()
+    if game.is_online_game():
+        initial_data["online_status"] = game.online_status
+        initial_data["your_color"] = game.get_player_color(user_id) if user_id else None
+        initial_data["opponent_connected"] = game.player_connected[1 - game.get_player_color(user_id)] if user_id else None
+
     await websocket.send_json({
         "type": "state",
-        "data": game.to_response().model_dump()
+        "data": initial_data
     })
 
     try:
@@ -2386,6 +2881,12 @@ async def websocket_endpoint(websocket: WebSocket, game_id: str):
                 if move is None:
                     await send_error(websocket, "Move not specified", "INVALID_REQUEST")
                     continue
+
+                # For online games, check if it's this player's turn
+                if game.is_online_game() and user_id:
+                    if not game.can_user_move(user_id):
+                        await send_error(websocket, "Not your turn", "NOT_YOUR_TURN")
+                        continue
 
                 if game.state.is_terminal():
                     await send_error(websocket, "Game already finished", "GAME_FINISHED")
@@ -2403,6 +2904,11 @@ async def websocket_endpoint(websocket: WebSocket, game_id: str):
                 # Check for game over and update ELO
                 game.check_and_update_elo()
 
+                # Update online status if game finished
+                if game.is_online_game() and game.state.is_terminal():
+                    game.online_status = "finished"
+                    persistence.update_online_game_status(game.game_id, "finished", game.state.get_winner())
+
                 response = game.to_response()
                 await broadcast_state(game, response)
 
@@ -2410,12 +2916,17 @@ async def websocket_endpoint(websocket: WebSocket, game_id: str):
                 if game.state.is_terminal():
                     winner = game.state.get_winner()
                     reason = "ball_reached_goal" if winner is not None else "draw"
-                    await websocket.send_json({
-                        "type": "game_over",
-                        "data": {"winner": winner, "reason": reason}
+                    await broadcast_online_event(game, "game_over", {
+                        "winner": winner,
+                        "reason": reason
                     })
 
             elif msg_type == "ai_move":
+                # AI moves not allowed in online games
+                if game.is_online_game():
+                    await send_error(websocket, "AI moves not allowed in online games", "NOT_ALLOWED")
+                    continue
+
                 simulations = data.get("data", {}).get("simulations", 800)
 
                 if game.state.is_terminal():
@@ -2449,6 +2960,11 @@ async def websocket_endpoint(websocket: WebSocket, game_id: str):
                     })
 
             elif msg_type == "undo":
+                # Undo not allowed in online games
+                if game.is_online_game():
+                    await send_error(websocket, "Undo not allowed in online games", "NOT_ALLOWED")
+                    continue
+
                 if not game.state.history:
                     await send_error(websocket, "Nothing to undo", "INVALID_REQUEST")
                     continue
@@ -2459,6 +2975,10 @@ async def websocket_endpoint(websocket: WebSocket, game_id: str):
                 response = game.to_response()
                 await broadcast_state(game, response)
 
+            elif msg_type == "ping":
+                # Keep-alive ping
+                await websocket.send_json({"type": "pong"})
+
             else:
                 await send_error(websocket, f"Unknown message type: {msg_type}", "INVALID_REQUEST")
 
@@ -2467,6 +2987,12 @@ async def websocket_endpoint(websocket: WebSocket, game_id: str):
     finally:
         if websocket in game.websockets:
             game.websockets.remove(websocket)
+
+        # Handle online game disconnect
+        if game.is_online_game() and user_id:
+            if user_id in game.player_websockets:
+                del game.player_websockets[user_id]
+            await handle_player_disconnect(game, user_id)
 
 
 # --- Entry Point ---

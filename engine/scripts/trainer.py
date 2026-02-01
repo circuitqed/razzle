@@ -72,12 +72,62 @@ def compute_difficulty_target(raw_policy: np.ndarray, mcts_policy: np.ndarray) -
     return min(1.0, kl_div / KL_NORMALIZATION)
 
 
+def compute_td_lambda_targets(
+    game_length: int,
+    bootstrap_values: np.ndarray,  # V(s) predictions for each position
+    outcome: float,                 # Final game result ±1
+    players: list[int],            # Player to move at each position
+    gamma: float = 0.99,           # Discount factor
+    td_lambda: float = 0.95,       # Trace decay
+) -> np.ndarray:
+    """
+    Compute TD(λ) value targets using backward recursion.
+
+    G_t = γ * ((1 - λ) * V(s_{t+1}) + λ * G_{t+1})
+
+    Returns targets from perspective of player to move at each position.
+    """
+    targets = np.zeros(game_length, dtype=np.float32)
+
+    # Terminal value from perspective of last player
+    last_player = players[-1]
+    G_next = outcome if last_player == 0 else -outcome
+
+    # Backward recursion
+    for t in range(game_length - 1, -1, -1):
+        player_t = players[t]
+
+        if t == game_length - 1:
+            # Last position: just discounted outcome
+            targets[t] = gamma * G_next
+        else:
+            # Get V(s_{t+1}) from player t's perspective
+            V_next = bootstrap_values[t + 1]
+            player_next = players[t + 1]
+            if player_t != player_next:
+                V_next = -V_next  # Flip for opponent's perspective
+
+            # TD(λ) blend
+            targets[t] = gamma * ((1 - td_lambda) * V_next + td_lambda * G_next)
+
+        # Update G_next for next iteration (from player t's perspective)
+        G_next = targets[t]
+        # Flip if previous position has different player
+        if t > 0 and players[t-1] != player_t:
+            G_next = -G_next
+
+    return targets
+
+
 def games_to_training_data(
     games: list[TrainingGame],
     temperature: float = 1.0,
     network: Optional[RazzleNet] = None,
     device: str = 'cpu',
-    value_discount: float = 0.995,
+    value_discount: float = 0.995,  # Deprecated, kept for compatibility
+    # TD(λ) parameters
+    gamma: float = 1.0,           # Discount factor (1.0 = no discount)
+    td_lambda: float = 1.0,       # TD blend (1.0 = pure MC)
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, Optional[np.ndarray]]:
     """
     Convert API games to training arrays.
@@ -93,13 +143,13 @@ def games_to_training_data(
     Args:
         games: List of training games from API
         temperature: Temperature used during self-play (for policy conversion)
-        network: Optional network for computing difficulty targets.
-                 If provided, computes KL divergence between raw and MCTS policies.
-        device: Device for network inference when computing difficulty.
-        value_discount: Temporal discount for value targets (default 0.99).
-                       Early positions get softer targets: v = result * discount^(L-t)
-                       where L is game length and t is position index.
-                       Set to 1.0 to disable (all positions get ±1).
+        network: Optional network for computing difficulty targets and TD(λ)
+                 bootstrap values.
+        device: Device for network inference.
+        value_discount: Deprecated. Use gamma/td_lambda instead.
+        gamma: Discount factor for TD(λ) (default 1.0 = no discount).
+        td_lambda: TD(λ) trace decay (default 1.0 = pure Monte Carlo).
+                   0.0 = pure 1-step TD (fully bootstrapped).
 
     Returns (states, policies, values, legal_masks, difficulties) arrays.
             difficulties is None if network is not provided.
@@ -158,27 +208,48 @@ def games_to_training_data(
 
         # Calculate values for each position using ACTUAL player
         game_length = len(states)
+
+        # Check if we should use TD(λ) (requires network and non-trivial parameters)
+        use_td_lambda = (gamma < 1.0 or td_lambda < 1.0) and network is not None
+
+        td_targets = None
+        if use_td_lambda and game_length > 0:
+            # Get bootstrap values for this game
+            network.eval()
+            game_states_tensor = torch.from_numpy(np.stack(states)).to(device)
+            with torch.no_grad():
+                _, values_pred, _ = network(game_states_tensor)
+                bootstrap_values = values_pred.squeeze(-1).cpu().numpy()
+
+            # Compute TD(λ) targets
+            td_targets = compute_td_lambda_targets(
+                game_length=game_length,
+                bootstrap_values=bootstrap_values,
+                outcome=game.result,
+                players=players,
+                gamma=gamma,
+                td_lambda=td_lambda,
+            )
+
         for i in range(game_length):
             player_to_move = players[i]  # Use tracked player, NOT i % 2
 
-            # Value from perspective of player to move
-            if game.result == 0:
-                value = 0.0
-            elif player_to_move == 0:
-                # Player 0 was to move; game.result is +1 if P0 won, -1 if P1 won
-                value = game.result
+            if use_td_lambda and td_targets is not None:
+                # Use TD(λ) targets
+                value = td_targets[i]
             else:
-                # Player 1 was to move; flip the result
-                value = -game.result
+                # Original Monte Carlo targets
+                if game.result == 0:
+                    value = 0.0
+                elif player_to_move == 0:
+                    # Player 0 was to move; game.result is +1 if P0 won, -1 if P1 won
+                    value = game.result
+                else:
+                    # Player 1 was to move; flip the result
+                    value = -game.result
 
             # Clip to ±0.99 to avoid tanh saturation (tanh(±3) ≈ ±0.995)
             value = max(-0.99, min(0.99, value))
-
-            # Apply temporal discount if enabled (disabled by default)
-            if value_discount < 1.0:
-                moves_to_end = game_length - i - 1
-                discount_factor = value_discount ** moves_to_end
-                value = value * discount_factor
 
             # State tensor from to_tensor() is already normalized (rotated for player 1)
             # But policy and legal_mask from MCTS are in original coordinates,
@@ -221,12 +292,15 @@ class DistributedTrainer:
     Trainer that fetches games from API and uploads models.
     """
 
-    # Learning rate schedule: list of (iteration, learning_rate) tuples
-    # LR changes when iteration reaches each milestone
+    # Learning rate schedule: list of (games, learning_rate) tuples
+    # LR changes when total_games_trained reaches each milestone
+    # Targeting 100k games total with cosine-like decay
     DEFAULT_LR_SCHEDULE = [
-        (0, 0.001),     # Start at 0.001 (proven to work well)
-        (200, 0.0005),  # Drop to 0.0005 at iter 200
-        (500, 0.0001),  # Drop to 0.0001 at iter 500 for fine-tuning
+        (0, 0.001),       # Start at 0.001 (warmup)
+        (5000, 0.001),    # Keep at 0.001 until 5k games
+        (20000, 0.0005),  # Drop to 0.0005 at 20k games
+        (50000, 0.0002),  # Drop to 0.0002 at 50k games
+        (80000, 0.0001),  # Drop to 0.0001 at 80k games (fine-tuning)
     ]
 
     def __init__(
@@ -236,12 +310,16 @@ class DistributedTrainer:
         threshold: int = 50,
         poll_interval: int = 30,
         epochs: int = 10,
-        batch_size: int = 2048,  # AlphaZero-scale batch size
+        batch_size: int = 512,  # Training batch size
         learning_rate: float = 0.001,  # Starting LR (proven to work well)
         filters: int = 64,
         blocks: int = 6,
         output_dir: Path = Path('output/trainer'),
         lr_schedule: list[tuple[int, float]] | None = None,
+        replay_buffer_size: int = 100_000,  # Replay buffer capacity
+        # TD(λ) parameters
+        gamma: float = 0.99,           # Discount factor
+        td_lambda: float = 0.95,       # TD blend (1.0 = pure MC)
     ):
         self.api_url = api_url
         self.device = device
@@ -255,6 +333,9 @@ class DistributedTrainer:
         self.output_dir = Path(output_dir)
         self.lr_schedule = lr_schedule if lr_schedule is not None else self.DEFAULT_LR_SCHEDULE
         self.current_lr = learning_rate
+        self.replay_buffer_size = replay_buffer_size
+        self.gamma = gamma
+        self.td_lambda = td_lambda
 
         # Create output directory
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -278,7 +359,7 @@ class DistributedTrainer:
         self.games_log_path = self.output_dir / 'games_log.jsonl'
 
         # Replay buffer for preventing catastrophic forgetting
-        self.replay_buffer = ReplayBuffer(max_positions=500_000)
+        self.replay_buffer = ReplayBuffer(max_positions=self.replay_buffer_size)
 
         # Game archive for permanent storage of training data
         self.game_archive = GameArchive(archive_dir=str(self.output_dir / 'games_archive'))
@@ -334,15 +415,16 @@ class DistributedTrainer:
         return True
 
     def _update_learning_rate(self):
-        """Update learning rate based on schedule and current iteration."""
-        # Find the appropriate LR for current iteration
+        """Update learning rate based on schedule and total games trained."""
+        # Find the appropriate LR for current total games
         target_lr = self.learning_rate  # default
-        for milestone_iter, lr in self.lr_schedule:
-            if self.iteration >= milestone_iter:
+        for milestone_games, lr in self.lr_schedule:
+            if self.total_games_trained >= milestone_games:
                 target_lr = lr
 
         if target_lr != self.current_lr:
-            print(f"[Trainer] Adjusting learning rate: {self.current_lr} -> {target_lr}")
+            print(f"[Trainer] Adjusting learning rate: {self.current_lr} -> {target_lr} "
+                  f"(at {self.total_games_trained:,} games)")
             for param_group in self.network_trainer.optimizer.param_groups:
                 param_group['lr'] = target_lr
             self.current_lr = target_lr
@@ -443,7 +525,7 @@ class DistributedTrainer:
                 legal_masks = data['legal_masks'] if 'legal_masks' in data and data['legal_masks'] is not None else None
 
                 # Reconstruct replay buffer
-                self.replay_buffer = ReplayBuffer(max_positions=500_000)
+                self.replay_buffer = ReplayBuffer(max_positions=self.replay_buffer_size)
                 if legal_masks is not None:
                     self.replay_buffer.add(states, policies, values, legal_masks)
                 else:
@@ -480,7 +562,8 @@ class DistributedTrainer:
             games,
             network=self.network,
             device=self.device,
-            value_discount=1.0,  # No discount - use raw game outcomes (±1)
+            gamma=self.gamma,
+            td_lambda=self.td_lambda,
         )
         new_examples = len(states)
         print(f"[Trainer] New training examples: {new_examples}")
@@ -906,10 +989,12 @@ def main():
                         help='Seconds between checking for games')
     parser.add_argument('--epochs', type=int, default=10,
                         help='Training epochs per iteration')
-    parser.add_argument('--batch-size', type=int, default=2048,
-                        help='Training batch size (default: 2048)')
+    parser.add_argument('--batch-size', type=int, default=512,
+                        help='Training batch size (default: 512)')
     parser.add_argument('--learning-rate', type=float, default=0.001,
                         help='Initial learning rate (default: 0.001)')
+    parser.add_argument('--replay-buffer-size', type=int, default=100_000,
+                        help='Replay buffer capacity in positions (default: 100000)')
     parser.add_argument('--filters', type=int, default=None,
                         help='Network filter count (overrides --network-size)')
     parser.add_argument('--blocks', type=int, default=None,
@@ -918,6 +1003,10 @@ def main():
                         help='Network size preset: small (64f/6b), medium (128f/10b), large (256f/15b), alphazero (256f/20b)')
     parser.add_argument('--output', type=Path, default=Path('output/trainer'),
                         help='Output directory')
+    parser.add_argument('--gamma', type=float, default=0.99,
+                        help='Value discount factor for TD(λ) (default: 0.99)')
+    parser.add_argument('--td-lambda', type=float, default=0.95,
+                        help='TD(λ) trace decay (default: 0.95, 1.0=pure MC)')
 
     args = parser.parse_args()
 
@@ -952,6 +1041,9 @@ def main():
         filters=filters,
         blocks=blocks,
         output_dir=args.output,
+        replay_buffer_size=args.replay_buffer_size,
+        gamma=args.gamma,
+        td_lambda=args.td_lambda,
     )
 
     # Handle signals for graceful shutdown

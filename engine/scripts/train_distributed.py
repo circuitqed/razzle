@@ -118,6 +118,10 @@ def setup_worker_instance(
     batch_size: int = 32,
     random_opening_moves: int = 0,
     random_opening_fraction: float = 0.0,
+    trainer_batch_size: int = 512,
+    replay_buffer_size: int = 100_000,
+    gamma: float = 0.99,
+    td_lambda: float = 0.95,
 ) -> bool:
     """Set up a worker instance and start the worker/trainer process."""
     role_name = "Trainer" if worker.role == "trainer" else f"Worker {worker.worker_id}"
@@ -158,37 +162,40 @@ def setup_worker_instance(
         vast.execute(worker.instance_id, setup_cmd, timeout=600)
 
         if worker.role == "trainer":
-            # Start trainer process
+            # Start trainer process - use bash -c to ensure proper backgrounding and SSH return
             print(f"[{role_name}] Starting trainer process...")
-            start_cmd = (
-                f"setsid python -u /workspace/trainer.py "
+            trainer_cmd = (
+                f"python -u /workspace/trainer.py "
                 f"--api-url {api_url} --device cuda --threshold {training_threshold} "
                 f"--filters {filters} --blocks {blocks} --output /workspace/output "
-                f"</dev/null >/workspace/trainer.log 2>&1 & "
-                f'sleep 1 && echo "Trainer started"'
+                f"--batch-size {trainer_batch_size} --replay-buffer-size {replay_buffer_size} "
+                f"--gamma {gamma} --td-lambda {td_lambda}"
             )
+            start_cmd = f'bash -c \'nohup {trainer_cmd} </dev/null >/workspace/trainer.log 2>&1 & disown; sleep 1; echo "Trainer started"\''
         else:
             # Start worker process(es)
             if workers_per_instance == 1:
                 print(f"[{role_name}] Starting worker process...")
-                start_cmd = (
-                    f"setsid python -u /workspace/worker_selfplay.py "
+                worker_cmd = (
+                    f"python -u /workspace/worker_selfplay.py "
                     f"--worker-id {worker.worker_id} --api-url {api_url} "
                     f"--workspace /workspace --device cuda --simulations {simulations} "
                     f"--filters {filters} --blocks {blocks} --batch-size {batch_size} "
                     f"--random-opening-moves {random_opening_moves} "
-                    f"--random-opening-fraction {random_opening_fraction} "
-                    f"</dev/null >/workspace/worker.log 2>&1 & "
-                    f'sleep 1 && echo "Worker started"'
+                    f"--random-opening-fraction {random_opening_fraction}"
                 )
+                start_cmd = f'bash -c \'nohup {worker_cmd} </dev/null >/workspace/worker.log 2>&1 & disown; sleep 1; echo "Worker started"\''
             else:
                 # Launch multiple workers sharing the GPU
                 print(f"[{role_name}] Starting {workers_per_instance} worker processes...")
+                # Create workspace dirs first
+                mkdir_cmds = " && ".join([f"mkdir -p /workspace/worker_{i}/model" for i in range(workers_per_instance)])
+                # Build worker launch commands - each backgrounded and disowned
                 worker_cmds = []
                 for i in range(workers_per_instance):
                     sub_worker_id = worker.worker_id * workers_per_instance + i
-                    worker_cmds.append(
-                        f"nohup python -u /workspace/worker_selfplay.py "
+                    wcmd = (
+                        f"python -u /workspace/worker_selfplay.py "
                         f"--worker-id {sub_worker_id} "
                         f"--api-url {api_url} "
                         f"--workspace /workspace/worker_{i} "
@@ -198,32 +205,41 @@ def setup_worker_instance(
                         f"--blocks {blocks} "
                         f"--batch-size {batch_size} "
                         f"--random-opening-moves {random_opening_moves} "
-                        f"--random-opening-fraction {random_opening_fraction} "
-                        f">/workspace/worker_{i}.log 2>&1 &"
+                        f"--random-opening-fraction {random_opening_fraction}"
                     )
-                # Create workspace dirs and launch all workers
-                mkdir_cmds = " && ".join([f"mkdir -p /workspace/worker_{i}/model" for i in range(workers_per_instance)])
-                # Use nohup for proper detachment, then disown to release from job table
-                start_cmd = f'{mkdir_cmds} && {" ".join(worker_cmds)} disown -a && sleep 1 && echo "{workers_per_instance} workers started"'
+                    worker_cmds.append(f"nohup {wcmd} </dev/null >/workspace/worker_{i}.log 2>&1 & disown")
+                # Launch all workers with bash -c to ensure proper backgrounding
+                all_workers = "; ".join(worker_cmds)
+                start_cmd = f'bash -c \'{mkdir_cmds} && {all_workers}; sleep 1; echo "{workers_per_instance} workers started"\''
 
-        result = vast.execute(worker.instance_id, start_cmd, timeout=120)
-        print(f"[{role_name}] {result.strip()}")
+        # Execute start command - timeout is OK since nohup/disown should work
+        try:
+            result = vast.execute(worker.instance_id, start_cmd, timeout=60)
+            print(f"[{role_name}] {result.strip()}")
+        except Exception as start_error:
+            # SSH timeout during start is OK - the command was sent and workers likely started
+            # Only fail if it's not a timeout error
+            error_str = str(start_error).lower()
+            if "timeout" in error_str:
+                print(f"[{role_name}] Start command sent (SSH timed out, but worker likely running)")
+            else:
+                raise  # Re-raise non-timeout errors
 
-        # Mark as running - workers/trainer are now started
+        # Mark as running - workers/trainer are now started (or at least the command was sent)
         worker.status = "running"
 
-        # Optional status check (non-fatal if it fails due to vastai CLI bugs)
+        # Optional status check (non-fatal if it fails)
         try:
             time.sleep(5)
-            log_file = "trainer.log" if worker.role == "trainer" else "status.json"
+            log_file = "trainer.log" if worker.role == "trainer" else f"worker_0.log"
             status_check = vast.execute(
                 worker.instance_id,
-                f"cat /workspace/{log_file} 2>/dev/null | tail -5 || echo 'starting...'",
+                f"cat /workspace/{log_file} 2>/dev/null | tail -3 || echo 'starting...'",
                 timeout=30
             )
             print(f"[{role_name}] Status: {status_check.strip()[:100]}")
         except Exception as e:
-            print(f"[{role_name}] Status check skipped (CLI error)")
+            print(f"[{role_name}] Status check skipped")
 
         return True
 
@@ -256,6 +272,10 @@ class DistributedOrchestrator:
         batch_size: int = 32,
         random_opening_moves: int = 0,
         random_opening_fraction: float = 0.0,
+        trainer_batch_size: int = 512,
+        replay_buffer_size: int = 100_000,
+        gamma: float = 0.99,
+        td_lambda: float = 0.95,
     ):
         self.num_workers = num_workers
         self.api_url = api_url
@@ -272,6 +292,10 @@ class DistributedOrchestrator:
         self.batch_size = batch_size
         self.random_opening_moves = random_opening_moves
         self.random_opening_fraction = random_opening_fraction
+        self.trainer_batch_size = trainer_batch_size
+        self.replay_buffer_size = replay_buffer_size
+        self.gamma = gamma
+        self.td_lambda = td_lambda
 
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -393,6 +417,10 @@ class DistributedOrchestrator:
                         self.batch_size,
                         self.random_opening_moves,
                         self.random_opening_fraction,
+                        self.trainer_batch_size,
+                        self.replay_buffer_size,
+                        self.gamma,
+                        self.td_lambda,
                     )
                     if success:
                         instance.last_activity = time.time()
@@ -659,9 +687,12 @@ class DistributedOrchestrator:
 
         # Poll instances and setup each as soon as ready
         running_count = self.poll_and_setup_instances(package_path)
+
+        # Don't exit immediately if running_count is 0 - workers may have started
+        # even if SSH timed out. We'll verify via API activity monitoring.
         if running_count == 0:
-            self.cleanup()
-            return 1
+            print("\nWarning: No workers confirmed running, but they may have started.")
+            print("Continuing to monitor for activity...")
 
         # Print instructions
         print("\n" + "=" * 60)
@@ -684,9 +715,12 @@ class DistributedOrchestrator:
             import requests
             check_interval = 60  # Check every 60 seconds
             consecutive_failures = 0
-            max_failures = 10  # Exit after 10 consecutive failures (10 minutes)
-            worker_inactivity_threshold = 300  # 5 minutes of no games = unhealthy
+            max_failures = 15  # Exit after 15 consecutive failures (15 minutes)
+            startup_grace_period = 300  # 5 minutes startup grace period
+            startup_time = time.time()
+            worker_inactivity_threshold = 600  # 10 minutes of no games = unhealthy
             last_worker_games: dict[str, int] = {}  # Track games per worker
+            any_activity_ever = False  # Track if we've ever seen activity
 
             while not self.shutdown_requested:
                 time.sleep(check_interval)
@@ -703,6 +737,7 @@ class DistributedOrchestrator:
 
                         if games_total > 0 or workers_active > 0:
                             consecutive_failures = 0
+                            any_activity_ever = True
                             print(f"[Status] Games: {games_total} total, {games_pending} pending, {workers_active} workers active")
 
                             # Check individual worker health
@@ -765,15 +800,28 @@ class DistributedOrchestrator:
                                         self.training_threshold, self.workers_per_instance,
                                         self.batch_size, self.random_opening_moves,
                                         self.random_opening_fraction,
+                                        self.trainer_batch_size, self.replay_buffer_size,
+                                        self.gamma, self.td_lambda,
                                     ),
                                     daemon=True
                                 ).start()
                         except Exception as e:
                             pass  # Will retry next cycle
 
+                # Only exit for inactivity after grace period or if we had activity then lost it
+                time_since_start = time.time() - startup_time
+                in_grace_period = time_since_start < startup_grace_period
+
                 if consecutive_failures >= max_failures:
-                    print("\nNo activity detected for too long. Exiting.")
-                    break
+                    if in_grace_period:
+                        print(f"[Status] Still in startup grace period ({time_since_start:.0f}s/{startup_grace_period}s)")
+                        consecutive_failures = max_failures - 1  # Don't exit yet
+                    elif not any_activity_ever:
+                        print(f"[Status] No activity yet, extending grace period...")
+                        consecutive_failures = max_failures // 2  # Give more time
+                    else:
+                        print("\nNo activity detected for too long after successful startup. Exiting.")
+                        break
 
         except KeyboardInterrupt:
             print("\n\nShutdown requested...")
@@ -813,6 +861,14 @@ def main():
                         help='Number of random moves at game start (default: 8)')
     parser.add_argument('--random-opening-fraction', type=float, default=0.3,
                         help='Fraction of games with random openings (default: 0.3)')
+    parser.add_argument('--trainer-batch-size', type=int, default=512,
+                        help='Training batch size (default: 512)')
+    parser.add_argument('--replay-buffer-size', type=int, default=100_000,
+                        help='Replay buffer capacity in positions (default: 100000)')
+    parser.add_argument('--gamma', type=float, default=0.99,
+                        help='Value discount factor for TD(λ) (default: 0.99)')
+    parser.add_argument('--td-lambda', type=float, default=0.95,
+                        help='TD(λ) trace decay (default: 0.95, 1.0=pure MC)')
 
     args = parser.parse_args()
 
@@ -852,6 +908,10 @@ def main():
         batch_size=args.batch_size,
         random_opening_moves=args.random_opening_moves,
         random_opening_fraction=args.random_opening_fraction,
+        trainer_batch_size=args.trainer_batch_size,
+        replay_buffer_size=args.replay_buffer_size,
+        gamma=args.gamma,
+        td_lambda=args.td_lambda,
     )
 
     # Handle signals

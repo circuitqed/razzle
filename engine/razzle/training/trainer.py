@@ -19,16 +19,20 @@ from ..ai.network import RazzleNet
 
 @dataclass
 class TrainingConfig:
-    """Configuration for training."""
+    """Configuration for training.
+
+    Uses AlphaZero-style equal weighting for policy and value losses.
+    The quartic value term helps with calibration but should be small.
+    """
     batch_size: int = 256
-    learning_rate: float = 0.001  # Adam default, stable for training
-    weight_decay: float = 1e-4
+    learning_rate: float = 0.001
+    weight_decay: float = 1e-4  # Standard L2 regularization
     epochs: int = 10
     policy_weight: float = 1.0
-    value_weight: float = 1.0  # Weight for quadratic (MSE) value loss
-    value_weight_quartic: float = 0.25  # Weight for quartic value loss (calibration)
-    difficulty_weight: float = 0.5  # Weight for difficulty prediction loss
-    illegal_penalty_weight: float = 1.0  # Lagrange multiplier for illegal move constraint
+    value_weight: float = 20.0  # Increased to balance with TD(λ) softer targets
+    value_weight_quartic: float = 1.0  # Small quartic term for calibration
+    difficulty_weight: float = 0.5
+    illegal_penalty_weight: float = 1.0
     device: str = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 
@@ -40,37 +44,24 @@ class RazzleDataset(Dataset):
         states: np.ndarray,
         policies: np.ndarray,
         values: np.ndarray,
-        legal_masks: Optional[np.ndarray] = None,
+        legal_masks: np.ndarray,
         difficulties: Optional[np.ndarray] = None
     ):
         self.states = torch.from_numpy(states)
         self.policies = torch.from_numpy(policies)
         self.values = torch.from_numpy(values)
-        # Legal masks: 1 for legal moves, 0 for illegal
-        # If not provided, assume all moves could be legal (backward compatibility)
-        if legal_masks is not None:
-            self.legal_masks = torch.from_numpy(legal_masks)
-        else:
-            self.legal_masks = None
+        self.legal_masks = torch.from_numpy(legal_masks)
         # Difficulty targets: predicted KL divergence between raw and MCTS policies
-        if difficulties is not None:
-            self.difficulties = torch.from_numpy(difficulties)
-        else:
-            self.difficulties = None
+        self.difficulties = torch.from_numpy(difficulties) if difficulties is not None else None
 
     def __len__(self) -> int:
         return len(self.states)
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, ...]:
-        base = (self.states[idx], self.policies[idx], self.values[idx])
-        if self.legal_masks is not None and self.difficulties is not None:
-            return base + (self.legal_masks[idx], self.difficulties[idx])
-        elif self.legal_masks is not None:
-            return base + (self.legal_masks[idx],)
-        elif self.difficulties is not None:
+        base = (self.states[idx], self.policies[idx], self.values[idx], self.legal_masks[idx])
+        if self.difficulties is not None:
             return base + (self.difficulties[idx],)
-        else:
-            return base
+        return base
 
 
 class Trainer:
@@ -101,7 +92,6 @@ class Trainer:
     def train_epoch(
         self,
         dataloader: DataLoader,
-        has_legal_masks: bool = False,
         has_difficulties: bool = False
     ) -> dict:
         """Train for one epoch."""
@@ -116,64 +106,39 @@ class Trainer:
         num_batches = 0
 
         for batch in dataloader:
-            # Unpack batch based on what's included
-            if has_legal_masks and has_difficulties:
+            # Unpack batch: always has legal_masks, optionally has difficulties
+            if has_difficulties:
                 states, target_policies, target_values, legal_masks, target_difficulties = batch
-                legal_masks = legal_masks.to(self.config.device)
-                target_difficulties = target_difficulties.to(self.config.device)
-            elif has_legal_masks:
-                states, target_policies, target_values, legal_masks = batch
-                legal_masks = legal_masks.to(self.config.device)
-                target_difficulties = None
-            elif has_difficulties:
-                states, target_policies, target_values, target_difficulties = batch
-                legal_masks = None
                 target_difficulties = target_difficulties.to(self.config.device)
             else:
-                states, target_policies, target_values = batch
-                legal_masks = None
+                states, target_policies, target_values, legal_masks = batch
                 target_difficulties = None
 
             states = states.to(self.config.device)
             target_policies = target_policies.to(self.config.device)
             target_values = target_values.to(self.config.device)
+            legal_masks = legal_masks.to(self.config.device)
 
             # Forward pass
             log_policies, values, difficulties = self.network(states)
             values = values.squeeze(-1)
             difficulties = difficulties.squeeze(-1)
 
-            if legal_masks is not None:
-                # Masked cross-entropy on legal moves only
-                # legal_masks: 1 for legal, 0 for illegal
-                # We compute CE only where legal_masks == 1
+            # Convert log probs to probs for the penalty term
+            policies = torch.exp(log_policies)
 
-                # Convert log probs to probs for the penalty term
-                policies = torch.exp(log_policies)
+            # Masked cross-entropy on legal moves only
+            # legal_masks: 1 for legal, 0 for illegal
+            masked_target = target_policies * legal_masks
+            masked_log_policies = log_policies * legal_masks
+            policy_loss = -torch.sum(masked_target * masked_log_policies, dim=1).mean()
 
-                # Cross-entropy on legal moves: -sum(target * log_pred) over legal moves
-                # Mask both target and log_policies
-                masked_target = target_policies * legal_masks
-                masked_log_policies = log_policies * legal_masks
-
-                # Normalize target over legal moves for proper CE
-                # (target should already sum to 1 over legal moves, but ensure numerical stability)
-                policy_loss = -torch.sum(masked_target * masked_log_policies, dim=1).mean()
-
-                # Illegal move penalty: sum of probability mass on illegal moves
-                # illegal_masks = 1 - legal_masks
-                illegal_masks = 1.0 - legal_masks
-                illegal_prob_mass = torch.sum(policies * illegal_masks, dim=1).mean()
-
-                illegal_penalty = self.config.illegal_penalty_weight * illegal_prob_mass
-            else:
-                # Backward compatible: standard cross-entropy over all moves
-                policy_loss = -torch.sum(target_policies * log_policies, dim=1).mean()
-                illegal_penalty = torch.tensor(0.0, device=self.config.device)
+            # Illegal move penalty: sum of probability mass on illegal moves
+            illegal_masks = 1.0 - legal_masks
+            illegal_prob_mass = torch.sum(policies * illegal_masks, dim=1).mean()
+            illegal_penalty = self.config.illegal_penalty_weight * illegal_prob_mass
 
             # Value loss: MSE (quadratic) + quartic term for calibration
-            # Quartic term penalizes large errors more heavily, encouraging
-            # the network to be less confident when uncertain
             value_diff = values - target_values
             value_loss_quadratic = torch.mean(value_diff ** 2)
             value_loss_quartic = torch.mean(value_diff ** 4)
@@ -192,7 +157,7 @@ class Trainer:
             # Combined loss
             loss = (
                 self.config.policy_weight * policy_loss +
-                value_loss_combined +  # Already weighted (quadratic + quartic)
+                value_loss_combined +
                 self.config.difficulty_weight * difficulty_loss +
                 illegal_penalty
             )
@@ -205,7 +170,7 @@ class Trainer:
             # Track metrics
             total_loss += loss.item()
             total_policy_loss += policy_loss.item()
-            total_value_loss += value_loss.item()  # Quadratic only (for comparison)
+            total_value_loss += value_loss.item()
             total_value_loss_quartic += value_loss_quartic.item()
             total_difficulty_loss += difficulty_loss.item()
             total_illegal_penalty += illegal_penalty.item()
@@ -214,11 +179,10 @@ class Trainer:
         metrics = {
             'loss': total_loss / num_batches,
             'policy_loss': total_policy_loss / num_batches,
-            'value_loss': total_value_loss / num_batches,  # Quadratic (MSE)
+            'value_loss': total_value_loss / num_batches,
             'value_loss_quartic': total_value_loss_quartic / num_batches,
+            'illegal_penalty': total_illegal_penalty / num_batches,
         }
-        if has_legal_masks:
-            metrics['illegal_penalty'] = total_illegal_penalty / num_batches
         if has_difficulties:
             metrics['difficulty_loss'] = total_difficulty_loss / num_batches
 
@@ -229,7 +193,7 @@ class Trainer:
         states: np.ndarray,
         policies: np.ndarray,
         values: np.ndarray,
-        legal_masks: Optional[np.ndarray] = None,
+        legal_masks: np.ndarray,
         difficulties: Optional[np.ndarray] = None,
         verbose: bool = True
     ) -> list[dict]:
@@ -237,12 +201,11 @@ class Trainer:
         Train on given data for configured number of epochs.
 
         Args:
-            states: Board state tensors (N, 6, 8, 7)
+            states: Board state tensors (N, 7, 8, 7)
             policies: Policy targets (N, NUM_ACTIONS)
             values: Value targets (N,)
-            legal_masks: Optional legal move masks (N, NUM_ACTIONS).
+            legal_masks: Legal move masks (N, NUM_ACTIONS).
                         1 for legal moves, 0 for illegal.
-                        If provided, enables masked cross-entropy + illegal penalty.
             difficulties: Optional difficulty targets (N,).
                          Values in [0, 1] where higher = harder position.
                          If provided, trains the difficulty prediction head.
@@ -258,16 +221,11 @@ class Trainer:
             num_workers=0
         )
 
-        has_legal_masks = legal_masks is not None
         has_difficulties = difficulties is not None
         history = []
 
         for epoch in range(self.config.epochs):
-            metrics = self.train_epoch(
-                dataloader,
-                has_legal_masks=has_legal_masks,
-                has_difficulties=has_difficulties
-            )
+            metrics = self.train_epoch(dataloader, has_difficulties=has_difficulties)
             if self.scheduler:
                 self.scheduler.step()
 
@@ -280,10 +238,9 @@ class Trainer:
                     f"Epoch {epoch + 1}/{self.config.epochs}: "
                     f"loss={metrics['loss']:.4f}, "
                     f"policy={metrics['policy_loss']:.4f}, "
-                    f"value={metrics['value_loss']:.4f}"
+                    f"value={metrics['value_loss']:.4f}, "
+                    f"illegal={metrics['illegal_penalty']:.4f}"
                 )
-                if 'illegal_penalty' in metrics:
-                    msg += f", illegal={metrics['illegal_penalty']:.4f}"
                 if 'difficulty_loss' in metrics:
                     msg += f", difficulty={metrics['difficulty_loss']:.4f}"
                 msg += f", lr={metrics['lr']:.6f}"
