@@ -128,8 +128,11 @@ def compute_policy_metrics(
     total_confidence = 0.0
 
     for i in range(batch_size):
-        pred_probs = np.exp(pred_logits[i])
-        pred_probs = np.clip(pred_probs, 1e-10, 1.0)  # Avoid log(0)
+        # Apply softmax to get proper probabilities
+        logits = pred_logits[i]
+        logits = logits - np.max(logits)  # Numerical stability
+        pred_probs = np.exp(logits)
+        pred_probs = pred_probs / (pred_probs.sum() + 1e-10)  # Normalize to sum to 1
 
         # Legal mass and confidence
         if legal_mask is not None:
@@ -138,14 +141,15 @@ def compute_policy_metrics(
             # Entropy over legal moves only (renormalized)
             legal_probs = pred_probs * legal_mask[i]
             legal_probs = legal_probs / (legal_probs.sum() + 1e-10)  # Renormalize
-            legal_probs = np.clip(legal_probs, 1e-10, 1.0)
-            entropy = -np.sum(legal_probs * np.log(legal_probs) * (legal_probs > 1e-9))
+            legal_probs_safe = np.clip(legal_probs, 1e-10, 1.0)
+            entropy = -np.sum(legal_probs * np.log(legal_probs_safe) * (legal_probs > 1e-9))
 
             # Policy confidence: max probability on legal moves (after renormalization)
             confidence = np.max(legal_probs)
         else:
             legal_mass = 1.0  # No mask means all legal
-            entropy = -np.sum(pred_probs * np.log(pred_probs))
+            pred_probs_clipped = np.clip(pred_probs, 1e-10, 1.0)
+            entropy = -np.sum(pred_probs * np.log(pred_probs_clipped))
             confidence = np.max(pred_probs)
 
         total_entropy += entropy

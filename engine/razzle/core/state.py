@@ -15,6 +15,7 @@ from .bitboard import (
     ROW_1_MASK, ROW_8_MASK,
     bit, popcount, iter_bits, sq_to_algebraic, print_bitboard
 )
+from .symmetry import rotate_tensor_180
 
 
 @dataclass(frozen=False)
@@ -215,13 +216,20 @@ class GameState:
         """
         Convert state to neural network input tensor.
 
+        The board is always presented from the current player's perspective:
+        - Current player's pieces appear at the "bottom" (low row indices)
+        - Goal is at the "top" (high row indices)
+
+        For player 1, the board is rotated 180° so both players see the same
+        spatial pattern - "advance toward the far rank".
+
         Returns (7, 8, 7) float32 array:
           - Plane 0: Current player's pieces
           - Plane 1: Current player's ball
           - Plane 2: Opponent's pieces
           - Plane 3: Opponent's ball
           - Plane 4: Touched mask (pieces that can't receive passes)
-          - Plane 5: Current player indicator (all 1s if player 0, all 0s if player 1)
+          - Plane 5: Always 1 (reserved for compatibility, player perspective is normalized)
           - Plane 6: Has passed indicator (all 1s if has_passed=True, all 0s otherwise)
         """
         planes = np.zeros((7, ROWS, COLS), dtype=np.float32)
@@ -249,11 +257,15 @@ class GameState:
             row, col = sq // COLS, sq % COLS
             planes[4, row, col] = 1.0
 
-        if p == 0:
-            planes[5, :, :] = 1.0
+        # Plane 5: Always 1 since perspective is now normalized
+        planes[5, :, :] = 1.0
 
         if self.has_passed:
             planes[6, :, :] = 1.0
+
+        # Rotate 180° for player 1 so both players see "advance toward far rank"
+        if p == 1:
+            planes = rotate_tensor_180(planes)
 
         return planes
 

@@ -1,6 +1,6 @@
 import type { ArenaMatch, ArenaRating, ArenaMatchesResponse, ArenaRatingsResponse } from '../types';
 
-const API_BASE = import.meta.env.VITE_API_URL || '';
+const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
 /**
  * Get arena match history.

@@ -4,10 +4,13 @@ Model Arena - Compare models by having them play against each other.
 """
 
 import argparse
+import random
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Optional
+import numpy as np
 import torch
 
 # Add parent directory to path
@@ -41,9 +44,22 @@ class MatchResult:
         return self.model2_wins / self.total
 
 
-def play_game(mcts1: MCTS, mcts2: MCTS, verbose: bool = False) -> int:
+def play_game(
+    mcts1: MCTS,
+    mcts2: MCTS,
+    verbose: bool = False,
+    opening_moves: int = 0,
+    opening_temperature: float = 1.0,
+) -> int:
     """
     Play a single game between two MCTS instances.
+
+    Args:
+        mcts1: MCTS instance for player 0
+        mcts2: MCTS instance for player 1
+        verbose: Print moves as they happen
+        opening_moves: Number of moves to use temperature-based selection
+        opening_temperature: Temperature for opening moves (higher = more random)
 
     Returns:
         1 if mcts1 wins, -1 if mcts2 wins, 0 for draw
@@ -58,13 +74,27 @@ def play_game(mcts1: MCTS, mcts2: MCTS, verbose: bool = False) -> int:
         # Search
         root = mcts.search(state, add_noise=False)
 
-        # Select best move (temperature = 0 for deterministic play)
-        best_move = None
-        best_visits = -1
-        for move, child in root.children.items():
-            if child.visit_count > best_visits:
-                best_visits = child.visit_count
-                best_move = move
+        # Select move - use temperature for opening moves
+        if move_count < opening_moves and opening_temperature > 0:
+            # Temperature-based selection for opening diversity
+            moves = list(root.children.keys())
+            visits = np.array([root.children[m].visit_count for m in moves], dtype=np.float32)
+
+            if visits.sum() > 0:
+                # Apply temperature: higher temp = more uniform distribution
+                visits = np.power(visits, 1.0 / opening_temperature)
+                probs = visits / visits.sum()
+                best_move = moves[np.random.choice(len(moves), p=probs)]
+            else:
+                best_move = random.choice(moves) if moves else None
+        else:
+            # Greedy selection (temperature = 0)
+            best_move = None
+            best_visits = -1
+            for move, child in root.children.items():
+                if child.visit_count > best_visits:
+                    best_visits = child.visit_count
+                    best_move = move
 
         if best_move is None:
             # No legal moves (shouldn't happen)
@@ -96,11 +126,25 @@ def run_match(
     num_games: int = 20,
     simulations: int = 200,
     device: str = 'cuda',
-    verbose: bool = False
+    verbose: bool = False,
+    opening_moves: int = 3,
+    opening_temperature: float = 1.0,
+    parallel_games: int = 1,
 ) -> MatchResult:
     """
     Run a match between two models.
     Each model plays as both Player 0 and Player 1.
+
+    Args:
+        model1_path: Path to first model
+        model2_path: Path to second model
+        num_games: Total number of games to play
+        simulations: MCTS simulations per move
+        device: Device for inference (cuda/cpu)
+        verbose: Print moves as they happen
+        opening_moves: Number of moves to use temperature-based selection (default: 3)
+        opening_temperature: Temperature for opening moves (default: 1.0)
+        parallel_games: Number of games to run in parallel (default: 1)
     """
     # Load models
     print(f"Loading model 1: {model1_path}")
@@ -111,48 +155,83 @@ def run_match(
     net2 = RazzleNet.load(model2_path, device=device)
     net2.eval()
 
-    # Create evaluators
+    # Create evaluators (shared across threads - thread-safe for inference)
     eval1 = BatchedEvaluator(net1, device=device)
     eval2 = BatchedEvaluator(net2, device=device)
 
-    # Create MCTS instances
     config = MCTSConfig(num_simulations=simulations)
-    mcts1 = MCTS(eval1, config)
-    mcts2 = MCTS(eval2, config)
-
     result = MatchResult()
 
     # Play games with alternating colors
     games_per_side = num_games // 2
 
-    print(f"\nPlaying {games_per_side} games with Model 1 as Player 0...")
-    for i in range(games_per_side):
-        outcome = play_game(mcts1, mcts2, verbose=verbose)
-        if outcome == 1:
-            result.model1_wins += 1
-        elif outcome == -1:
-            result.model2_wins += 1
+    def play_single_game(model1_first: bool) -> int:
+        """Play a single game with thread-local MCTS instances."""
+        # Create fresh MCTS instances per game (tree state is not shared)
+        mcts1 = MCTS(eval1, config)
+        mcts2 = MCTS(eval2, config)
+
+        if model1_first:
+            return play_game(mcts1, mcts2, verbose=verbose,
+                           opening_moves=opening_moves,
+                           opening_temperature=opening_temperature)
         else:
-            result.draws += 1
+            # Swap order - model2 is player 0
+            outcome = play_game(mcts2, mcts1, verbose=verbose,
+                              opening_moves=opening_moves,
+                              opening_temperature=opening_temperature)
+            # Flip outcome to be from model1's perspective
+            return -outcome
 
-        if (i + 1) % 5 == 0:
-            print(f"  Games: {i+1}/{games_per_side}, Model1: {result.model1_wins}, Model2: {result.model2_wins}, Draws: {result.draws}")
+    if parallel_games <= 1:
+        # Sequential execution (original behavior)
+        print(f"\nPlaying {games_per_side} games with Model 1 as Player 0...")
+        for i in range(games_per_side):
+            outcome = play_single_game(model1_first=True)
+            if outcome == 1:
+                result.model1_wins += 1
+            elif outcome == -1:
+                result.model2_wins += 1
+            else:
+                result.draws += 1
+            if (i + 1) % 5 == 0:
+                print(f"  Games: {i+1}/{games_per_side}, Model1: {result.model1_wins}, Model2: {result.model2_wins}, Draws: {result.draws}")
 
-    print(f"\nPlaying {games_per_side} games with Model 2 as Player 0...")
-    for i in range(games_per_side):
-        # Swap order - model2 is player 0, model1 is player 1
-        outcome = play_game(mcts2, mcts1, verbose=verbose)
-        # Note: outcome is from model2's perspective as player 0
-        if outcome == 1:
-            result.model2_wins += 1
-        elif outcome == -1:
-            result.model1_wins += 1
-        else:
-            result.draws += 1
+        print(f"\nPlaying {games_per_side} games with Model 2 as Player 0...")
+        for i in range(games_per_side):
+            outcome = play_single_game(model1_first=False)
+            if outcome == 1:
+                result.model1_wins += 1
+            elif outcome == -1:
+                result.model2_wins += 1
+            else:
+                result.draws += 1
+            if (i + 1) % 5 == 0:
+                print(f"  Games: {i+1}/{games_per_side}, Model1: {result.model1_wins}, Model2: {result.model2_wins}, Draws: {result.draws}")
+    else:
+        # Parallel execution
+        print(f"\nPlaying {num_games} games in parallel ({parallel_games} at a time)...")
 
-        if (i + 1) % 5 == 0:
-            total_played = games_per_side + i + 1
-            print(f"  Games: {i+1}/{games_per_side}, Model1: {result.model1_wins}, Model2: {result.model2_wins}, Draws: {result.draws}")
+        # Create list of games: True = model1 first, False = model2 first
+        games_to_play = [True] * games_per_side + [False] * games_per_side
+        completed = 0
+
+        with ThreadPoolExecutor(max_workers=parallel_games) as executor:
+            futures = {executor.submit(play_single_game, m1_first): m1_first
+                      for m1_first in games_to_play}
+
+            for future in as_completed(futures):
+                outcome = future.result()
+                if outcome == 1:
+                    result.model1_wins += 1
+                elif outcome == -1:
+                    result.model2_wins += 1
+                else:
+                    result.draws += 1
+
+                completed += 1
+                if completed % 5 == 0:
+                    print(f"  Games: {completed}/{num_games}, Model1: {result.model1_wins}, Model2: {result.model2_wins}, Draws: {result.draws}")
 
     return result
 
@@ -165,6 +244,12 @@ def main():
     parser.add_argument('--simulations', type=int, default=200, help='MCTS simulations per move (default: 200)')
     parser.add_argument('--device', type=str, default='cuda', help='Device (cuda/cpu)')
     parser.add_argument('--verbose', action='store_true', help='Print moves')
+    parser.add_argument('--opening-moves', type=int, default=3,
+                        help='Number of opening moves with temperature (default: 3)')
+    parser.add_argument('--opening-temperature', type=float, default=1.0,
+                        help='Temperature for opening moves (default: 1.0)')
+    parser.add_argument('--parallel', type=int, default=1,
+                        help='Number of games to run in parallel (default: 1)')
 
     args = parser.parse_args()
 
@@ -179,7 +264,10 @@ def main():
         num_games=args.games,
         simulations=args.simulations,
         device=args.device,
-        verbose=args.verbose
+        verbose=args.verbose,
+        opening_moves=args.opening_moves,
+        opening_temperature=args.opening_temperature,
+        parallel_games=args.parallel,
     )
 
     print("\n" + "=" * 50)

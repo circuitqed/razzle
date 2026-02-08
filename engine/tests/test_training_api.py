@@ -266,7 +266,7 @@ class TestTrainingModels:
         response = client.post("/training/models", data=data, files=files)
 
         assert response.status_code == 400
-        assert "must be a .pt file" in response.json()["detail"]
+        assert "must be a .pt" in response.json()["detail"]
 
     def test_get_latest_model_after_upload(self, client, temp_models_dir):
         """Test getting latest model after uploading."""

@@ -48,6 +48,7 @@ from razzle.ai.evaluator import BatchedEvaluator
 from razzle.core.state import GameState
 from razzle.core.moves import get_legal_moves
 from razzle.training.api_client import TrainingAPIClient
+import math
 
 
 @dataclass
@@ -90,6 +91,8 @@ class SelfPlayWorker:
         model_check_interval: int = 5,  # Check for new model every N games
         random_opening_moves: int = 0,  # Number of random moves at start
         random_opening_fraction: float = 0.0,  # Fraction of games with random opening
+        arena_fraction: float = 0.1,  # Fraction of games that are arena matches
+        arena_recency_weight: float = 2.0,  # Higher = prefer more recent models
     ):
         self.worker_id = worker_id
         self.api_url = api_url
@@ -103,6 +106,8 @@ class SelfPlayWorker:
         self.model_check_interval = model_check_interval
         self.random_opening_moves = random_opening_moves
         self.random_opening_fraction = random_opening_fraction
+        self.arena_fraction = arena_fraction
+        self.arena_recency_weight = arena_recency_weight
 
         # Directories
         self.model_dir = self.workspace / "model"
@@ -131,6 +136,11 @@ class SelfPlayWorker:
 
         # Status writer thread
         self._status_thread: Optional[Thread] = None
+
+        # Arena tracking
+        self.available_models: list[str] = []  # List of model versions
+        self.arena_games_played = 0
+        self.model_cache: dict[str, RazzleNet] = {}  # Cache loaded models
 
     def _get_gpu_name(self) -> str:
         """Get GPU name if available."""
@@ -219,6 +229,224 @@ class SelfPlayWorker:
             print(f"[Worker {self.worker_id}] Error checking for new model: {e}")
 
         return False
+
+    def _refresh_available_models(self) -> list[str]:
+        """Get list of available models from API for arena matches."""
+        try:
+            import requests
+            resp = requests.get(f"{self.api_url}/training/models", timeout=10)
+            if resp.status_code == 200:
+                data = resp.json()
+                models = data.get('models', [])
+                # Extract version strings, sorted by iteration
+                versions = []
+                for m in models:
+                    v = m.get('version', '')
+                    if v:
+                        versions.append(v)
+                # Sort by iteration number (initial first, then iter_001, iter_002, etc.)
+                def sort_key(v):
+                    if v == 'initial':
+                        return 0
+                    try:
+                        return int(v.split('_')[1])
+                    except:
+                        return 0
+                versions.sort(key=sort_key)
+                self.available_models = versions
+                return versions
+        except Exception as e:
+            print(f"[Worker {self.worker_id}] Error fetching model list: {e}")
+        return self.available_models
+
+    def _get_model_elos(self) -> dict[str, float]:
+        """Fetch ELO ratings for models from API."""
+        try:
+            import requests
+            resp = requests.get(f"{self.api_url}/arena/ratings", timeout=10)
+            if resp.status_code == 200:
+                data = resp.json()
+                ratings = data.get('ratings', [])
+                # Build dict of model_version -> elo
+                elos = {}
+                for r in ratings:
+                    version = r.get('model_version', '')
+                    elo = r.get('elo_rating', 1000)
+                    if version:
+                        elos[version] = elo
+                return elos
+        except Exception as e:
+            print(f"[Worker {self.worker_id}] Error fetching ELO ratings: {e}")
+        return {}
+
+    def _select_arena_models(self) -> tuple[str, str]:
+        """
+        Select two different models for arena match.
+
+        Uses combined recency + ELO weighting:
+        - Recency: more recent models get higher weight
+        - ELO: higher rated models get higher weight
+
+        Combined weight = recency_weight * elo_weight
+        This prioritizes matches between strong recent models.
+        """
+        models = self._refresh_available_models()
+        if len(models) < 2:
+            # Not enough models, return latest twice (will skip arena)
+            return (self.model_version, self.model_version)
+
+        # Get ELO ratings
+        elos = self._get_model_elos()
+
+        # Compute combined weights
+        n = len(models)
+        weights = np.zeros(n)
+
+        for i, model in enumerate(models):
+            # Recency weight: (index + 1) ^ recency_weight
+            recency = (i + 1) ** self.arena_recency_weight
+
+            # ELO weight: normalize ELO to reasonable scale
+            # ELO typically ranges 1000-2000, so (elo/1000)^2 gives good spread
+            elo = elos.get(model, 1200)  # Default 1200 for unrated models
+            elo_weight = (elo / 1000) ** 2
+
+            # Combined weight
+            weights[i] = recency * elo_weight
+
+        # Normalize to probabilities
+        if weights.sum() > 0:
+            probs = weights / weights.sum()
+        else:
+            probs = np.ones(n) / n
+
+        # Select two different models
+        idx1 = np.random.choice(n, p=probs)
+        # For second model, exclude first and renormalize
+        probs2 = probs.copy()
+        probs2[idx1] = 0
+        if probs2.sum() > 0:
+            probs2 = probs2 / probs2.sum()
+            idx2 = np.random.choice(n, p=probs2)
+        else:
+            # Fallback: random different model
+            idx2 = (idx1 + 1) % n
+
+        return (models[idx1], models[idx2])
+
+    def _get_model_evaluator(self, version: str) -> BatchedEvaluator:
+        """Get evaluator for a specific model version, using cache."""
+        if version == self.model_version:
+            return self.evaluator
+
+        if version in self.model_cache:
+            net = self.model_cache[version]
+        else:
+            # Download and load model
+            model_path = self.model_dir / f"{version}.pt"
+            if not model_path.exists():
+                print(f"[Worker {self.worker_id}] Downloading model for arena: {version}")
+                self.api_client.download_model(version, model_path)
+
+            net = RazzleNet.load(model_path, device=self.device)
+            # Keep cache small (max 5 models)
+            if len(self.model_cache) >= 5:
+                # Remove oldest
+                oldest = next(iter(self.model_cache))
+                del self.model_cache[oldest]
+            self.model_cache[version] = net
+
+        return BatchedEvaluator(net, batch_size=self.batch_size, device=self.device)
+
+    def play_arena_game(self, model1_version: str, model2_version: str) -> tuple[list[int], float, list[dict[int, int]], str, str]:
+        """
+        Play an arena game between two models.
+
+        Returns:
+            Tuple of (moves, result, visit_counts, model1_version, model2_version)
+            result is from model1's perspective: +1 if model1 won, -1 if model2 won, 0 draw
+        """
+        eval1 = self._get_model_evaluator(model1_version)
+        eval2 = self._get_model_evaluator(model2_version)
+
+        state = GameState.new_game()
+        moves = []
+        visit_counts = []
+
+        move_count = 0
+        self.current_game_moves = 0
+
+        # Track which evaluator plays which side
+        # model1 plays as player 0, model2 plays as player 1
+        evaluators = [eval1, eval2]
+
+        while not state.is_terminal() and move_count < 300:
+            current_player = state.current_player
+            ev = evaluators[current_player]
+
+            # Use temperature for opening diversity (first 3 moves)
+            temp = 1.0 if move_count < 6 else 0.0
+            config = MCTSConfig(
+                num_simulations=self.simulations,
+                temperature=temp,
+                batch_size=self.batch_size
+            )
+            mcts = MCTS(ev, config)
+
+            # Search
+            root = mcts.search_batched(state, add_noise=(move_count < 6))
+
+            # Record visit counts
+            vc = {}
+            for m, child in root.children.items():
+                if child.visit_count > 0:
+                    vc[m] = child.visit_count
+            visit_counts.append(vc)
+
+            # Select and apply move
+            move = mcts.select_move(root)
+            moves.append(move)
+            state.apply_move(move)
+
+            move_count += 1
+            self.current_game_moves = move_count
+
+            if self.shutdown_event.is_set():
+                break
+
+        # Determine result from model1's perspective
+        winner = state.get_winner()
+        if winner == 0:
+            result = 1.0  # model1 won
+        elif winner == 1:
+            result = -1.0  # model2 won
+        else:
+            result = 0.0  # draw
+
+        return moves, result, visit_counts, model1_version, model2_version
+
+    def submit_arena_result(self, model1: str, model2: str, result: float) -> bool:
+        """Submit arena match result to API."""
+        try:
+            import requests
+            # result is from model1's perspective
+            wins1 = 1 if result > 0 else 0
+            wins2 = 1 if result < 0 else 0
+            draws = 1 if result == 0 else 0
+
+            data = {
+                'model1_version': model1,
+                'model2_version': model2,
+                'model1_wins': wins1,
+                'model2_wins': wins2,
+                'draws': draws,
+                'simulations': self.simulations,
+            }
+            resp = requests.post(f"{self.api_url}/arena/matches", json=data, timeout=10)
+            return resp.status_code == 200
+        except Exception as e:
+            print(f"[Worker {self.worker_id}] Error submitting arena result: {e}")
+            return False
 
     def _get_status(self) -> WorkerStatus:
         """Get current worker status."""
@@ -392,28 +620,58 @@ class SelfPlayWorker:
         self._status_thread = Thread(target=self._status_writer_loop, daemon=True)
         self._status_thread.start()
 
-        print(f"[Worker {self.worker_id}] Starting self-play loop")
+        print(f"[Worker {self.worker_id}] Starting self-play loop (arena fraction: {self.arena_fraction:.0%})")
 
         try:
             while not self.shutdown_event.is_set():
-                # Play a game
-                moves, result, visit_counts = self.play_one_game()
+                # Decide if this is an arena game
+                is_arena_game = random.random() < self.arena_fraction
 
-                if self.shutdown_event.is_set():
-                    break
+                if is_arena_game and len(self.available_models) >= 2:
+                    # Play arena game between two different models
+                    model1, model2 = self._select_arena_models()
+                    if model1 != model2:
+                        moves, result, visit_counts, m1, m2 = self.play_arena_game(model1, model2)
 
-                # Submit game to API
-                if self.submit_game(moves, result, visit_counts):
-                    self.games_completed += 1
+                        if self.shutdown_event.is_set():
+                            break
 
-                    # Log progress
-                    winner_str = {1.0: "P1", -1.0: "P2", 0.0: "Draw"}.get(result, "?")
-                    print(f"[Worker {self.worker_id}] Game {self.games_completed}: "
-                          f"{len(moves)} moves, winner={winner_str}")
+                        # Submit as training game (use model1's version for training data)
+                        if self.submit_game(moves, result, visit_counts):
+                            self.games_completed += 1
+                            self.arena_games_played += 1
+
+                            # Also submit arena result
+                            self.submit_arena_result(m1, m2, result)
+
+                            winner_str = {1.0: m1, -1.0: m2, 0.0: "Draw"}.get(result, "?")
+                            print(f"[Worker {self.worker_id}] Arena {self.arena_games_played}: "
+                                  f"{m1} vs {m2}, {len(moves)} moves, winner={winner_str}")
+                    else:
+                        is_arena_game = False  # Fall back to self-play
+
+                if not is_arena_game:
+                    # Standard self-play game
+                    moves, result, visit_counts = self.play_one_game()
+
+                    if self.shutdown_event.is_set():
+                        break
+
+                    # Submit game to API
+                    if self.submit_game(moves, result, visit_counts):
+                        self.games_completed += 1
+
+                        # Log progress
+                        winner_str = {1.0: "P1", -1.0: "P2", 0.0: "Draw"}.get(result, "?")
+                        print(f"[Worker {self.worker_id}] Game {self.games_completed}: "
+                              f"{len(moves)} moves, winner={winner_str}")
 
                 # Check for new model periodically
                 if self.games_completed % self.model_check_interval == 0:
                     self._check_for_new_model()
+                    # Also refresh model list for arena
+                    if self.arena_fraction > 0:
+                        self._refresh_available_models()
 
         except Exception as e:
             self.status = "error"
@@ -460,6 +718,10 @@ def main():
                         help='Number of random moves at game start (default: 0)')
     parser.add_argument('--random-opening-fraction', type=float, default=0.3,
                         help='Fraction of games with random openings (default: 0.3)')
+    parser.add_argument('--arena-fraction', type=float, default=0.1,
+                        help='Fraction of games that are arena matches between models (default: 0.1)')
+    parser.add_argument('--arena-recency-weight', type=float, default=2.0,
+                        help='Weight for recency in arena model selection (default: 2.0)')
 
     args = parser.parse_args()
 
@@ -496,6 +758,8 @@ def main():
         model_check_interval=args.model_check_interval,
         random_opening_moves=args.random_opening_moves,
         random_opening_fraction=args.random_opening_fraction,
+        arena_fraction=args.arena_fraction,
+        arena_recency_weight=args.arena_recency_weight,
     )
 
     # Handle signals for graceful shutdown

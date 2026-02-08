@@ -63,10 +63,11 @@ export default function TrainingDashboard({ onClose, refreshInterval = 10000 }: 
       const [metricsData, dashboardData, ratingsData, matchesData, leaderboardData] = await Promise.all([
         getAllTrainingMetrics(),
         getDashboardData(),
-        getArenaRatings().catch(() => []),  // Gracefully handle if arena data doesn't exist
-        getArenaMatches().catch(() => []),
-        getLeaderboard(undefined, 100, 0).catch(() => []),  // Get all players with any games
+        getArenaRatings().catch((e) => { console.error('Arena ratings error:', e); return []; }),
+        getArenaMatches().catch((e) => { console.error('Arena matches error:', e); return []; }),
+        getLeaderboard(undefined, 100, 0).catch((e) => { console.error('Leaderboard error:', e); return []; }),
       ]);
+      console.log('Fetched data:', { ratingsData, matchesData, leaderboardData });
 
       setMetrics(metricsData);
       setDashboard(dashboardData);

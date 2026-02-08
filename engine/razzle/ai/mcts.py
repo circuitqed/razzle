@@ -230,6 +230,14 @@ class MCTS:
         self._track_eval(root.state)
         root.expand(policy)
 
+        # Pass quiescence for root: if mid-pass, search all continuations
+        # This ensures we find forced wins even if network priors are wrong
+        if self.config.pass_quiescence and root.state.has_passed:
+            value = self._quiescence_search(root, depth=0)
+            # Seed root's value with the quiescence-corrected value
+            root.visit_count = 1
+            root.value_sum = value
+
         if add_noise and self.config.dirichlet_epsilon > 0:
             root.add_dirichlet_noise(
                 self.config.dirichlet_alpha,
@@ -242,7 +250,7 @@ class MCTS:
 
         return root
 
-    def _quiescence_search(self, node: Node, depth: int = 0) -> float:
+    def _quiescence_search(self, node: Node, depth: int = 0, update_children: bool = True) -> float:
         """
         Search through pass sequence to find best outcome.
 
@@ -253,6 +261,7 @@ class MCTS:
         Args:
             node: Current node (must be expanded)
             depth: Current depth in quiescence search
+            update_children: If True, seed children's Q values with quiescence results
 
         Returns:
             Best value achievable from this position
@@ -290,7 +299,16 @@ class MCTS:
                 self._track_eval(child.state, in_quiescence=True)
                 child.expand(policy)
 
-            child_value = self._quiescence_search(child, depth + 1)
+            # Recursively search with update_children=True to seed all descendants
+            child_value = self._quiescence_search(child, depth + 1, update_children=update_children)
+
+            # Seed child's Q value so UCB selection uses correct values
+            # This is critical: even if network gives low prior to winning moves,
+            # the correct Q value will cause them to be explored
+            if update_children and child.visit_count == 0:
+                child.visit_count = 1
+                child.value_sum = child_value
+
             best_value = max(best_value, child_value)
 
         return best_value
@@ -419,6 +437,14 @@ class MCTS:
         self._track_eval(root.state)
         root.expand(policy)
 
+        # Pass quiescence for root: if mid-pass, search all continuations
+        # This ensures we find forced wins even if network priors are wrong
+        if self.config.pass_quiescence and root.state.has_passed:
+            value = self._quiescence_search(root, depth=0)
+            # Seed root's value with the quiescence-corrected value
+            root.visit_count = 1
+            root.value_sum = value
+
         if add_noise and self.config.dirichlet_epsilon > 0:
             root.add_dirichlet_noise(
                 self.config.dirichlet_alpha,
@@ -484,6 +510,11 @@ class MCTS:
                 # Expand leaf
                 if not leaf.is_expanded:
                     leaf.expand(policy)
+
+                # Pass quiescence: if we're mid-pass, search all continuations
+                # and take the max value (same player is moving throughout)
+                if self.config.pass_quiescence and leaf.state.has_passed:
+                    value = self._quiescence_search(leaf, depth=0)
 
                 # Backup value and remove virtual loss
                 # Only flip sign when player changes, not at every level
@@ -588,6 +619,14 @@ class MCTS:
 
         self._track_eval(root.state)
         root.expand(policy)
+
+        # Pass quiescence for root: if mid-pass, search all continuations
+        # This ensures we find forced wins even if network priors are wrong
+        if self.config.pass_quiescence and root.state.has_passed:
+            value = self._quiescence_search(root, depth=0)
+            # Seed root's value with the quiescence-corrected value
+            root.visit_count = 1
+            root.value_sum = value
 
         if add_noise and self.config.dirichlet_epsilon > 0:
             root.add_dirichlet_noise(

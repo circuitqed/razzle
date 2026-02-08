@@ -241,8 +241,9 @@ class TrainingLauncher:
             print("\n[2/3] Keeping existing training data")
             status = get_training_status(self.api_url)
             if status:
+                latest = status.get('latest_model') or {}
                 print(f"  Existing: {status.get('games_total', 0)} games, "
-                      f"iteration {status.get('latest_model', {}).get('iteration', 0)}")
+                      f"iteration {latest.get('iteration', 0)}")
 
         # Step 3: Start distributed training (workers + trainer on Vast.ai)
         print("\n[3/3] Starting distributed training on Vast.ai...")
@@ -339,15 +340,18 @@ class TrainingLauncher:
         if status:
             print(f"  Games: {status.get('games_pending', 0)} pending / "
                   f"{status.get('games_total', 0)} total")
-            latest = status.get('latest_model', {})
+            latest = status.get('latest_model')
             if latest:
-                print(f"  Model: iter {latest.get('iteration', 0)}, "
-                      f"loss {latest.get('final_loss', 0):.4f}")
+                loss = latest.get('final_loss')
+                loss_str = f"{loss:.4f}" if loss is not None else "N/A"
+                print(f"  Model: iter {latest.get('iteration', 0)}, loss {loss_str}")
 
         if metrics:
-            print(f"  Policy acc: {metrics.get('policy_top1_accuracy', 0)*100:.1f}%, "
-                  f"EBF: {metrics.get('policy_ebf', 0):.1f}")
-            print(f"  Calibration: {metrics.get('value_calibration_error', 0):.4f}")
+            acc = metrics.get('policy_top1_accuracy') or 0
+            ebf = metrics.get('policy_ebf') or 0
+            cal = metrics.get('value_calibration_error') or 0
+            print(f"  Policy acc: {acc*100:.1f}%, EBF: {ebf:.1f}")
+            print(f"  Calibration: {cal:.4f}")
 
     def _cleanup(self) -> int:
         """Clean up processes on shutdown."""

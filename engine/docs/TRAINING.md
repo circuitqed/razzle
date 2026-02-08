@@ -415,38 +415,39 @@ curl https://razzledazzle.lazybrains.com/api/training/metrics/latest | jq .
 ### Launching Training
 
 ```bash
-# Standard launch with large network (256f/15b)
+# Recommended: Use the start script (runs in background with nohup)
+./scripts/start_training.sh
+
+# Or with custom arguments
+./scripts/start_training.sh --workers 8 --simulations 1600
+
+# Manual launch (foreground - stops when terminal closes)
 python scripts/train_distributed.py \
   --workers 4 \
   --workers-per-instance 3 \
   --network-size large \
   --threshold 50 \
   --simulations 800
-
-# Or use the launcher script with presets
-python scripts/launch_training.py --fresh
 ```
 
 ### Monitoring
 
 1. **Web Dashboard**: Open webapp, press 'T' for training dashboard
-2. **API endpoints**:
+2. **Log file**: `tail -f /tmp/training.log`
+3. **API endpoints**:
    - `/training/dashboard` - Worker status, game counts, models
    - `/training/metrics` - Training metrics history
    - `/training/metrics/latest` - Most recent iteration
 
 ### Stopping Training
 
-Press Ctrl+C in the orchestrator terminal. This will:
-1. Signal shutdown
-2. Destroy all Vast.ai instances
-3. Exit cleanly
-
-If the orchestrator crashes without cleanup, manually destroy instances:
 ```bash
-vastai destroy instance <id>
-# or destroy all
-vastai show instances | grep running | awk '{print $1}' | xargs -I{} vastai destroy instance {}
+# Recommended: Use the stop script (kills process and cleans up instances)
+./scripts/stop_training.sh
+
+# Or manually
+pkill -f train_distributed.py
+vastai show instances --raw | python3 -c "import sys,json; [print(i['id']) for i in json.load(sys.stdin)]" | xargs -I{} vastai destroy instance {}
 ```
 
 ## Files Reference

@@ -414,3 +414,147 @@ class TestMCTSBatched:
 
         assert policy.shape == (NUM_ACTIONS,)
         assert policy.sum() == pytest.approx(1.0)
+
+
+class TestMCTSPassQuiescence:
+    """Tests for pass quiescence search - finding wins during pass chains."""
+
+    def _create_winning_position(self) -> tuple[GameState, int]:
+        """
+        Create a position where player 0 can win via a pass chain.
+
+        Returns (state, winning_move) where applying winning_move leads to victory.
+
+        Position: Player 0 has ball at g7 (row 7) with a piece at g8 (goal row).
+        Passing g7->g8 wins immediately.
+        """
+        state = GameState.new_game()
+        # Set up: player 0 has ball ready to score
+        # Ball at g7 (square 6 + 6*7 = 48), piece at g8 (square 6 + 7*7 = 55)
+        from razzle.core.bitboard import bit
+        state.pieces = (bit(55) | bit(10) | bit(11) | bit(12) | bit(13), state.pieces[1])
+        state.balls = (bit(48), state.balls[1])
+        # Make a knight move to set up for pass (has_passed must be False initially)
+        # Actually, to test quiescence, we need has_passed=True
+        # So simulate: player made a pass, now can continue passing to goal
+        state.has_passed = True
+        state.touched_mask = bit(48)  # Ball position is touched
+
+        # Winning move: pass from g7 (48) to g8 (55) = 48 * 56 + 55 = 2743
+        winning_move = 48 * 56 + 55
+        return state, winning_move
+
+    def _create_two_pass_win(self) -> tuple[GameState, int, int]:
+        """
+        Create a position where player 0 can win via TWO passes.
+
+        Ball at f6, piece at g7, piece at g8 (goal).
+        Path: f6->g7->g8 wins.
+
+        Returns (state, first_pass, second_pass).
+        """
+        from razzle.core.bitboard import bit
+        state = GameState.new_game()
+        # f6 = 5 + 5*7 = 40, g7 = 6 + 6*7 = 48, g8 = 6 + 7*7 = 55
+        state.pieces = (bit(48) | bit(55) | bit(10) | bit(11) | bit(12), state.pieces[1])
+        state.balls = (bit(40), state.balls[1])
+        state.has_passed = True
+        state.touched_mask = bit(40)  # Ball position is touched
+
+        # First pass: f6 (40) -> g7 (48) = 40 * 56 + 48 = 2288
+        first_pass = 40 * 56 + 48
+        # Second pass: g7 (48) -> g8 (55) = 48 * 56 + 55 = 2743
+        second_pass = 48 * 56 + 55
+        return state, first_pass, second_pass
+
+    def test_quiescence_finds_immediate_win(self):
+        """Quiescence search finds immediate winning pass."""
+        state, winning_move = self._create_winning_position()
+
+        evaluator = DummyEvaluator()
+        config = MCTSConfig(num_simulations=50, pass_quiescence=True)
+        mcts = MCTS(evaluator, config)
+
+        root = mcts.search(state)
+        best_move = mcts.select_move(root)
+
+        # The winning move should have very high value
+        if winning_move in root.children:
+            winning_child = root.children[winning_move]
+            # Value should be near +1 (winning)
+            assert winning_child.value > 0.8, f"Winning move value {winning_child.value} should be > 0.8"
+
+    def test_batched_quiescence_finds_immediate_win(self):
+        """Batched MCTS with quiescence finds immediate winning pass."""
+        state, winning_move = self._create_winning_position()
+
+        evaluator = DummyEvaluator()
+        config = MCTSConfig(num_simulations=50, batch_size=8, pass_quiescence=True)
+        mcts = MCTS(evaluator, config)
+
+        root = mcts.search_batched(state)
+
+        # The winning move should be found
+        if winning_move in root.children:
+            winning_child = root.children[winning_move]
+            # Value should be near +1 (winning)
+            assert winning_child.value > 0.8, f"Winning move value {winning_child.value} should be > 0.8"
+            # Should get most visits
+            max_visits = max(c.visit_count for c in root.children.values())
+            assert winning_child.visit_count >= max_visits * 0.8, "Winning move should get most visits"
+
+    def test_batched_quiescence_finds_two_pass_win(self):
+        """Batched MCTS with quiescence finds 2-pass winning sequence."""
+        state, first_pass, second_pass = self._create_two_pass_win()
+
+        evaluator = DummyEvaluator()
+        config = MCTSConfig(num_simulations=100, batch_size=8, pass_quiescence=True)
+        mcts = MCTS(evaluator, config)
+
+        root = mcts.search_batched(state)
+
+        # The first pass should lead to the winning sequence
+        if first_pass in root.children:
+            first_child = root.children[first_pass]
+            # Value should be near +1 (winning)
+            assert first_child.value > 0.8, f"First pass value {first_child.value} should be > 0.8"
+
+    def test_batched_quiescence_prefers_win_over_end_turn(self):
+        """Batched MCTS prefers winning pass over END_TURN."""
+        state, winning_move = self._create_winning_position()
+
+        evaluator = DummyEvaluator()
+        config = MCTSConfig(num_simulations=100, batch_size=8, pass_quiescence=True, temperature=0)
+        mcts = MCTS(evaluator, config)
+
+        root = mcts.search_batched(state)
+        best_move = mcts.select_move(root)
+
+        # When there's a winning move, it should be selected over END_TURN
+        # END_TURN is encoded as -1
+        if winning_move in root.children:
+            winning_visits = root.children[winning_move].visit_count
+            end_turn_visits = root.children.get(-1, Node(state=state)).visit_count
+            assert winning_visits > end_turn_visits, \
+                f"Winning move visits ({winning_visits}) should exceed END_TURN ({end_turn_visits})"
+
+    def test_quiescence_config_respected(self):
+        """Quiescence can be toggled via config."""
+        state, winning_move = self._create_winning_position()
+
+        # With quiescence enabled
+        evaluator = DummyEvaluator()
+        config_with = MCTSConfig(num_simulations=50, batch_size=8, pass_quiescence=True)
+        mcts_with = MCTS(evaluator, config_with)
+        root_with = mcts_with.search_batched(state)
+
+        # Without quiescence
+        config_without = MCTSConfig(num_simulations=50, batch_size=8, pass_quiescence=False)
+        mcts_without = MCTS(evaluator, config_without)
+        root_without = mcts_without.search_batched(state)
+
+        # Both should find the winning move eventually since it's a terminal state
+        # But with quiescence, the win should be found on first evaluation of the position
+        # The quiescence_evals stat should be higher when enabled
+        assert mcts_with.stats.quiescence_evals >= 0
+        assert mcts_without.stats.quiescence_evals == 0

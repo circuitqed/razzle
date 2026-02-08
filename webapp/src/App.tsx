@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { BrowserRouter, Routes, Route, useParams, useNavigate } from 'react-router-dom';
 import Board from './components/Board';
 import MoveHistory from './components/MoveHistory';
 import ConfirmDialog from './components/ConfirmDialog';
@@ -10,10 +11,14 @@ import UserMenu from './components/UserMenu';
 import GameBrowser from './components/GameBrowser';
 import ReplayViewer from './components/ReplayViewer';
 import AnalysisBoard from './components/AnalysisBoard';
+import OnlineLobby from './components/OnlineLobby';
+import WaitingForOpponent from './components/WaitingForOpponent';
+import OnlineGame from './components/OnlineGame';
 import { useGame } from './hooks/useGame';
 import { setSoundEnabled, isSoundEnabled } from './utils/sounds';
 import { healthCheck, listModels, type ModelInfo } from './api/engine';
-import { AuthProvider } from './contexts/AuthContext';
+import * as onlineApi from './api/online';
+import { AuthProvider, useAuth } from './contexts/AuthContext';
 
 // Simulation options (powers of 2)
 const SIMULATION_OPTIONS = [
@@ -38,13 +43,12 @@ function AppContent() {
   const [soundOn, setSoundOn] = useState(isSoundEnabled());
   const [showNewGameConfirm, setShowNewGameConfirm] = useState(false);
   const [showRules, setShowRules] = useState(false);
-  const [showTraining, setShowTraining] = useState(false);
   const [currentModel, setCurrentModel] = useState<string | null>(null);
 
   // AI settings
   const [availableModels, setAvailableModels] = useState<ModelInfo[]>([]);
   const [selectedModel, setSelectedModel] = useState<string | undefined>(undefined); // undefined = latest
-  const [selectedSimulations, setSelectedSimulations] = useState(800);
+  const [selectedSimulations, setSelectedSimulations] = useState(1024);
 
   // Auth modals
   const [showLoginModal, setShowLoginModal] = useState(false);
@@ -56,6 +60,21 @@ function AppContent() {
 
   // Analysis board
   const [showAnalysisBoard, setShowAnalysisBoard] = useState(false);
+
+  // Online multiplayer
+  const [showOnlineLobby, setShowOnlineLobby] = useState(false);
+  const [waitingGame, setWaitingGame] = useState<{
+    gameId: string;
+    joinCode: string;
+    hostColor: number;
+  } | null>(null);
+  // Reserved for future use when tracking active online games
+  // const [activeOnlineGame, setActiveOnlineGame] = useState<{
+  //   gameId: string;
+  //   myColor: number;
+  // } | null>(null);
+
+  const navigate = useNavigate();
 
   const toggleSound = () => {
     const newValue = !soundOn;
@@ -206,9 +225,6 @@ function AppContent() {
         case '/':
           setShowRules(true);
           break;
-        case 't':
-          setShowTraining((prev) => !prev);
-          break;
         case 'b':
           setShowGameBrowser((prev) => !prev);
           break;
@@ -226,6 +242,54 @@ function AppContent() {
     setShowGameBrowser(false);
     setReplayGameId(gameId);
   };
+
+  // Online multiplayer handlers
+  const handleGameCreated = (gameId: string, joinCode: string, hostColor: number) => {
+    setShowOnlineLobby(false);
+    setWaitingGame({ gameId, joinCode, hostColor });
+  };
+
+  const handleGameJoined = (gameId: string, _yourColor: number) => {
+    setShowOnlineLobby(false);
+    setWaitingGame(null);
+    navigate(`/online/${gameId}`);
+  };
+
+  const handleCancelWaiting = async () => {
+    if (waitingGame) {
+      try {
+        await onlineApi.leaveOnlineGame(waitingGame.gameId);
+      } catch (err) {
+        console.error('Failed to cancel game:', err);
+      }
+    }
+    setWaitingGame(null);
+  };
+
+
+  // WebSocket connection for waiting game - detect when opponent joins
+  useEffect(() => {
+    if (!waitingGame) return;
+
+    const ws = onlineApi.connectOnlineGameWebSocket(waitingGame.gameId, {
+      onPlayerJoined: (data) => {
+        console.log('Opponent joined waiting game:', data);
+        // Navigate to the online game
+        setWaitingGame(null);
+        navigate(`/online/${waitingGame.gameId}`);
+      },
+      onError: (error) => {
+        console.error('WebSocket error:', error);
+      },
+      onClose: () => {
+        console.log('WebSocket closed');
+      },
+    });
+
+    return () => {
+      ws.close();
+    };
+  }, [waitingGame, navigate]);
 
   return (
     <div className="min-h-screen bg-gray-900 text-white flex flex-col items-center justify-center p-2 sm:p-4">
@@ -261,6 +325,12 @@ function AppContent() {
           }`}
         >
           2 Player
+        </button>
+        <button
+          onClick={() => setShowOnlineLobby(true)}
+          className="px-4 py-2 rounded font-medium transition-colors bg-green-600 hover:bg-green-700 text-white"
+        >
+          Play Online
         </button>
       </div>
 
@@ -419,13 +489,6 @@ function AppContent() {
               ?
             </button>
             <button
-              onClick={() => setShowTraining(true)}
-              className="px-4 py-2 bg-purple-600 hover:bg-purple-700 rounded font-medium transition-colors"
-              title="Training Dashboard"
-            >
-              📊
-            </button>
-            <button
               onClick={() => setShowGameBrowser(true)}
               className="px-4 py-2 bg-gray-600 hover:bg-gray-700 rounded font-medium transition-colors"
               title="Game History (B)"
@@ -477,11 +540,6 @@ function AppContent() {
       {/* Rules Modal */}
       <RulesModal isOpen={showRules} onClose={() => setShowRules(false)} />
 
-      {/* Training Dashboard */}
-      {showTraining && (
-        <TrainingDashboard onClose={() => setShowTraining(false)} refreshInterval={10000} />
-      )}
-
       {/* Auth Modals */}
       <LoginModal
         isOpen={showLoginModal}
@@ -520,14 +578,141 @@ function AppContent() {
         isOpen={showAnalysisBoard}
         onClose={() => setShowAnalysisBoard(false)}
       />
+
+      {/* Online Lobby */}
+      <OnlineLobby
+        isOpen={showOnlineLobby}
+        onClose={() => setShowOnlineLobby(false)}
+        onGameCreated={handleGameCreated}
+        onGameJoined={handleGameJoined}
+        onOpenLogin={() => {
+          setShowOnlineLobby(false);
+          setShowLoginModal(true);
+        }}
+      />
+
+      {/* Waiting for Opponent */}
+      {waitingGame && (
+        <WaitingForOpponent
+          joinCode={waitingGame.joinCode}
+          hostColor={waitingGame.hostColor}
+          onCancel={handleCancelWaiting}
+        />
+      )}
     </div>
   );
 }
 
+// Standalone Training Dashboard page for /dashboard route
+function TrainingDashboardPage() {
+  return (
+    <TrainingDashboard refreshInterval={10000} />
+  );
+}
+
+// Online game page wrapper
+function OnlineGamePage() {
+  const { gameId } = useParams<{ gameId: string }>();
+  const navigate = useNavigate();
+
+  if (!gameId) {
+    navigate('/');
+    return null;
+  }
+
+  return (
+    <OnlineGame
+      gameId={gameId}
+      onGameEnd={(winner, reason) => {
+        console.log('Game ended:', { winner, reason });
+      }}
+    />
+  );
+}
+
+// Join game via code page
+function JoinGamePage() {
+  const { code } = useParams<{ code: string }>();
+  const navigate = useNavigate();
+  const { user } = useAuth();
+  const [error, setError] = useState<string | null>(null);
+  const [isJoining, setIsJoining] = useState(false);
+
+  useEffect(() => {
+    if (!code) {
+      navigate('/');
+      return;
+    }
+
+    if (!user) {
+      // Store the code and redirect to login
+      sessionStorage.setItem('pendingJoinCode', code);
+      navigate('/');
+      return;
+    }
+
+    const joinGame = async () => {
+      setIsJoining(true);
+      try {
+        const result = await onlineApi.joinOnlineGame(code);
+        navigate(`/online/${result.game_id}`);
+      } catch (err) {
+        if (err instanceof onlineApi.OnlineAPIError) {
+          setError(err.message);
+        } else {
+          setError('Failed to join game');
+        }
+        // Redirect to home after showing error
+        setTimeout(() => navigate('/'), 3000);
+      } finally {
+        setIsJoining(false);
+      }
+    };
+
+    joinGame();
+  }, [code, user, navigate]);
+
+  return (
+    <div className="min-h-screen bg-gray-900 text-white flex flex-col items-center justify-center p-4">
+      <h1 className="text-2xl font-bold mb-4">Razzle Dazzle</h1>
+      {isJoining && (
+        <div className="text-center">
+          <div className="w-12 h-12 border-4 border-green-500 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
+          <p>Joining game {code}...</p>
+        </div>
+      )}
+      {error && (
+        <div className="text-center">
+          <div className="bg-red-600 px-4 py-2 rounded mb-4">{error}</div>
+          <p className="text-gray-400">Redirecting to home...</p>
+        </div>
+      )}
+      {!user && !isJoining && (
+        <div className="text-center">
+          <p className="text-yellow-400 mb-4">Please log in to join the game.</p>
+          <p className="text-gray-400">Redirecting to home...</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Need to wrap AppContent with navigation hooks
+function AppContentWrapper() {
+  return <AppContent />;
+}
+
 export default function App() {
   return (
-    <AuthProvider>
-      <AppContent />
-    </AuthProvider>
+    <BrowserRouter>
+      <AuthProvider>
+        <Routes>
+          <Route path="/" element={<AppContentWrapper />} />
+          <Route path="/dashboard" element={<TrainingDashboardPage />} />
+          <Route path="/online/:gameId" element={<OnlineGamePage />} />
+          <Route path="/join/:code" element={<JoinGamePage />} />
+        </Routes>
+      </AuthProvider>
+    </BrowserRouter>
   );
 }

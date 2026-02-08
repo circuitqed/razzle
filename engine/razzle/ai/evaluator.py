@@ -13,6 +13,7 @@ import numpy as np
 import torch
 
 from ..core.state import GameState
+from ..core.symmetry import rotate_policy_180
 from .network import RazzleNet, NUM_ACTIONS, END_TURN_ACTION
 
 
@@ -66,6 +67,10 @@ class BatchedEvaluator:
         policy = torch.exp(log_policy).squeeze(0).cpu().numpy()
         value = value.item()
 
+        # Rotate policy back for player 1 (board was rotated in to_tensor)
+        if state.current_player == 1:
+            policy = rotate_policy_180(policy)
+
         self.total_evals += 1
         self.total_batches += 1
 
@@ -88,6 +93,10 @@ class BatchedEvaluator:
         policy = torch.exp(log_policy).squeeze(0).cpu().numpy()
         value = value.item()
         difficulty = difficulty.item()
+
+        # Rotate policy back for player 1 (board was rotated in to_tensor)
+        if state.current_player == 1:
+            policy = rotate_policy_180(policy)
 
         self.total_evals += 1
         self.total_batches += 1
@@ -112,6 +121,11 @@ class BatchedEvaluator:
 
         policies = torch.exp(log_policies).cpu().numpy()
         values = values.squeeze(-1).cpu().numpy()
+
+        # Rotate policies back for player 1 states
+        for i, state in enumerate(states):
+            if state.current_player == 1:
+                policies[i] = rotate_policy_180(policies[i])
 
         self.total_evals += len(states)
         self.total_batches += 1
@@ -139,6 +153,11 @@ class BatchedEvaluator:
         policies = torch.exp(log_policies).cpu().numpy()
         values = values.squeeze(-1).cpu().numpy()
         difficulties = difficulties.squeeze(-1).cpu().numpy()
+
+        # Rotate policies back for player 1 states
+        for i, state in enumerate(states):
+            if state.current_player == 1:
+                policies[i] = rotate_policy_180(policies[i])
 
         self.total_evals += len(states)
         self.total_batches += 1

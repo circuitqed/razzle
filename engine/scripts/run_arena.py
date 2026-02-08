@@ -131,6 +131,9 @@ def run_tournament(
     models_dir: Path = MODELS_DIR,
     api_url: Optional[str] = None,
     device: str = 'cuda',
+    opening_moves: int = 3,
+    opening_temperature: float = 1.0,
+    parallel_games: int = 1,
 ) -> dict[int, list[dict]]:
     """
     Run tournament between models at each simulation count.
@@ -142,6 +145,9 @@ def run_tournament(
         models_dir: Directory containing model files
         api_url: Optional API URL to save results (None = local database)
         device: Device to use for inference
+        opening_moves: Number of moves to use temperature-based selection
+        opening_temperature: Temperature for opening moves
+        parallel_games: Number of games to run in parallel
 
     Returns:
         Dictionary mapping simulation count to list of match results
@@ -161,7 +167,8 @@ def run_tournament(
         if api_url:
             try:
                 resp = requests.get(f"{api_url}/arena/matches", params={"simulations": sims})
-                existing_matches[sims] = resp.json() if resp.ok else []
+                data = resp.json() if resp.ok else {}
+                existing_matches[sims] = data.get("matches", []) if isinstance(data, dict) else data
             except Exception:
                 existing_matches[sims] = []
         else:
@@ -216,7 +223,10 @@ def run_tournament(
                     num_games=num_games,
                     simulations=sims,
                     device=device,
-                    verbose=False
+                    verbose=False,
+                    opening_moves=opening_moves,
+                    opening_temperature=opening_temperature,
+                    parallel_games=parallel_games,
                 )
 
                 match_data = {
@@ -294,7 +304,8 @@ def compute_and_save_ratings(
         if api_url:
             try:
                 resp = requests.get(f"{api_url}/arena/matches")
-                all_matches = resp.json() if resp.ok else []
+                data = resp.json() if resp.ok else {}
+                all_matches = data.get("matches", []) if isinstance(data, dict) else data
             except Exception:
                 all_matches = []
         else:
@@ -310,7 +321,8 @@ def compute_and_save_ratings(
         if api_url:
             try:
                 resp = requests.get(f"{api_url}/arena/matches", params={"simulations": sims})
-                matches = resp.json() if resp.ok else []
+                data = resp.json() if resp.ok else {}
+                matches = data.get("matches", []) if isinstance(data, dict) else data
             except Exception:
                 matches = []
         else:
@@ -467,6 +479,27 @@ def main():
         help='Model to anchor at 1000 ELO (default: initial)'
     )
 
+    parser.add_argument(
+        '--opening-moves',
+        type=int,
+        default=3,
+        help='Number of opening moves with temperature (default: 3)'
+    )
+
+    parser.add_argument(
+        '--opening-temperature',
+        type=float,
+        default=1.0,
+        help='Temperature for opening moves (default: 1.0)'
+    )
+
+    parser.add_argument(
+        '--parallel',
+        type=int,
+        default=4,
+        help='Number of games to run in parallel (default: 4)'
+    )
+
     args = parser.parse_args()
     models_dir = Path(args.models_dir)
 
@@ -511,6 +544,9 @@ def main():
         models_dir=models_dir,
         api_url=args.api_url,
         device=args.device,
+        opening_moves=args.opening_moves,
+        opening_temperature=args.opening_temperature,
+        parallel_games=args.parallel,
     )
 
     # Compute and display ratings

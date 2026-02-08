@@ -1,4 +1,4 @@
-import { formatMovesForDisplay, type FormattedTurn } from '../utils/replay';
+import { formatMovesForDisplay } from '../utils/replay';
 
 interface MoveHistoryProps {
   /** Raw move integers from the game */

@@ -218,6 +218,33 @@ def init_db(db_path: Path = None) -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_games_player1_pid ON games(player1_player_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_games_player2_pid ON games(player2_player_id)")
 
+        # Online multiplayer columns
+        online_migrations = [
+            "ALTER TABLE games ADD COLUMN join_code TEXT",
+            "ALTER TABLE games ADD COLUMN online_status TEXT DEFAULT 'local'",
+            # Values: 'local', 'waiting', 'playing', 'finished', 'abandoned'
+        ]
+        for sql in online_migrations:
+            try:
+                conn.execute(sql)
+                conn.commit()  # Commit each migration separately
+            except sqlite3.OperationalError as e:
+                if "duplicate column" in str(e).lower():
+                    pass  # Column already exists
+                else:
+                    # Log but continue - might be other issues
+                    print(f"Migration warning: {e}")
+
+        # Create indexes for online columns (wrapped in try/except in case columns don't exist)
+        try:
+            conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_games_join_code ON games(join_code)")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_games_online_status ON games(online_status)")
+        except sqlite3.OperationalError:
+            pass
+
         # Migration: add new columns if they don't exist
         try:
             conn.execute("ALTER TABLE training_metrics ADD COLUMN value_mse REAL")
@@ -246,14 +273,15 @@ def get_connection(db_path: Path = None):
 
 def state_to_json(state: GameState) -> str:
     """Serialize GameState to JSON string."""
+    # Convert all values to Python native types (numpy types aren't JSON serializable)
     data = {
-        "pieces": state.pieces,
-        "balls": state.balls,
-        "current_player": state.current_player,
-        "touched_mask": state.touched_mask,
-        "has_passed": state.has_passed,
-        "last_knight_dst": state.last_knight_dst,
-        "ply": state.ply,
+        "pieces": [int(p) for p in state.pieces],
+        "balls": [int(b) for b in state.balls],
+        "current_player": int(state.current_player),
+        "touched_mask": int(state.touched_mask),
+        "has_passed": bool(state.has_passed),
+        "last_knight_dst": int(state.last_knight_dst) if state.last_knight_dst is not None else -1,
+        "ply": int(state.ply),
         # Don't persist history - it's for in-session undo only
     }
     return json.dumps(data)
@@ -344,7 +372,7 @@ def append_move(game_id: str, move: int, db_path: Path = None) -> None:
             return
 
         moves = json.loads(row["moves_json"]) if row["moves_json"] else []
-        moves.append(move)
+        moves.append(int(move))  # Convert numpy int64 to Python int
 
         conn.execute(
             "UPDATE games SET moves_json = ?, updated_at = ? WHERE game_id = ?",
@@ -1598,6 +1626,427 @@ def clear_arena_data(db_path: Path = None) -> dict:
             "matches_deleted": matches_count,
             "ratings_deleted": ratings_count,
         }
+
+
+# --- Online Multiplayer Game Management ---
+
+# Characters to use for join codes (avoid ambiguous ones like O/0, I/1/l)
+JOIN_CODE_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+
+
+def generate_join_code(length: int = 6, db_path: Path = None) -> str:
+    """
+    Generate a unique 6-character alphanumeric join code.
+
+    Uses characters that are unambiguous (no O/0, I/1/l).
+    Keeps generating until a unique code is found.
+    """
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+
+    with get_connection(db_path) as conn:
+        for _ in range(100):  # Max attempts to find unique code
+            code = ''.join(secrets.choice(JOIN_CODE_CHARS) for _ in range(length))
+            existing = conn.execute(
+                "SELECT 1 FROM games WHERE join_code = ?", (code,)
+            ).fetchone()
+            if not existing:
+                return code
+        raise RuntimeError("Failed to generate unique join code")
+
+
+def create_online_game(
+    host_user_id: str,
+    host_color: int = 0,
+    db_path: Path = None
+) -> dict:
+    """
+    Create a new online game with a join code.
+
+    Args:
+        host_user_id: User ID of the host
+        host_color: 0 for blue (player 1), 1 for red (player 2)
+
+    Returns:
+        Dict with game_id, join_code, host_color, status
+    """
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+
+    game_id = secrets.token_hex(4)
+    join_code = generate_join_code(db_path=db_path)
+    now = datetime.utcnow().isoformat() + 'Z'
+
+    state = GameState.new_game()
+    state_json = state_to_json(state)
+
+    # Host is player1 if blue, player2 if red
+    player1_user_id = host_user_id if host_color == 0 else None
+    player2_user_id = host_user_id if host_color == 1 else None
+
+    with get_connection(db_path) as conn:
+        conn.execute("""
+            INSERT INTO games (
+                game_id, player1_type, player2_type, ai_simulations,
+                state_json, moves_json, player1_user_id, player2_user_id,
+                join_code, online_status, created_at, updated_at
+            )
+            VALUES (?, 'human', 'human', 0, ?, '[]', ?, ?, ?, 'waiting', ?, ?)
+        """, (game_id, state_json, player1_user_id, player2_user_id,
+              join_code, now, now))
+        conn.commit()
+
+    return {
+        "game_id": game_id,
+        "join_code": join_code,
+        "host_color": host_color,
+        "status": "waiting",
+    }
+
+
+def join_online_game(
+    join_code: str,
+    guest_user_id: str,
+    db_path: Path = None
+) -> Optional[dict]:
+    """
+    Join an existing online game using a join code.
+
+    Args:
+        join_code: The 6-character join code
+        guest_user_id: User ID of the joining player
+
+    Returns:
+        Dict with game_id, guest_color, opponent info, or None if not found/invalid
+    """
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+
+    now = datetime.utcnow().isoformat() + 'Z'
+    join_code = join_code.upper().strip()
+
+    with get_connection(db_path) as conn:
+        # Find the waiting game with this code
+        row = conn.execute("""
+            SELECT game_id, player1_user_id, player2_user_id, online_status
+            FROM games
+            WHERE join_code = ?
+        """, (join_code,)).fetchone()
+
+        if row is None:
+            return None  # Game not found
+
+        if row["online_status"] != "waiting":
+            return {"error": "game_not_waiting", "status": row["online_status"]}
+
+        game_id = row["game_id"]
+        player1_user_id = row["player1_user_id"]
+        player2_user_id = row["player2_user_id"]
+
+        # Determine which slot is for the guest
+        if player1_user_id is None:
+            # Guest is player 1 (blue)
+            guest_color = 0
+            host_user_id = player2_user_id
+            conn.execute("""
+                UPDATE games
+                SET player1_user_id = ?, online_status = 'playing', updated_at = ?
+                WHERE game_id = ?
+            """, (guest_user_id, now, game_id))
+        elif player2_user_id is None:
+            # Guest is player 2 (red)
+            guest_color = 1
+            host_user_id = player1_user_id
+            conn.execute("""
+                UPDATE games
+                SET player2_user_id = ?, online_status = 'playing', updated_at = ?
+                WHERE game_id = ?
+            """, (guest_user_id, now, game_id))
+        else:
+            # Both slots filled (shouldn't happen for waiting games)
+            return {"error": "game_full"}
+
+        conn.commit()
+
+        # Get opponent info
+        opponent = None
+        if host_user_id:
+            opponent_row = conn.execute("""
+                SELECT u.user_id, u.display_name, p.elo_rating
+                FROM users u
+                LEFT JOIN players p ON p.user_id = u.user_id AND p.player_type = 'human'
+                WHERE u.user_id = ?
+            """, (host_user_id,)).fetchone()
+            if opponent_row:
+                opponent = {
+                    "user_id": opponent_row["user_id"],
+                    "display_name": opponent_row["display_name"],
+                    "elo_rating": opponent_row["elo_rating"] or 1000.0,
+                }
+
+    return {
+        "game_id": game_id,
+        "your_color": guest_color,
+        "opponent": opponent,
+        "status": "playing",
+    }
+
+
+def get_game_by_code(
+    join_code: str,
+    db_path: Path = None
+) -> Optional[dict]:
+    """
+    Look up a game by its join code.
+
+    Returns game data or None if not found.
+    """
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+
+    join_code = join_code.upper().strip()
+
+    with get_connection(db_path) as conn:
+        row = conn.execute("""
+            SELECT game_id, player1_user_id, player2_user_id,
+                   join_code, online_status, state_json, created_at, updated_at
+            FROM games
+            WHERE join_code = ?
+        """, (join_code,)).fetchone()
+
+        if row is None:
+            return None
+
+        return {
+            "game_id": row["game_id"],
+            "player1_user_id": row["player1_user_id"],
+            "player2_user_id": row["player2_user_id"],
+            "join_code": row["join_code"],
+            "online_status": row["online_status"],
+            "state": state_from_json(row["state_json"]),
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+
+
+def get_online_game_status(
+    game_id: str,
+    user_id: str,
+    db_path: Path = None
+) -> Optional[dict]:
+    """
+    Get the status of an online game from a specific user's perspective.
+
+    Returns dict with game info and user's color, or None if not found/unauthorized.
+    """
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+
+    with get_connection(db_path) as conn:
+        row = conn.execute("""
+            SELECT g.game_id, g.player1_user_id, g.player2_user_id,
+                   g.join_code, g.online_status, g.state_json, g.winner,
+                   u1.display_name as p1_name, u2.display_name as p2_name,
+                   p1.elo_rating as p1_elo, p2.elo_rating as p2_elo
+            FROM games g
+            LEFT JOIN users u1 ON g.player1_user_id = u1.user_id
+            LEFT JOIN users u2 ON g.player2_user_id = u2.user_id
+            LEFT JOIN players p1 ON p1.user_id = g.player1_user_id AND p1.player_type = 'human'
+            LEFT JOIN players p2 ON p2.user_id = g.player2_user_id AND p2.player_type = 'human'
+            WHERE g.game_id = ?
+        """, (game_id,)).fetchone()
+
+        if row is None:
+            return None
+
+        # Check if user is part of this game
+        if user_id not in (row["player1_user_id"], row["player2_user_id"]):
+            return {"error": "not_authorized"}
+
+        your_color = 0 if user_id == row["player1_user_id"] else 1
+        state = state_from_json(row["state_json"])
+        is_your_turn = state.current_player == your_color
+
+        # Opponent info
+        opponent = None
+        if your_color == 0 and row["player2_user_id"]:
+            opponent = {
+                "user_id": row["player2_user_id"],
+                "display_name": row["p2_name"],
+                "elo_rating": row["p2_elo"] or 1000.0,
+            }
+        elif your_color == 1 and row["player1_user_id"]:
+            opponent = {
+                "user_id": row["player1_user_id"],
+                "display_name": row["p1_name"],
+                "elo_rating": row["p1_elo"] or 1000.0,
+            }
+
+        return {
+            "game_id": row["game_id"],
+            "join_code": row["join_code"],
+            "status": row["online_status"],
+            "your_color": your_color,
+            "opponent": opponent,
+            "is_your_turn": is_your_turn,
+            "winner": row["winner"],
+            "state": state,
+        }
+
+
+def abandon_online_game(
+    game_id: str,
+    abandoning_user_id: str,
+    db_path: Path = None
+) -> Optional[dict]:
+    """
+    Abandon/forfeit an online game.
+
+    The abandoning player loses, opponent wins.
+
+    Returns dict with winner info, or None if not found.
+    """
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+
+    now = datetime.utcnow().isoformat() + 'Z'
+
+    with get_connection(db_path) as conn:
+        row = conn.execute("""
+            SELECT game_id, player1_user_id, player2_user_id, online_status
+            FROM games
+            WHERE game_id = ?
+        """, (game_id,)).fetchone()
+
+        if row is None:
+            return None
+
+        # Check if user is part of this game
+        if abandoning_user_id not in (row["player1_user_id"], row["player2_user_id"]):
+            return {"error": "not_authorized"}
+
+        # Can only abandon playing or waiting games
+        if row["online_status"] not in ("waiting", "playing"):
+            return {"error": "cannot_abandon", "status": row["online_status"]}
+
+        # Determine winner (opponent of abandoning player)
+        if abandoning_user_id == row["player1_user_id"]:
+            winner = 1  # Player 2 wins
+        else:
+            winner = 0  # Player 1 wins
+
+        # If waiting, just delete the game
+        if row["online_status"] == "waiting":
+            conn.execute("DELETE FROM games WHERE game_id = ?", (game_id,))
+            conn.commit()
+            return {"status": "cancelled", "winner": None}
+
+        # Mark as abandoned with winner
+        conn.execute("""
+            UPDATE games
+            SET online_status = 'abandoned', winner = ?, updated_at = ?
+            WHERE game_id = ?
+        """, (winner, now, game_id))
+        conn.commit()
+
+        return {
+            "status": "abandoned",
+            "winner": winner,
+        }
+
+
+def get_user_online_games(
+    user_id: str,
+    db_path: Path = None
+) -> dict:
+    """
+    Get all online games for a user, separated by status.
+
+    Returns dict with 'active' (playing) and 'waiting' games.
+    """
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+
+    with get_connection(db_path) as conn:
+        rows = conn.execute("""
+            SELECT g.game_id, g.player1_user_id, g.player2_user_id,
+                   g.join_code, g.online_status, g.state_json, g.winner,
+                   g.created_at, g.updated_at,
+                   u1.display_name as p1_name, u2.display_name as p2_name
+            FROM games g
+            LEFT JOIN users u1 ON g.player1_user_id = u1.user_id
+            LEFT JOIN users u2 ON g.player2_user_id = u2.user_id
+            WHERE (g.player1_user_id = ? OR g.player2_user_id = ?)
+              AND g.online_status IN ('waiting', 'playing')
+            ORDER BY g.updated_at DESC
+        """, (user_id, user_id)).fetchall()
+
+        waiting = []
+        active = []
+
+        for row in rows:
+            your_color = 0 if user_id == row["player1_user_id"] else 1
+            state = state_from_json(row["state_json"])
+
+            game_info = {
+                "game_id": row["game_id"],
+                "join_code": row["join_code"],
+                "status": row["online_status"],
+                "your_color": your_color,
+                "is_your_turn": state.current_player == your_color,
+                "ply": state.ply,
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+            }
+
+            # Add opponent info if present
+            if your_color == 0 and row["player2_user_id"]:
+                game_info["opponent_name"] = row["p2_name"]
+            elif your_color == 1 and row["player1_user_id"]:
+                game_info["opponent_name"] = row["p1_name"]
+
+            if row["online_status"] == "waiting":
+                waiting.append(game_info)
+            else:
+                active.append(game_info)
+
+        return {
+            "waiting": waiting,
+            "active": active,
+        }
+
+
+def update_online_game_status(
+    game_id: str,
+    status: str,
+    winner: Optional[int] = None,
+    db_path: Path = None
+) -> bool:
+    """
+    Update the online status of a game.
+
+    Returns True if updated successfully.
+    """
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+
+    now = datetime.utcnow().isoformat() + 'Z'
+
+    with get_connection(db_path) as conn:
+        if winner is not None:
+            cursor = conn.execute("""
+                UPDATE games
+                SET online_status = ?, winner = ?, updated_at = ?
+                WHERE game_id = ?
+            """, (status, winner, now, game_id))
+        else:
+            cursor = conn.execute("""
+                UPDATE games
+                SET online_status = ?, updated_at = ?
+                WHERE game_id = ?
+            """, (status, now, game_id))
+        conn.commit()
+        return cursor.rowcount > 0
 
 
 # --- Player Management ---
