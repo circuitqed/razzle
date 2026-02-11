@@ -112,27 +112,28 @@ The policy is a probability distribution over all 3136 possible (src, dst) pairs
 
 ## Configuration
 
-The default configuration creates a network with ~340K parameters:
+Architecture follows AlphaZero: most parameters in the residual tower, with small
+policy and value projection heads. Three presets are available:
 
 ```python
-NetworkConfig(
-    num_input_planes=7,    # Fixed by board representation
-    num_filters=64,        # Width of residual tower
-    num_blocks=6,          # Depth of residual tower
-    policy_filters=2,      # Channels before policy FC
-    value_filters=1,       # Channels before value FC
-    value_hidden=64        # Hidden layer size in value head
-)
+from razzle.ai.network import create_network
+
+net = create_network(preset='medium')  # default for distributed training
 ```
 
-### Scaling
+### Presets
 
-| Config | Filters | Blocks | Parameters | Notes |
-|--------|---------|--------|------------|-------|
-| Tiny | 32 | 4 | ~90K | Fast, for testing |
-| Default | 64 | 6 | ~340K | Good balance |
-| Large | 128 | 10 | ~1.5M | Stronger play |
-| Full | 256 | 19 | ~25M | AlphaZero-scale |
+| Preset | Filters | Blocks | Policy Head | Params | Tower % |
+|--------|---------|--------|-------------|--------|---------|
+| `small` | 32 | 6 | FC(112→32)→FC(32→3137) | ~236K | 48% |
+| `medium` | 96 | 12 | FC(112→3137) | ~2.4M | 84% |
+| `large` | 256 | 20 | FC(128→3137) | ~24M | 98% |
+
+The large preset matches AlphaZero's chess architecture exactly (256 filters, 20 blocks,
+2 policy filters, 1 value filter, 256 value hidden). Medium is 10x smaller, small is 100x smaller.
+
+The small preset uses a policy bottleneck layer (policy_hidden=32) because the direct
+FC(112→3137) alone is 354K params, which would exceed the tower size at this scale.
 
 ## Training
 

@@ -43,9 +43,11 @@ razzle/
 - Total action space: 56 * 56 + 1 = 3137 possible actions
 
 ### Neural Network
-- Input: 7 planes of 8x7 (pieces, balls, touched mask, player indicator)
-- Architecture: Residual CNN (configurable depth/width)
-- Output: Policy (3137 logits) + Value (scalar)
+- Input: 7 planes of 8x7 (pieces, balls, touched mask, player indicator, has_passed)
+- Architecture: AlphaZero-style residual CNN with small projection heads
+- Output: Policy (3137 logits) + Value (scalar) + Difficulty (scalar)
+- Presets: `small` (~236K), `medium` (~2.4M), `large` (~24M, = AlphaZero chess)
+- Use `create_network(preset='medium')` to create networks
 
 ### Training
 - See `docs/TRAINING.md` for detailed training architecture documentation

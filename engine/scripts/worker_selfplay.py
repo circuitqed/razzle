@@ -85,8 +85,9 @@ class SelfPlayWorker:
         device: str = 'cuda',
         simulations: int = 400,
         temperature_moves: int = 30,
-        filters: int = 64,
-        blocks: int = 6,
+        network_size: str = 'medium',
+        filters: int = 0,
+        blocks: int = 0,
         batch_size: int = 32,
         model_check_interval: int = 5,  # Check for new model every N games
         random_opening_moves: int = 0,  # Number of random moves at start
@@ -100,6 +101,7 @@ class SelfPlayWorker:
         self.device = device
         self.simulations = simulations
         self.temperature_moves = temperature_moves
+        self.network_size = network_size
         self.filters = filters
         self.blocks = blocks
         self.batch_size = batch_size
@@ -198,7 +200,10 @@ class SelfPlayWorker:
                 print(f"[Worker {self.worker_id}] Loaded local model: {self.model_version}")
             else:
                 # Create new network
-                self.network = create_network(self.filters, self.blocks, self.device)
+                if self.filters > 0 and self.blocks > 0:
+                    self.network = create_network(num_filters=self.filters, num_blocks=self.blocks, device=self.device)
+                else:
+                    self.network = create_network(preset=self.network_size, device=self.device)
                 self.model_version = "initial"
                 print(f"[Worker {self.worker_id}] Created new network")
 
@@ -708,8 +713,8 @@ def main():
                         help='Network filter count (overrides --network-size)')
     parser.add_argument('--blocks', type=int, default=None,
                         help='Network residual blocks (overrides --network-size)')
-    parser.add_argument('--network-size', type=str, default='medium', choices=['small', 'medium', 'large', 'alphazero'],
-                        help='Network size preset: small (64f/6b), medium (128f/10b), large (256f/15b), alphazero (256f/20b)')
+    parser.add_argument('--network-size', type=str, default='medium', choices=['small', 'medium', 'large'],
+                        help='Network size preset: small (~236K), medium (~2.4M), large (~24M)')
     parser.add_argument('--batch-size', type=int, default=32,
                         help='MCTS batch size for GPU parallelism')
     parser.add_argument('--model-check-interval', type=int, default=5,
@@ -725,22 +730,10 @@ def main():
 
     args = parser.parse_args()
 
-    # Resolve network size presets
-    NETWORK_PRESETS = {
-        'small': (64, 6),      # ~0.8M params, fast inference
-        'medium': (128, 10),   # ~3.3M params, balanced
-        'large': (256, 15),    # ~18M params, stronger but slower
-        'alphazero': (256, 20),  # ~24M params, AlphaZero-scale
-    }
-
-    if args.filters is not None and args.blocks is not None:
-        filters, blocks = args.filters, args.blocks
-    else:
-        filters, blocks = NETWORK_PRESETS[args.network_size]
-        if args.filters is not None:
-            filters = args.filters
-        if args.blocks is not None:
-            blocks = args.blocks
+    # Resolve network size
+    network_size = args.network_size
+    filters = args.filters or 0
+    blocks = args.blocks or 0
 
     # Ensure unbuffered output
     os.environ['PYTHONUNBUFFERED'] = '1'
@@ -752,6 +745,7 @@ def main():
         device=args.device,
         simulations=args.simulations,
         temperature_moves=args.temperature_moves,
+        network_size=network_size,
         filters=filters,
         blocks=blocks,
         batch_size=args.batch_size,

@@ -46,8 +46,10 @@ def main():
     parser.add_argument('--games-per-iter', type=int, default=100, help='Games per iteration')
     parser.add_argument('--simulations', type=int, default=400, help='MCTS simulations')
     parser.add_argument('--epochs', type=int, default=10, help='Training epochs per iteration')
-    parser.add_argument('--filters', type=int, default=64, help='Network filters')
-    parser.add_argument('--blocks', type=int, default=6, help='Network residual blocks')
+    parser.add_argument('--network-size', type=str, default='small', choices=['small', 'medium', 'large'],
+                        help='Network size preset: small (~236K), medium (~2.4M), large (~24M)')
+    parser.add_argument('--filters', type=int, default=None, help='Network filters (overrides --network-size)')
+    parser.add_argument('--blocks', type=int, default=None, help='Network blocks (overrides --network-size)')
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu')
     parser.add_argument('--output', type=Path, default=Path('output'), help='Output directory')
     parser.add_argument('--resume', type=Path, help='Resume from checkpoint')
@@ -86,6 +88,7 @@ def main():
         'games_per_iter': args.games_per_iter,
         'simulations': args.simulations,
         'epochs': args.epochs,
+        'network_size': args.network_size,
         'filters': args.filters,
         'blocks': args.blocks,
         'device': args.device
@@ -102,8 +105,12 @@ def main():
             # Filename doesn't end with a number (e.g., model_start.pt)
             start_iter = 0
     else:
-        print(f"Creating new network: {args.filters} filters, {args.blocks} blocks")
-        network = create_network(args.filters, args.blocks, args.device)
+        if args.filters and args.blocks:
+            print(f"Creating new network: {args.filters} filters, {args.blocks} blocks")
+            network = create_network(num_filters=args.filters, num_blocks=args.blocks, device=args.device)
+        else:
+            print(f"Creating new network: {args.network_size} preset")
+            network = create_network(preset=args.network_size, device=args.device)
         start_iter = 0
 
     print(f"Network has {network.num_parameters():,} parameters")

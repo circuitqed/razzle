@@ -63,7 +63,7 @@ def test_game_generation(simulations: int = 10) -> tuple[list[int], float, list[
     start = time.time()
 
     # Create network and evaluator
-    network = create_network(num_filters=64, num_blocks=6, device='cpu')
+    network = create_network(preset='small', device='cpu')
     evaluator = BatchedEvaluator(network, batch_size=8, device='cpu')
 
     # Play a game with minimal simulations
@@ -165,7 +165,7 @@ def test_model_upload_download(client: TrainingAPIClient, tmp_dir: Path) -> bool
     print("6. Testing model upload/download...")
     try:
         # Create a test model
-        network = create_network(num_filters=64, num_blocks=6, device='cpu')
+        network = create_network(preset='small', device='cpu')
         upload_path = tmp_dir / "test_model.pt"
         network.save(upload_path)
 

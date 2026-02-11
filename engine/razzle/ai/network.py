@@ -2,6 +2,8 @@
 Neural network for Razzle Dazzle position evaluation.
 
 Architecture: Residual CNN with policy, value, and difficulty heads.
+Follows AlphaZero design: large residual tower, small projection heads.
+
 Input: (batch, 7, 8, 7) - board planes (pieces, balls, touched_mask, player, has_passed)
 Output:
   - policy: (batch, 3137) - log probabilities over moves (56*56 + END_TURN)
@@ -28,13 +30,44 @@ NUM_ACTIONS = END_TURN_ACTION + 1  # 3137 total actions
 
 @dataclass
 class NetworkConfig:
-    """Configuration for the neural network."""
-    num_input_planes: int = 7  # Updated: added has_passed plane
-    num_filters: int = 64
-    num_blocks: int = 6
-    policy_filters: int = 2
-    value_filters: int = 32   # Increased from 1 for stronger value head
-    value_hidden: int = 256   # Increased from 64 for stronger value head
+    """Configuration for the neural network.
+
+    AlphaZero-style architecture: most parameters in the residual tower,
+    with small policy and value heads. Three presets available via PRESETS dict.
+
+    Policy head: Conv(filters→policy_filters, 1x1) → BN → ReLU → FC → actions
+      If policy_hidden > 0, adds a bottleneck: FC(flat→hidden) → ReLU → FC(hidden→actions)
+      This is needed for small networks where the direct FC would exceed the tower size.
+
+    Value head: Conv(filters→value_filters, 1x1) → BN → ReLU → FC(flat→hidden) → ReLU → FC(hidden→1) → tanh
+    """
+    num_input_planes: int = 7
+    num_filters: int = 256      # Width of residual tower
+    num_blocks: int = 20        # Depth of residual tower
+    policy_filters: int = 2     # AZ uses 2
+    value_filters: int = 1      # AZ uses 1
+    value_hidden: int = 256     # AZ uses 256
+    policy_hidden: int = 0      # 0 = direct FC (AZ default), >0 = bottleneck hidden layer
+
+
+# Presets matching AlphaZero architecture at different scales
+PRESETS = {
+    'small': NetworkConfig(
+        num_filters=32, num_blocks=6,
+        policy_filters=2, value_filters=1,
+        value_hidden=128, policy_hidden=32,
+    ),
+    'medium': NetworkConfig(
+        num_filters=96, num_blocks=12,
+        policy_filters=2, value_filters=1,
+        value_hidden=256, policy_hidden=0,
+    ),
+    'large': NetworkConfig(
+        num_filters=256, num_blocks=20,
+        policy_filters=2, value_filters=1,
+        value_hidden=256, policy_hidden=0,
+    ),
+}
 
 
 class ResidualBlock(nn.Module):
@@ -79,26 +112,29 @@ class RazzleNet(nn.Module):
         # Policy head
         self.policy_conv = nn.Conv2d(c.num_filters, c.policy_filters, 1, bias=False)
         self.policy_bn = nn.BatchNorm2d(c.policy_filters)
-        self.policy_fc = nn.Linear(c.policy_filters * ROWS * COLS, NUM_ACTIONS)
+        policy_flat = c.policy_filters * ROWS * COLS
+        if c.policy_hidden > 0:
+            self.policy_fc1 = nn.Linear(policy_flat, c.policy_hidden)
+            self.policy_fc2 = nn.Linear(c.policy_hidden, NUM_ACTIONS)
+        else:
+            self.policy_fc = nn.Linear(policy_flat, NUM_ACTIONS)
 
         # Value head
         self.value_conv = nn.Conv2d(c.num_filters, c.value_filters, 1, bias=False)
         self.value_bn = nn.BatchNorm2d(c.value_filters)
-        self.value_fc1 = nn.Linear(c.value_filters * ROWS * COLS, c.value_hidden)
+        value_flat = c.value_filters * ROWS * COLS
+        self.value_fc1 = nn.Linear(value_flat, c.value_hidden)
         self.value_fc2 = nn.Linear(c.value_hidden, 1)
 
         # Difficulty head (predicts how much MCTS will change the policy)
         self.difficulty_conv = nn.Conv2d(c.num_filters, c.value_filters, 1, bias=False)
         self.difficulty_bn = nn.BatchNorm2d(c.value_filters)
-        self.difficulty_fc1 = nn.Linear(c.value_filters * ROWS * COLS, c.value_hidden)
+        self.difficulty_fc1 = nn.Linear(value_flat, c.value_hidden)
         self.difficulty_fc2 = nn.Linear(c.value_hidden, 1)
 
         # Initialize final layers with small weights to prevent saturation
-        # Value head uses tanh, which has vanishing gradients when |x| is large
-        # Small init ensures outputs start near 0 where tanh gradient ≈ 1
         nn.init.normal_(self.value_fc2.weight, mean=0.0, std=0.01)
         nn.init.zeros_(self.value_fc2.bias)
-        # Difficulty head uses sigmoid, same concern
         nn.init.normal_(self.difficulty_fc2.weight, mean=0.0, std=0.01)
         nn.init.zeros_(self.difficulty_fc2.bias)
 
@@ -126,7 +162,11 @@ class RazzleNet(nn.Module):
         # Policy head
         p = F.relu(self.policy_bn(self.policy_conv(tower)))
         p = p.view(p.size(0), -1)
-        p = self.policy_fc(p)
+        if hasattr(self, 'policy_fc1'):
+            p = F.relu(self.policy_fc1(p))
+            p = self.policy_fc2(p)
+        else:
+            p = self.policy_fc(p)
         p = F.log_softmax(p, dim=1)
 
         # Value head
@@ -142,7 +182,6 @@ class RazzleNet(nn.Module):
             d = F.relu(self.difficulty_fc1(d))
             d = torch.sigmoid(self.difficulty_fc2(d))  # Output in [0, 1]
         else:
-            # Old model: return neutral difficulty (0.5)
             d = torch.full((x.size(0), 1), 0.5, device=x.device)
 
         return p, v, d
@@ -171,23 +210,24 @@ class RazzleNet(nn.Module):
         """Load model from file.
 
         Handles backward compatibility with old models that don't have
-        the difficulty head - those will use neutral difficulty (0.5).
+        the difficulty head or have different policy head structure.
         """
-        # Use weights_only=False since we're loading our own checkpoints
-        # which contain NetworkConfig dataclass
         checkpoint = torch.load(path, map_location=device, weights_only=False)
-        model = cls(checkpoint['config'])
+        config = checkpoint['config']
 
-        # Handle backward compatibility: old models don't have difficulty head
+        # Backward compat: old configs don't have policy_hidden
+        if not hasattr(config, 'policy_hidden'):
+            config.policy_hidden = 0
+
+        model = cls(config)
         state_dict = checkpoint['state_dict']
         model_state = model.state_dict()
 
-        # Check if checkpoint has difficulty head weights
-        has_difficulty = 'difficulty_fc2.weight' in state_dict
+        # Handle backward compatibility: filter to matching keys
+        missing_keys = set(model_state.keys()) - set(state_dict.keys())
+        extra_keys = set(state_dict.keys()) - set(model_state.keys())
 
-        if not has_difficulty:
-            # Old model - load only existing weights, keep new difficulty head random
-            # Filter to only keys that exist in the checkpoint
+        if missing_keys or extra_keys:
             filtered_state = {k: v for k, v in state_dict.items() if k in model_state}
             model.load_state_dict(filtered_state, strict=False)
         else:
@@ -201,14 +241,27 @@ class RazzleNet(nn.Module):
 
 
 def create_network(
-    num_filters: int = 64,
-    num_blocks: int = 6,
+    preset: Optional[str] = None,
+    num_filters: int = 0,
+    num_blocks: int = 0,
     device: str = 'cpu'
 ) -> RazzleNet:
-    """Create a new network with given configuration."""
-    config = NetworkConfig(
-        num_filters=num_filters,
-        num_blocks=num_blocks
-    )
+    """Create a new network.
+
+    Args:
+        preset: One of 'small' (~236K), 'medium' (~2.4M), 'large' (~24M).
+                If provided, num_filters and num_blocks are ignored.
+        num_filters: Tower width (ignored if preset is set).
+        num_blocks: Tower depth (ignored if preset is set).
+        device: Device to place model on.
+    """
+    if preset:
+        if preset not in PRESETS:
+            raise ValueError(f"Unknown preset '{preset}'. Choose from: {list(PRESETS.keys())}")
+        config = PRESETS[preset]
+    elif num_filters > 0 and num_blocks > 0:
+        config = NetworkConfig(num_filters=num_filters, num_blocks=num_blocks)
+    else:
+        config = NetworkConfig()
     model = RazzleNet(config)
     return model.to(device)

@@ -26,6 +26,19 @@ The training pipeline follows the AlphaZero approach:
 ### Output
 - **Policy head**: 3137 logits (56×56 = 3136 possible src→dst moves + 1 for END_TURN)
 - **Value head**: Single scalar in [-1, 1] predicting game outcome
+- **Difficulty head**: Single scalar in [0, 1] predicting search difficulty
+
+### Architecture Presets
+
+The network follows AlphaZero's design: most parameters in the residual tower, with small projection heads. Three presets are available:
+
+| Preset | Filters | Blocks | Params | Tower % | Notes |
+|--------|---------|--------|--------|---------|-------|
+| `small` | 32 | 6 | ~236K | 48% | Fast, for testing. Uses policy bottleneck |
+| `medium` | 96 | 12 | ~2.4M | 84% | Default for distributed training |
+| `large` | 256 | 20 | ~24M | 98% | Identical to AlphaZero chess |
+
+All presets use AlphaZero's head configuration: 2 policy filters, 1 value filter, 256 value hidden. The small preset adds a policy bottleneck layer (hidden=32) since the direct FC layer alone would exceed the tower size.
 
 ### Action Space
 
@@ -187,15 +200,18 @@ Self-play directly records:
 ## Loss Function
 
 ```
-L = policy_weight * L_policy + value_weight * L_value
+L = policy_weight * L_policy + value_weight * L_value + difficulty_weight * L_difficulty
 
 L_policy = CE(target[legal], pred[legal]) + λ * Σ pred[illegal]
-L_value = MSE(target_value, pred_value)
+L_value = MSE(target_value, pred_value) + quartic * (target_value - pred_value)^4
+L_difficulty = MSE(target_difficulty, pred_difficulty)
 ```
 
 Default weights:
 - `policy_weight = 1.0`
-- `value_weight = 1.0`
+- `value_weight = 20.0` (higher than AZ's implicit 1.0 to compensate for TD(λ) softer targets)
+- `value_weight_quartic = 1.0` (penalizes large value errors more heavily)
+- `difficulty_weight = 0.5` (auxiliary task)
 - `illegal_penalty_weight (λ) = 1.0`
 
 ## Diagnostics
@@ -230,12 +246,14 @@ Expected results:
 @dataclass
 class TrainingConfig:
     batch_size: int = 256
-    learning_rate: float = 0.001  # Adam default, stable for training
+    learning_rate: float = 0.001
     weight_decay: float = 1e-4
     epochs: int = 10
     policy_weight: float = 1.0
-    value_weight: float = 1.0
-    illegal_penalty_weight: float = 1.0  # λ for illegal move constraint
+    value_weight: float = 20.0
+    value_weight_quartic: float = 1.0
+    difficulty_weight: float = 0.5
+    illegal_penalty_weight: float = 1.0
     device: str = 'cuda'
 ```
 

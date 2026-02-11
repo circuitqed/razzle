@@ -7,7 +7,7 @@ Before starting any training run, confirm all parameters with the user. Present 
 ### Parameters to Confirm
 
 **Network Architecture:**
-- Size preset (small/medium/large/alphazero)
+- Size preset (small/medium/large)
 - Custom filters/blocks if needed
 
 **Self-Play:**
@@ -33,7 +33,7 @@ Before starting any training run, confirm all parameters with the user. Present 
 
 | Parameter | Value |
 |-----------|-------|
-| Network | medium (128f/10b, 3.3M params) |
+| Network | medium (96f/12b, ~2.4M params, AZ-style) |
 | Simulations | 1024 |
 | Worker instances | 7 |
 | Training batch size | 512 |
@@ -45,15 +45,15 @@ Ready to start fresh?
 
 ---
 
-## Current Configuration (January 2026)
+## Current Configuration (February 2026)
 
 ### Network
 | Parameter | Value | Notes |
 |-----------|-------|-------|
-| Size | **medium** | 128 filters, 10 residual blocks |
-| Parameters | ~3.3M | Fast inference, good capacity |
+| Size | **medium** | 96 filters, 12 residual blocks (AZ-style) |
+| Parameters | ~2.4M | 84% in tower, AZ head design (2 policy filters, 1 value filter) |
 | Input | 7 planes × 8×7 | Pieces, balls, touched, player, has_passed |
-| Output | Policy (3137) + Value | |
+| Output | Policy (3137) + Value + Difficulty | |
 
 ### Self-Play Workers (7 instances)
 | Parameter | Value | Rationale |

@@ -99,8 +99,7 @@ class Collector:
         max_training_interval: int = 900,  # 15 minutes
         poll_interval: int = 30,
         epochs: int = 10,
-        filters: int = 64,
-        blocks: int = 6,
+        network_size: str = 'medium',
         initial_model: Optional[Path] = None,
     ):
         self.workers = workers
@@ -110,8 +109,7 @@ class Collector:
         self.max_training_interval = max_training_interval
         self.poll_interval = poll_interval
         self.epochs = epochs
-        self.filters = filters
-        self.blocks = blocks
+        self.network_size = network_size
 
         # Directories
         self.collected_dir = self.output_dir / "collected"
@@ -144,8 +142,7 @@ class Collector:
             'training_threshold': training_threshold,
             'poll_interval': poll_interval,
             'epochs': epochs,
-            'filters': filters,
-            'blocks': blocks,
+            'network_size': network_size,
             'num_workers': len(workers),
         }, device=device)
 
@@ -328,7 +325,7 @@ class Collector:
                 self.network = RazzleNet.load(self.current_model, device=self.device)
                 print(f"[Collector] Loaded model: {self.current_model}")
             else:
-                self.network = create_network(self.filters, self.blocks, self.device)
+                self.network = create_network(preset=self.network_size, device=self.device)
                 print(f"[Collector] Created new network")
 
         # Train
@@ -502,10 +499,8 @@ def main():
                         help='Seconds between polling workers')
     parser.add_argument('--epochs', type=int, default=10,
                         help='Training epochs per iteration')
-    parser.add_argument('--filters', type=int, default=64,
-                        help='Network filters')
-    parser.add_argument('--blocks', type=int, default=6,
-                        help='Network residual blocks')
+    parser.add_argument('--network-size', type=str, default='medium', choices=['small', 'medium', 'large'],
+                        help='Network size preset: small (~236K), medium (~2.4M), large (~24M)')
     parser.add_argument('--model', type=Path, help='Initial model checkpoint')
 
     args = parser.parse_args()
@@ -522,8 +517,7 @@ def main():
         max_training_interval=args.max_training_interval,
         poll_interval=args.poll_interval,
         epochs=args.epochs,
-        filters=args.filters,
-        blocks=args.blocks,
+        network_size=args.network_size,
         initial_model=args.model
     )
 

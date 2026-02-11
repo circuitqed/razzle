@@ -54,7 +54,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 class TrainingProfile:
     """Pre-configured training settings."""
     name: str
-    network_size: str  # small, medium, large, alphazero
+    network_size: str  # small, medium, large
     workers: int
     workers_per_instance: int
     gpu: str
@@ -98,7 +98,7 @@ PROFILES = {
     ),
     'alphazero': TrainingProfile(
         name='alphazero',
-        network_size='alphazero',
+        network_size='large',
         workers=4,
         workers_per_instance=2,
         gpu='RTX_4090',
@@ -127,10 +127,9 @@ PROFILES = {
 }
 
 NETWORK_PRESETS = {
-    'small': (64, 6),      # ~0.8M params
-    'medium': (128, 10),   # ~3.3M params
-    'large': (256, 15),    # ~18M params
-    'alphazero': (256, 20),  # ~24M params
+    'small': 'small',      # ~236K params (32f/6b, AZ-style)
+    'medium': 'medium',    # ~2.4M params (96f/12b, AZ-style)
+    'large': 'large',      # ~24M params (256f/20b, AZ-identical)
 }
 
 
@@ -209,7 +208,7 @@ class TrainingLauncher:
         print(f"\nProfile: {self.profile.name}")
         print(f"  {self.profile.description}")
         print(f"\nConfiguration:")
-        print(f"  Network: {self.profile.network_size} ({NETWORK_PRESETS[self.profile.network_size]})")
+        print(f"  Network: {self.profile.network_size}")
         print(f"  Workers: {self.profile.workers} instances x {self.profile.workers_per_instance} each")
         print(f"  GPU: {self.profile.gpu} (max ${self.profile.max_price}/hr)")
         print(f"  Simulations: {self.profile.simulations}")
@@ -265,7 +264,7 @@ class TrainingLauncher:
 
     def _start_workers(self) -> bool:
         """Start distributed training (workers + trainer on Vast.ai)."""
-        filters, blocks = NETWORK_PRESETS[self.profile.network_size]
+        network_size = NETWORK_PRESETS[self.profile.network_size]
 
         cmd = [
             sys.executable, 'scripts/train_distributed.py',
@@ -275,8 +274,7 @@ class TrainingLauncher:
             '--gpu', self.profile.gpu,
             '--max-price', str(self.profile.max_price),
             '--simulations', str(self.profile.simulations),
-            '--filters', str(filters),
-            '--blocks', str(blocks),
+            '--network-size', network_size,
             '--threshold', str(self.profile.threshold),
             '--batch-size', str(self.profile.batch_size),
             '--random-opening-moves', str(self.profile.random_opening_moves),
@@ -418,7 +416,7 @@ Examples:
     parser.add_argument('--workers', type=int, default=None,
                         help='Number of worker instances (overrides profile)')
     parser.add_argument('--network-size', type=str, default=None,
-                        choices=['small', 'medium', 'large', 'alphazero'],
+                        choices=['small', 'medium', 'large'],
                         help='Network size (overrides profile)')
     parser.add_argument('--gpu', type=str, default=None,
                         help='GPU type (overrides profile)')
@@ -438,10 +436,9 @@ Examples:
     if args.list_profiles:
         print("\nAvailable Training Profiles:\n")
         for name, profile in PROFILES.items():
-            filters, blocks = NETWORK_PRESETS[profile.network_size]
             print(f"  {name}:")
             print(f"    {profile.description}")
-            print(f"    Network: {profile.network_size} ({filters}f/{blocks}b)")
+            print(f"    Network: {profile.network_size}")
             print(f"    Workers: {profile.workers} x {profile.workers_per_instance}")
             print(f"    GPU: {profile.gpu} (max ${profile.max_price}/hr)")
             print(f"    Simulations: {profile.simulations}")

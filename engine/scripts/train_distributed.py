@@ -111,8 +111,7 @@ def setup_worker_instance(
     package_path: Path,
     api_url: str,
     simulations: int,
-    filters: int,
-    blocks: int,
+    network_size: str = 'medium',
     training_threshold: int = 50,
     workers_per_instance: int = 1,
     batch_size: int = 32,
@@ -167,7 +166,7 @@ def setup_worker_instance(
             trainer_cmd = (
                 f"python -u /workspace/trainer.py "
                 f"--api-url {api_url} --device cuda --threshold {training_threshold} "
-                f"--filters {filters} --blocks {blocks} --output /workspace/output "
+                f"--network-size {network_size} --output /workspace/output "
                 f"--batch-size {trainer_batch_size} --replay-buffer-size {replay_buffer_size} "
                 f"--gamma {gamma} --td-lambda {td_lambda}"
             )
@@ -180,7 +179,7 @@ def setup_worker_instance(
                     f"python -u /workspace/worker_selfplay.py "
                     f"--worker-id {worker.worker_id} --api-url {api_url} "
                     f"--workspace /workspace --device cuda --simulations {simulations} "
-                    f"--filters {filters} --blocks {blocks} --batch-size {batch_size} "
+                    f"--network-size {network_size} --batch-size {batch_size} "
                     f"--random-opening-moves {random_opening_moves} "
                     f"--random-opening-fraction {random_opening_fraction}"
                 )
@@ -201,8 +200,7 @@ def setup_worker_instance(
                         f"--workspace /workspace/worker_{i} "
                         f"--device cuda "
                         f"--simulations {simulations} "
-                        f"--filters {filters} "
-                        f"--blocks {blocks} "
+                        f"--network-size {network_size} "
                         f"--batch-size {batch_size} "
                         f"--random-opening-moves {random_opening_moves} "
                         f"--random-opening-fraction {random_opening_fraction}"
@@ -264,8 +262,7 @@ class DistributedOrchestrator:
         max_price: float = 0.15,
         min_reliability: float = 0.95,
         simulations: int = 2000,
-        filters: int = 64,
-        blocks: int = 6,
+        network_size: str = 'medium',
         with_trainer: bool = True,
         training_threshold: int = 50,
         workers_per_instance: int = 1,
@@ -284,8 +281,7 @@ class DistributedOrchestrator:
         self.max_price = max_price
         self.min_reliability = min_reliability
         self.simulations = simulations
-        self.filters = filters
-        self.blocks = blocks
+        self.network_size = network_size
         self.with_trainer = with_trainer
         self.training_threshold = training_threshold
         self.workers_per_instance = workers_per_instance
@@ -410,8 +406,7 @@ class DistributedOrchestrator:
                         package_path,
                         self.api_url,
                         self.simulations,
-                        self.filters,
-                        self.blocks,
+                        self.network_size,
                         self.training_threshold,
                         self.workers_per_instance,
                         self.batch_size,
@@ -566,7 +561,7 @@ class DistributedOrchestrator:
         print("\nNo model found. Creating initial model...")
         try:
             # Create network with same config as workers
-            network = create_network(self.filters, self.blocks, 'cpu')
+            network = create_network(preset=self.network_size, device='cpu')
 
             # Save locally
             model_path = self.output_dir / "initial_model.pt"
@@ -649,7 +644,7 @@ class DistributedOrchestrator:
         print(f"  API URL: {self.api_url}")
         print(f"  GPU: {self.gpu_name or 'any'}")
         print(f"  Max price: ${self.max_price}/hr")
-        print(f"  Network: {self.filters} filters, {self.blocks} blocks")
+        print(f"  Network: {self.network_size}")
         print(f"  Simulations: {self.simulations}")
         print(f"  MCTS batch size: {self.batch_size}")
         print(f"  Training threshold: {self.training_threshold} games")
@@ -796,7 +791,7 @@ class DistributedOrchestrator:
                                     target=setup_worker_instance,
                                     args=(
                                         self.vast, instance, package_path, self.api_url,
-                                        self.simulations, self.filters, self.blocks,
+                                        self.simulations, self.network_size,
                                         self.training_threshold, self.workers_per_instance,
                                         self.batch_size, self.random_opening_moves,
                                         self.random_opening_fraction,
@@ -843,10 +838,8 @@ def main():
     parser.add_argument('--gpu', type=str, default='RTX_3060', help='GPU type')
     parser.add_argument('--max-price', type=float, default=0.10, help='Max price per hour')
     parser.add_argument('--simulations', type=int, default=2000, help='MCTS simulations (default: 2000)')
-    parser.add_argument('--filters', type=int, default=None, help='Network filters (overrides --network-size)')
-    parser.add_argument('--blocks', type=int, default=None, help='Network blocks (overrides --network-size)')
-    parser.add_argument('--network-size', type=str, default='medium', choices=['small', 'medium', 'large', 'alphazero'],
-                        help='Network size preset: small (64f/6b), medium (128f/10b), large (256f/15b), alphazero (256f/20b)')
+    parser.add_argument('--network-size', type=str, default='medium', choices=['small', 'medium', 'large'],
+                        help='Network size preset: small (~236K), medium (~2.4M), large (~24M)')
     parser.add_argument('--output', type=Path, default=Path('output/distributed'),
                         help='Output directory')
     parser.add_argument('--no-trainer', action='store_true',
@@ -872,23 +865,7 @@ def main():
 
     args = parser.parse_args()
 
-    # Resolve network size presets
-    NETWORK_PRESETS = {
-        'small': (64, 6),      # ~0.8M params, fast inference
-        'medium': (128, 10),   # ~3.3M params, balanced
-        'large': (256, 15),    # ~18M params, stronger but slower
-        'alphazero': (256, 20),  # ~24M params, AlphaZero-scale
-    }
-
-    # Use explicit args if provided, otherwise use preset
-    if args.filters is not None and args.blocks is not None:
-        filters, blocks = args.filters, args.blocks
-    else:
-        filters, blocks = NETWORK_PRESETS[args.network_size]
-        if args.filters is not None:
-            filters = args.filters
-        if args.blocks is not None:
-            blocks = args.blocks
+    network_size = args.network_size
 
     # Ensure unbuffered output
     os.environ['PYTHONUNBUFFERED'] = '1'
@@ -900,8 +877,7 @@ def main():
         gpu_name=args.gpu,
         max_price=args.max_price,
         simulations=args.simulations,
-        filters=filters,
-        blocks=blocks,
+        network_size=network_size,
         with_trainer=not args.no_trainer,
         training_threshold=args.threshold,
         workers_per_instance=args.workers_per_instance,

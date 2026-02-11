@@ -312,8 +312,9 @@ class DistributedTrainer:
         epochs: int = 10,
         batch_size: int = 512,  # Training batch size
         learning_rate: float = 0.001,  # Starting LR (proven to work well)
-        filters: int = 64,
-        blocks: int = 6,
+        network_size: str = 'medium',  # Preset name from network.PRESETS
+        filters: int = 0,  # Override filters (0 = use preset)
+        blocks: int = 0,   # Override blocks (0 = use preset)
         output_dir: Path = Path('output/trainer'),
         lr_schedule: list[tuple[int, float]] | None = None,
         replay_buffer_size: int = 100_000,  # Replay buffer capacity
@@ -328,6 +329,7 @@ class DistributedTrainer:
         self.epochs = epochs
         self.batch_size = batch_size
         self.learning_rate = learning_rate
+        self.network_size = network_size
         self.filters = filters
         self.blocks = blocks
         self.output_dir = Path(output_dir)
@@ -367,6 +369,12 @@ class DistributedTrainer:
         # Checkpoint gating - track best model
         self.best_model_path: Optional[Path] = None
 
+    def _create_new_network(self) -> RazzleNet:
+        """Create a new network using preset or custom filters/blocks."""
+        if self.filters > 0 and self.blocks > 0:
+            return create_network(num_filters=self.filters, num_blocks=self.blocks, device=self.device)
+        return create_network(preset=self.network_size, device=self.device)
+
     def _load_or_create_network(self) -> bool:
         """Load latest model from API or create new one, and restore trainer state."""
         model_path = None
@@ -385,7 +393,7 @@ class DistributedTrainer:
                 print(f"[Trainer] Loaded model: {model_info.version} (iteration {self.iteration})")
             else:
                 # No model available, create new network
-                self.network = create_network(self.filters, self.blocks, self.device)
+                self.network = self._create_new_network()
                 self.iteration = 0
                 print(f"[Trainer] No model found, created new network")
         except Exception as e:
@@ -393,7 +401,7 @@ class DistributedTrainer:
             print(f"[Trainer] API error checking for model: {e}")
             print(f"[Trainer] Falling back to new network")
             try:
-                self.network = create_network(self.filters, self.blocks, self.device)
+                self.network = self._create_new_network()
                 self.iteration = 0
             except Exception as e2:
                 print(f"[Trainer] Error creating network: {e2}")
@@ -999,8 +1007,8 @@ def main():
                         help='Network filter count (overrides --network-size)')
     parser.add_argument('--blocks', type=int, default=None,
                         help='Network residual blocks (overrides --network-size)')
-    parser.add_argument('--network-size', type=str, default='medium', choices=['small', 'medium', 'large', 'alphazero'],
-                        help='Network size preset: small (64f/6b), medium (128f/10b), large (256f/15b), alphazero (256f/20b)')
+    parser.add_argument('--network-size', type=str, default='medium', choices=['small', 'medium', 'large'],
+                        help='Network size preset: small (~236K), medium (~2.4M), large (~24M)')
     parser.add_argument('--output', type=Path, default=Path('output/trainer'),
                         help='Output directory')
     parser.add_argument('--gamma', type=float, default=0.99,
@@ -1010,22 +1018,10 @@ def main():
 
     args = parser.parse_args()
 
-    # Resolve network size presets
-    NETWORK_PRESETS = {
-        'small': (64, 6),      # ~0.8M params, fast inference
-        'medium': (128, 10),   # ~3.3M params, balanced
-        'large': (256, 15),    # ~18M params, stronger but slower
-        'alphazero': (256, 20),  # ~24M params, AlphaZero-scale
-    }
-
-    if args.filters is not None and args.blocks is not None:
-        filters, blocks = args.filters, args.blocks
-    else:
-        filters, blocks = NETWORK_PRESETS[args.network_size]
-        if args.filters is not None:
-            filters = args.filters
-        if args.blocks is not None:
-            blocks = args.blocks
+    # Resolve network size - use preset unless explicit filters/blocks given
+    network_size = args.network_size
+    filters = args.filters or 0
+    blocks = args.blocks or 0
 
     # Ensure unbuffered output
     os.environ['PYTHONUNBUFFERED'] = '1'
@@ -1038,6 +1034,7 @@ def main():
         epochs=args.epochs,
         batch_size=args.batch_size,
         learning_rate=args.learning_rate,
+        network_size=network_size,
         filters=filters,
         blocks=blocks,
         output_dir=args.output,

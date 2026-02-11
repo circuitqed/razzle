@@ -203,7 +203,7 @@ def compare_with_uniform():
     print("=" * 60)
 
     from razzle.ai.network import create_network
-    network = create_network(num_filters=64, num_blocks=6)
+    network = create_network(preset='small')
 
     state = GameState.new_game()
     result = analyze_policy(network, state)
