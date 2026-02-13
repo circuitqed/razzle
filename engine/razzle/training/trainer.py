@@ -29,10 +29,11 @@ class TrainingConfig:
     weight_decay: float = 1e-4  # Standard L2 regularization
     epochs: int = 10
     policy_weight: float = 1.0
-    value_weight: float = 20.0  # Increased to balance with TD(λ) softer targets
+    value_weight: float = 5.0  # Balanced with 4x value head capacity + gradient clipping
     value_weight_quartic: float = 1.0  # Small quartic term for calibration
     difficulty_weight: float = 0.5
     illegal_penalty_weight: float = 1.0
+    max_grad_norm: float = 1.0  # Gradient clipping (0 = disabled)
     device: str = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 
@@ -165,6 +166,8 @@ class Trainer:
             # Backward pass
             self.optimizer.zero_grad()
             loss.backward()
+            if self.config.max_grad_norm > 0:
+                torch.nn.utils.clip_grad_norm_(self.network.parameters(), self.config.max_grad_norm)
             self.optimizer.step()
 
             # Track metrics

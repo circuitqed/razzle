@@ -32,7 +32,7 @@ import torch
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from razzle.ai.network import RazzleNet, create_network, NUM_ACTIONS, END_TURN_ACTION
+from razzle.ai.network import RazzleNet, create_network, PRESETS, NUM_ACTIONS, END_TURN_ACTION
 from razzle.core.state import GameState
 from razzle.core.moves import get_legal_moves
 from razzle.core.symmetry import rotate_policy_180
@@ -379,6 +379,9 @@ class DistributedTrainer:
         """Load latest model from API or create new one, and restore trainer state."""
         model_path = None
 
+        # Determine target config for architecture upgrades
+        target_config = PRESETS.get(self.network_size) if self.filters == 0 and self.blocks == 0 else None
+
         try:
             model_info = self.api_client.get_latest_model()
             if model_info:
@@ -386,11 +389,20 @@ class DistributedTrainer:
                 model_path = self.models_dir / f"{model_info.version}.pt"
                 print(f"[Trainer] Downloading model: {model_info.version}")
                 self.api_client.download_model(model_info.version, model_path)
-                self.network = RazzleNet.load(model_path, device=self.device)
+
+                if target_config is not None:
+                    # Use load_with_upgrade to handle architecture changes
+                    self.network = RazzleNet.load_with_upgrade(
+                        model_path, target_config=target_config, device=self.device
+                    )
+                else:
+                    self.network = RazzleNet.load(model_path, device=self.device)
+
                 self.iteration = model_info.iteration
                 # IMPORTANT: Set best_model_path so checkpoint gating works!
                 self.best_model_path = model_path
                 print(f"[Trainer] Loaded model: {model_info.version} (iteration {self.iteration})")
+                print(f"[Trainer] Network params: {self.network.num_parameters():,}")
             else:
                 # No model available, create new network
                 self.network = self._create_new_network()

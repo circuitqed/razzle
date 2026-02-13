@@ -59,7 +59,7 @@ PRESETS = {
     ),
     'medium': NetworkConfig(
         num_filters=96, num_blocks=12,
-        policy_filters=2, value_filters=1,
+        policy_filters=2, value_filters=4,
         value_hidden=256, policy_hidden=0,
     ),
     'large': NetworkConfig(
@@ -234,6 +234,63 @@ class RazzleNet(nn.Module):
             model.load_state_dict(state_dict)
 
         return model
+
+    @classmethod
+    def load_with_upgrade(cls, path: str, target_config: NetworkConfig, device: str = 'cpu') -> RazzleNet:
+        """Load model from file, upgrading architecture if needed.
+
+        Creates a model with target_config and transfers weights where shapes
+        match. Mismatched layers (e.g. value/difficulty heads after changing
+        value_filters) are randomly initialized.
+
+        Returns:
+            (model, upgraded) tuple - upgraded is True if architecture changed.
+        """
+        checkpoint = torch.load(path, map_location=device, weights_only=False)
+        saved_config = checkpoint['config']
+
+        # Backward compat: old configs don't have policy_hidden
+        if not hasattr(saved_config, 'policy_hidden'):
+            saved_config.policy_hidden = 0
+
+        # Check if architecture matches
+        needs_upgrade = (
+            saved_config.num_filters != target_config.num_filters or
+            saved_config.num_blocks != target_config.num_blocks or
+            saved_config.policy_filters != target_config.policy_filters or
+            saved_config.value_filters != target_config.value_filters or
+            saved_config.value_hidden != target_config.value_hidden or
+            saved_config.policy_hidden != target_config.policy_hidden
+        )
+
+        if not needs_upgrade:
+            # Same architecture, use normal load
+            model = cls(saved_config)
+            model.load_state_dict(checkpoint['state_dict'])
+            return model.to(device)
+
+        # Architecture differs - create new model with target config
+        model = cls(target_config)
+        saved_state = checkpoint['state_dict']
+        model_state = model.state_dict()
+
+        # Transfer weights where shapes match
+        transferred = []
+        skipped = []
+        for key in model_state:
+            if key in saved_state and saved_state[key].shape == model_state[key].shape:
+                model_state[key] = saved_state[key]
+                transferred.append(key)
+            else:
+                skipped.append(key)
+
+        model.load_state_dict(model_state)
+
+        if skipped:
+            print(f"[RazzleNet] Architecture upgrade: transferred {len(transferred)} params, "
+                  f"reinitialized {len(skipped)}: {skipped}")
+
+        return model.to(device)
 
     def num_parameters(self) -> int:
         """Count total parameters."""
