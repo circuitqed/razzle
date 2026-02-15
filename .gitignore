@@ -76,3 +76,5 @@ Thumbs.db
 .env.local
 .env.*.local
 engine/server/games.db
+engine/razzle.db
+*.tar.gz
