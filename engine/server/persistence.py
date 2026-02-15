@@ -734,18 +734,13 @@ def list_games(
         conditions.append("created_at <= ?")
         params.append(date_to)
 
+    # Always exclude games with no moves (never started)
+    conditions.append("moves_json IS NOT NULL AND moves_json != '[]' AND length(moves_json) > 2")
+
     where_clause = " AND ".join(conditions) if conditions else "1=1"
 
     with get_connection(db_path) as conn:
-        # Get total count
-        count_row = conn.execute(
-            f"SELECT COUNT(*) as count FROM games WHERE {where_clause}",
-            params
-        ).fetchone()
-        total = count_row["count"]
-
-        # Get page of games with usernames from users table
-        offset = (page - 1) * per_page
+        # Fetch all matching games (we need to filter by status/winner in Python)
         rows = conn.execute(
             f"""SELECT g.game_id, g.player1_type, g.player2_type, g.player1_user_id, g.player2_user_id,
                        g.state_json, g.moves_json, g.created_at, g.updated_at, g.ai_model_version,
@@ -754,12 +749,12 @@ def list_games(
                 LEFT JOIN users u1 ON g.player1_user_id = u1.user_id
                 LEFT JOIN users u2 ON g.player2_user_id = u2.user_id
                 WHERE {where_clause.replace('player1_user_id', 'g.player1_user_id').replace('player2_user_id', 'g.player2_user_id').replace('created_at', 'g.created_at')}
-                ORDER BY g.updated_at DESC
-                LIMIT ? OFFSET ?""",
-            params + [per_page, offset]
+                ORDER BY g.updated_at DESC""",
+            params
         ).fetchall()
 
-        games = []
+        # Process and filter games
+        all_games = []
         for row in rows:
             state = state_from_json(row["state_json"])
             moves_json = row["moves_json"] if row["moves_json"] else "[]"
@@ -769,17 +764,17 @@ def list_games(
             game_status = "finished" if state.is_terminal() else "playing"
             game_winner = state.get_winner()
 
-            # Skip in-progress games with no moves (abandoned/empty games)
-            if game_status == "playing" and len(moves) == 0:
+            # Skip games with no moves (never started) - backup check
+            if len(moves) == 0:
                 continue
 
-            # Apply status/winner filters (post-fetch since they depend on state)
+            # Apply status/winner filters
             if status and game_status != status:
                 continue
             if winner is not None and game_winner != winner:
                 continue
 
-            games.append({
+            all_games.append({
                 "game_id": row["game_id"],
                 "player1_type": row["player1_type"],
                 "player2_type": row["player2_type"],
@@ -796,12 +791,17 @@ def list_games(
                 "ai_model_version": row["ai_model_version"],
             })
 
+        # Paginate results
+        total = len(all_games)
+        offset = (page - 1) * per_page
+        games = all_games[offset:offset + per_page]
+
         return {
             "games": games,
             "total": total,
             "page": page,
             "per_page": per_page,
-            "total_pages": (total + per_page - 1) // per_page,
+            "total_pages": (total + per_page - 1) // per_page if total > 0 else 1,
         }
 
 

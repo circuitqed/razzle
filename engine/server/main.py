@@ -394,6 +394,9 @@ class Game:
         self.player_ids: list[Optional[str]] = [None, None]
         self.elo_updated: bool = False  # Track if ELO has been updated for this game
 
+        # Resign tracking
+        self.resigned_by: Optional[int] = None  # Player who resigned (0 or 1), None if no resignation
+
         # Online multiplayer state
         self.online_status = online_status  # 'local', 'waiting', 'playing', 'finished', 'abandoned'
         self.join_code = join_code
@@ -434,9 +437,19 @@ class Game:
             return False  # User is not a player
         return player_color == self.state.current_player
 
+    def is_game_over(self) -> bool:
+        """Check if the game is over (terminal state or resignation)."""
+        return self.state.is_terminal() or self.resigned_by is not None
+
+    def get_winner(self) -> Optional[int]:
+        """Get the winner, accounting for resignation."""
+        if self.resigned_by is not None:
+            return 1 - self.resigned_by  # Opponent wins
+        return self.state.get_winner()
+
     def to_response(self) -> GameStateResponse:
         """Convert to API response."""
-        if self.state.is_terminal():
+        if self.is_game_over():
             status = "finished"
         else:
             status = "playing"
@@ -460,7 +473,7 @@ class Game:
             current_player=self.state.current_player,
             legal_moves=get_legal_moves(self.state),
             status=status,
-            winner=self.state.get_winner(),
+            winner=self.get_winner(),
             ply=self.state.ply,
             touched_mask=str(self.state.touched_mask),
             has_passed=self.state.has_passed,
@@ -477,14 +490,14 @@ class Game:
         if self.elo_updated:
             return None
 
-        if not self.state.is_terminal():
+        if not self.is_game_over():
             return None
 
         # Need both player IDs to update ELO
         if not self.player_ids[0] or not self.player_ids[1]:
             return None
 
-        winner = self.state.get_winner()
+        winner = self.get_winner()
 
         try:
             new_r1, new_r2 = persistence.apply_elo_update(
@@ -1749,6 +1762,65 @@ async def undo_move(game_id: str):
     # Persist state and remove move from history
     persistence.save_game(game_id, game.state)
     persistence.pop_move(game_id)
+
+    response = game.to_response()
+    await broadcast_state(game, response)
+
+    return response
+
+
+class ResignRequest(BaseModel):
+    player: Optional[int] = Field(None, description="Player resigning (0 or 1). If not provided, uses current player.")
+
+
+@app.post("/games/{game_id}/resign", response_model=GameStateResponse)
+async def resign_game(
+    game_id: str,
+    request: ResignRequest = None,
+    auth_request: Request = None,
+    auth_cookie: Optional[str] = Cookie(None, alias=AUTH_COOKIE_NAME)
+):
+    """Resign from the game. The opponent wins."""
+    if request is None:
+        request = ResignRequest()
+
+    if game_id not in games:
+        raise HTTPException(status_code=404, detail="Game not found")
+
+    game = games[game_id]
+
+    if game.is_game_over():
+        raise HTTPException(status_code=409, detail="Game already finished")
+
+    # Determine which player is resigning
+    resigning_player = request.player
+    if resigning_player is None:
+        # Default to current player (for AI games, this is the human)
+        resigning_player = 0  # In AI games, player 0 is human
+
+    if resigning_player not in (0, 1):
+        raise HTTPException(status_code=400, detail="Invalid player (must be 0 or 1)")
+
+    # For online games, verify the user is the one resigning
+    user = await get_current_user(auth_request, auth_cookie) if auth_request else None
+    if game.is_online_game() and user:
+        player_color = game.get_player_color(user["user_id"])
+        if player_color is not None:
+            resigning_player = player_color
+
+    # Mark resignation
+    game.resigned_by = resigning_player
+
+    # Update ELO ratings
+    game.check_and_update_elo()
+
+    # Persist the resignation
+    persistence.update_game_result(
+        game_id,
+        winner=game.get_winner(),
+        player1_player_id=game.player_ids[0],
+        player2_player_id=game.player_ids[1]
+    )
 
     response = game.to_response()
     await broadcast_state(game, response)
