@@ -1003,11 +1003,11 @@ def main():
                         help='Training API URL (e.g., http://server:8000)')
     parser.add_argument('--device', type=str, default='cuda',
                         help='Device (cuda or cpu)')
-    parser.add_argument('--threshold', type=int, default=50,
+    parser.add_argument('--threshold', type=int, default=200,
                         help='Number of games before training')
     parser.add_argument('--poll-interval', type=int, default=30,
                         help='Seconds between checking for games')
-    parser.add_argument('--epochs', type=int, default=10,
+    parser.add_argument('--epochs', type=int, default=5,
                         help='Training epochs per iteration')
     parser.add_argument('--batch-size', type=int, default=512,
                         help='Training batch size (default: 512)')

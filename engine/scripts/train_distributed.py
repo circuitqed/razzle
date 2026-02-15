@@ -6,6 +6,10 @@ This script creates worker instances on Vast.ai that connect to a training
 API server. Workers generate games and submit them via HTTP. A separate
 trainer process fetches games and trains.
 
+Instances use a prebuilt Docker image (ghcr.io/circuitqed/razzle-worker)
+with all code and dependencies pre-installed. No SSH setup, no SCP, no
+pip install — Vast.ai pulls the image directly and runs an --onstart-cmd.
+
 Architecture:
     ┌─────────────────────────────────────────────────────────────┐
     │                    VAST.AI CLOUD                            │
@@ -50,22 +54,20 @@ Usage:
 
 import argparse
 import atexit
-import json
 import os
 import signal
 import sys
-import tarfile
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed, Future
+import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
 from pathlib import Path
-from threading import Lock
 from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from razzle.training.vastai import VastAI, GPUOffer
+
+DEFAULT_IMAGE = 'ghcr.io/circuitqed/razzle-worker:latest'
 
 
 @dataclass
@@ -74,178 +76,71 @@ class WorkerInstance:
     worker_id: int
     instance_id: Optional[int] = None
     offer: Optional[GPUOffer] = None
-    host: Optional[str] = None
-    port: Optional[int] = None
-    status: str = "pending"  # pending, creating, ready, starting, running, failed
+    status: str = "pending"  # pending, creating, running, failed
     error: Optional[str] = None
     role: str = "worker"  # worker or trainer
     last_activity: float = field(default_factory=time.time)
     games_submitted: int = 0
 
 
-def create_package(output_dir: Path) -> Path:
-    """Create a tarball with the razzle package, worker, and trainer scripts."""
-    package_path = output_dir / "razzle_package.tar.gz"
-    engine_dir = Path(__file__).parent.parent
-
-    with tarfile.open(package_path, "w:gz") as tar:
-        # Add razzle package
-        tar.add(engine_dir / "razzle", arcname="razzle")
-
-        # Add worker script
-        tar.add(engine_dir / "scripts" / "worker_selfplay.py", arcname="worker_selfplay.py")
-
-        # Add trainer script
-        tar.add(engine_dir / "scripts" / "trainer.py", arcname="trainer.py")
-
-        # Add model_arena script (needed for checkpoint gating validation)
-        tar.add(engine_dir / "scripts" / "model_arena.py", arcname="model_arena.py")
-
-    print(f"Created package: {package_path}")
-    return package_path
-
-
-def setup_worker_instance(
-    vast: VastAI,
-    worker: WorkerInstance,
-    package_path: Path,
+def _build_worker_onstart(
+    worker_id: int,
     api_url: str,
     simulations: int,
-    network_size: str = 'medium',
-    training_threshold: int = 50,
-    workers_per_instance: int = 1,
-    batch_size: int = 32,
-    random_opening_moves: int = 0,
-    random_opening_fraction: float = 0.0,
-    trainer_batch_size: int = 512,
-    replay_buffer_size: int = 100_000,
-    gamma: float = 0.99,
-    td_lambda: float = 0.95,
-) -> bool:
-    """Set up a worker instance and start the worker/trainer process."""
-    role_name = "Trainer" if worker.role == "trainer" else f"Worker {worker.worker_id}"
-    try:
-        worker.status = "starting"
-        print(f"[{role_name}] Setting up instance {worker.instance_id}")
+    network_size: str,
+    workers_per_instance: int,
+    batch_size: int,
+    random_opening_moves: int,
+    random_opening_fraction: float,
+    run_id: str = '',
+) -> str:
+    """Build the onstart-cmd string for a worker instance.
 
-        # Wait for SSH to be available
-        for attempt in range(30):  # 5 minutes max
-            try:
-                result = vast.execute(worker.instance_id, "echo ready", timeout=30)
-                if "ready" in result:
-                    print(f"[{role_name}] SSH ready after {attempt+1} attempts")
-                    break
-            except Exception as e:
-                if attempt % 5 == 0:  # Log every 5 attempts
-                    print(f"[{role_name}] SSH attempt {attempt+1}/30: {str(e)[:50]}")
-            time.sleep(10)
-        else:
-            raise RuntimeError("SSH not available after 5 minutes")
+    Launches N worker processes via nohup so they survive the init process.
+    Each worker gets an ID like "{run_id}_{sub_worker_id}" so the orchestrator
+    can distinguish its workers from previous runs in the dashboard.
+    """
+    lines = []
+    for i in range(workers_per_instance):
+        sub_worker_id = worker_id * workers_per_instance + i
+        full_id = f'{run_id}_{sub_worker_id}' if run_id else str(sub_worker_id)
+        lines.append(
+            f'mkdir -p /workspace/worker_{i}/model && '
+            f'nohup python -u /workspace/scripts/worker_selfplay.py '
+            f'--worker-id {full_id} '
+            f'--api-url {api_url} '
+            f'--workspace /workspace/worker_{i} '
+            f'--device cuda '
+            f'--simulations {simulations} '
+            f'--network-size {network_size} '
+            f'--batch-size {batch_size} '
+            f'--random-opening-moves {random_opening_moves} '
+            f'--random-opening-fraction {random_opening_fraction} '
+            f'</dev/null >/workspace/worker_{i}.log 2>&1 &'
+        )
+    return '\n'.join(lines)
 
-        # Create workspace directory
-        print(f"[{role_name}] Creating workspace...")
-        vast.execute(worker.instance_id, "mkdir -p /workspace/model", timeout=60)
 
-        # Upload package
-        print(f"[{role_name}] Uploading package...")
-        vast.copy_to(worker.instance_id, package_path, "/workspace/razzle_package.tar.gz")
-        print(f"[{role_name}] Package uploaded")
-
-        # Extract and install
-        print(f"[{role_name}] Installing dependencies...")
-        setup_cmd = """
-            cd /workspace && \
-            tar -xzf razzle_package.tar.gz && \
-            pip install torch numpy requests --quiet 2>/dev/null
-        """
-        vast.execute(worker.instance_id, setup_cmd, timeout=600)
-
-        if worker.role == "trainer":
-            # Start trainer process - use bash -c to ensure proper backgrounding and SSH return
-            print(f"[{role_name}] Starting trainer process...")
-            trainer_cmd = (
-                f"python -u /workspace/trainer.py "
-                f"--api-url {api_url} --device cuda --threshold {training_threshold} "
-                f"--network-size {network_size} --output /workspace/output "
-                f"--batch-size {trainer_batch_size} --replay-buffer-size {replay_buffer_size} "
-                f"--gamma {gamma} --td-lambda {td_lambda}"
-            )
-            start_cmd = f'bash -c \'nohup {trainer_cmd} </dev/null >/workspace/trainer.log 2>&1 & disown; sleep 1; echo "Trainer started"\''
-        else:
-            # Start worker process(es)
-            if workers_per_instance == 1:
-                print(f"[{role_name}] Starting worker process...")
-                worker_cmd = (
-                    f"python -u /workspace/worker_selfplay.py "
-                    f"--worker-id {worker.worker_id} --api-url {api_url} "
-                    f"--workspace /workspace --device cuda --simulations {simulations} "
-                    f"--network-size {network_size} --batch-size {batch_size} "
-                    f"--random-opening-moves {random_opening_moves} "
-                    f"--random-opening-fraction {random_opening_fraction}"
-                )
-                start_cmd = f'bash -c \'nohup {worker_cmd} </dev/null >/workspace/worker.log 2>&1 & disown; sleep 1; echo "Worker started"\''
-            else:
-                # Launch multiple workers sharing the GPU
-                print(f"[{role_name}] Starting {workers_per_instance} worker processes...")
-                # Create workspace dirs first
-                mkdir_cmds = " && ".join([f"mkdir -p /workspace/worker_{i}/model" for i in range(workers_per_instance)])
-                # Build worker launch commands - each backgrounded and disowned
-                worker_cmds = []
-                for i in range(workers_per_instance):
-                    sub_worker_id = worker.worker_id * workers_per_instance + i
-                    wcmd = (
-                        f"python -u /workspace/worker_selfplay.py "
-                        f"--worker-id {sub_worker_id} "
-                        f"--api-url {api_url} "
-                        f"--workspace /workspace/worker_{i} "
-                        f"--device cuda "
-                        f"--simulations {simulations} "
-                        f"--network-size {network_size} "
-                        f"--batch-size {batch_size} "
-                        f"--random-opening-moves {random_opening_moves} "
-                        f"--random-opening-fraction {random_opening_fraction}"
-                    )
-                    worker_cmds.append(f"nohup {wcmd} </dev/null >/workspace/worker_{i}.log 2>&1 & disown")
-                # Launch all workers with bash -c to ensure proper backgrounding
-                all_workers = "; ".join(worker_cmds)
-                start_cmd = f'bash -c \'{mkdir_cmds} && {all_workers}; sleep 1; echo "{workers_per_instance} workers started"\''
-
-        # Execute start command - timeout is OK since nohup/disown should work
-        try:
-            result = vast.execute(worker.instance_id, start_cmd, timeout=60)
-            print(f"[{role_name}] {result.strip()}")
-        except Exception as start_error:
-            # SSH timeout during start is OK - the command was sent and workers likely started
-            # Only fail if it's not a timeout error
-            error_str = str(start_error).lower()
-            if "timeout" in error_str:
-                print(f"[{role_name}] Start command sent (SSH timed out, but worker likely running)")
-            else:
-                raise  # Re-raise non-timeout errors
-
-        # Mark as running - workers/trainer are now started (or at least the command was sent)
-        worker.status = "running"
-
-        # Optional status check (non-fatal if it fails)
-        try:
-            time.sleep(5)
-            log_file = "trainer.log" if worker.role == "trainer" else f"worker_0.log"
-            status_check = vast.execute(
-                worker.instance_id,
-                f"cat /workspace/{log_file} 2>/dev/null | tail -3 || echo 'starting...'",
-                timeout=30
-            )
-            print(f"[{role_name}] Status: {status_check.strip()[:100]}")
-        except Exception as e:
-            print(f"[{role_name}] Status check skipped")
-
-        return True
-
-    except Exception as e:
-        worker.status = "failed"
-        worker.error = str(e)
-        print(f"[{role_name}] Setup failed: {e}")
-        return False
+def _build_trainer_onstart(
+    api_url: str,
+    network_size: str,
+    training_threshold: int,
+    trainer_batch_size: int,
+    replay_buffer_size: int,
+    gamma: float,
+    td_lambda: float,
+    epochs: int = 5,
+) -> str:
+    """Build the onstart-cmd string for a trainer instance."""
+    return (
+        f'mkdir -p /workspace/output && '
+        f'nohup python -u /workspace/scripts/trainer.py '
+        f'--api-url {api_url} --device cuda --threshold {training_threshold} '
+        f'--network-size {network_size} --output /workspace/output '
+        f'--batch-size {trainer_batch_size} --replay-buffer-size {replay_buffer_size} '
+        f'--gamma {gamma} --td-lambda {td_lambda} --epochs {epochs} '
+        f'</dev/null >/workspace/trainer.log 2>&1 &'
+    )
 
 
 class DistributedOrchestrator:
@@ -258,6 +153,7 @@ class DistributedOrchestrator:
         num_workers: int,
         api_url: str,
         output_dir: Path,
+        image: str = DEFAULT_IMAGE,
         gpu_name: Optional[str] = None,
         max_price: float = 0.15,
         min_reliability: float = 0.95,
@@ -277,6 +173,7 @@ class DistributedOrchestrator:
         self.num_workers = num_workers
         self.api_url = api_url
         self.output_dir = Path(output_dir)
+        self.image = image
         self.gpu_name = gpu_name
         self.max_price = max_price
         self.min_reliability = min_reliability
@@ -296,10 +193,12 @@ class DistributedOrchestrator:
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
         # State
+        self.run_id = uuid.uuid4().hex[:6]  # Short unique ID for this run
         self.vast: Optional[VastAI] = None
         self.workers: list[WorkerInstance] = []
         self.trainer: Optional[WorkerInstance] = None
         self.shutdown_requested = False
+        self.failed_offer_ids: set[int] = set()  # Offers that produced broken instances
 
     def find_offers(self) -> list[GPUOffer]:
         """Find suitable GPU offers."""
@@ -325,6 +224,70 @@ class DistributedOrchestrator:
 
         return offers
 
+    def _create_worker_instance(self, worker: WorkerInstance) -> bool:
+        """Create a single worker instance with onstart_cmd."""
+        onstart = _build_worker_onstart(
+            worker_id=worker.worker_id,
+            api_url=self.api_url,
+            simulations=self.simulations,
+            network_size=self.network_size,
+            workers_per_instance=self.workers_per_instance,
+            batch_size=self.batch_size,
+            random_opening_moves=self.random_opening_moves,
+            random_opening_fraction=self.random_opening_fraction,
+            run_id=self.run_id,
+        )
+        try:
+            worker.status = "creating"
+            instance_id = self.vast.create_instance(
+                worker.offer.id,
+                image=self.image,
+                disk=30,
+                onstart_cmd=onstart,
+                label=f'razzle-worker-{worker.worker_id}',
+            )
+            worker.instance_id = instance_id
+            worker.status = "running"
+            print(f"  Worker {worker.worker_id}: Instance {instance_id} "
+                  f"({worker.offer.gpu_name} @ ${worker.offer.dph_total:.3f}/hr)")
+            return True
+        except Exception as e:
+            worker.status = "failed"
+            worker.error = str(e)
+            print(f"  Worker {worker.worker_id}: Failed to create - {e}")
+            return False
+
+    def _create_trainer_instance(self, trainer: WorkerInstance) -> bool:
+        """Create the trainer instance with onstart_cmd."""
+        onstart = _build_trainer_onstart(
+            api_url=self.api_url,
+            network_size=self.network_size,
+            training_threshold=self.training_threshold,
+            trainer_batch_size=self.trainer_batch_size,
+            replay_buffer_size=self.replay_buffer_size,
+            gamma=self.gamma,
+            td_lambda=self.td_lambda,
+        )
+        try:
+            trainer.status = "creating"
+            instance_id = self.vast.create_instance(
+                trainer.offer.id,
+                image=self.image,
+                disk=30,
+                onstart_cmd=onstart,
+                label='razzle-trainer',
+            )
+            trainer.instance_id = instance_id
+            trainer.status = "running"
+            print(f"  Trainer: Instance {instance_id} "
+                  f"({trainer.offer.gpu_name} @ ${trainer.offer.dph_total:.3f}/hr)")
+            return True
+        except Exception as e:
+            trainer.status = "failed"
+            trainer.error = str(e)
+            print(f"  Trainer: Failed to create - {e}")
+            return False
+
     def create_instances(self, offers: list[GPUOffer]) -> bool:
         """Create worker and trainer instances from offers."""
         total_needed = self.num_workers + (1 if self.with_trainer else 0)
@@ -337,161 +300,25 @@ class DistributedOrchestrator:
 
         # Create worker instances
         for i in range(self.num_workers):
-            offer = offers[i]
-            worker = WorkerInstance(worker_id=i, offer=offer, role="worker")
+            worker = WorkerInstance(worker_id=i, offer=offers[i], role="worker")
             self.workers.append(worker)
-
-            try:
-                worker.status = "creating"
-                instance_id = self.vast.create_instance(
-                    offer.id,
-                    image='pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime',
-                    disk=30
-                )
-                worker.instance_id = instance_id
-                print(f"  Worker {i}: Instance {instance_id} ({offer.gpu_name} @ ${offer.dph_total:.3f}/hr)")
-
-            except Exception as e:
-                worker.status = "failed"
-                worker.error = str(e)
-                print(f"  Worker {i}: Failed to create - {e}")
+            self._create_worker_instance(worker)
 
         # Create trainer instance
         if self.with_trainer:
-            offer = offers[self.num_workers]
-            self.trainer = WorkerInstance(worker_id=-1, offer=offer, role="trainer")
+            self.trainer = WorkerInstance(worker_id=-1, offer=offers[self.num_workers], role="trainer")
+            self._create_trainer_instance(self.trainer)
 
-            try:
-                self.trainer.status = "creating"
-                instance_id = self.vast.create_instance(
-                    offer.id,
-                    image='pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime',
-                    disk=30
-                )
-                self.trainer.instance_id = instance_id
-                print(f"  Trainer: Instance {instance_id} ({offer.gpu_name} @ ${offer.dph_total:.3f}/hr)")
-
-            except Exception as e:
-                self.trainer.status = "failed"
-                self.trainer.error = str(e)
-                print(f"  Trainer: Failed to create - {e}")
-
-        return any(w.status == "creating" for w in self.workers)
-
-    def poll_and_setup_instances(self, package_path: Path, timeout: int = 600) -> int:
-        """Poll instances and setup each one as soon as it's ready."""
-        print(f"\nPolling instances and setting up as ready...")
-
-        all_instances = self.workers + ([self.trainer] if self.trainer else [])
-        setup_lock = Lock()
-
-        # Track which instances have been submitted for setup
-        setup_submitted = set()
-
-        def check_and_setup(instance: WorkerInstance):
-            """Check if instance is ready and start setup."""
-            try:
-                info = self.vast.get_instance(instance.instance_id)
-                if info and info.actual_status == "running" and info.ssh_host:
-                    instance.host = info.ssh_host
-                    instance.port = info.ssh_port
-                    name = "Trainer" if instance.role == "trainer" else f"Worker {instance.worker_id}"
-                    print(f"  {name}: Ready ({info.ssh_host}:{info.ssh_port}) - starting setup")
-                    instance.status = "ready"
-
-                    # Immediately start setup
-                    success = setup_worker_instance(
-                        self.vast,
-                        instance,
-                        package_path,
-                        self.api_url,
-                        self.simulations,
-                        self.network_size,
-                        self.training_threshold,
-                        self.workers_per_instance,
-                        self.batch_size,
-                        self.random_opening_moves,
-                        self.random_opening_fraction,
-                        self.trainer_batch_size,
-                        self.replay_buffer_size,
-                        self.gamma,
-                        self.td_lambda,
-                    )
-                    if success:
-                        instance.last_activity = time.time()
-                    return success
-                return None  # Not ready yet
-            except Exception as e:
-                return None  # Check failed, retry later
-
-        start = time.time()
-        executor = ThreadPoolExecutor(max_workers=len(all_instances))
-        pending_futures: dict[Future, WorkerInstance] = {}
-
-        try:
-            while time.time() - start < timeout:
-                # Submit checks for instances not yet running or in setup
-                for instance in all_instances:
-                    if instance.status in ["creating", "pending"] and instance.instance_id not in setup_submitted:
-                        with setup_lock:
-                            if instance.instance_id not in setup_submitted:
-                                setup_submitted.add(instance.instance_id)
-                                future = executor.submit(check_and_setup, instance)
-                                pending_futures[future] = instance
-
-                # Check completed futures
-                done_futures = []
-                for future in list(pending_futures.keys()):
-                    if future.done():
-                        done_futures.append(future)
-                        instance = pending_futures[future]
-                        try:
-                            result = future.result()
-                            if result is None:
-                                # Not ready yet, resubmit after delay
-                                with setup_lock:
-                                    setup_submitted.discard(instance.instance_id)
-                        except Exception as e:
-                            name = "Trainer" if instance.role == "trainer" else f"Worker {instance.worker_id}"
-                            print(f"  {name}: Setup error - {e}")
-                            with setup_lock:
-                                setup_submitted.discard(instance.instance_id)
-
-                for future in done_futures:
-                    del pending_futures[future]
-
-                # Check progress
-                running_count = sum(1 for w in self.workers if w.status == "running")
-                trainer_running = self.trainer and self.trainer.status == "running"
-
-                # Exit early if all are running (and no pending setup tasks)
-                all_done = all(i.status in ["running", "failed"] for i in all_instances)
-                if all_done and not pending_futures:
-                    break
-
-                time.sleep(5)  # Poll interval
-
-        finally:
-            # Wait for any remaining setup tasks to complete
-            if pending_futures:
-                print(f"Waiting for {len(pending_futures)} pending setup tasks...")
-                for future in pending_futures:
-                    try:
-                        future.result(timeout=300)  # 5 min max per task
-                    except Exception as e:
-                        pass
-            executor.shutdown(wait=True)
-
-        running_count = sum(1 for w in self.workers if w.status == "running")
-        trainer_running = self.trainer and self.trainer.status == "running"
-        print(f"\n{running_count}/{self.num_workers} workers running" +
-              (f", trainer {'running' if trainer_running else 'not running'}" if self.with_trainer else ""))
-        return running_count
+        return any(w.status == "running" for w in self.workers)
 
     def replace_failed_instance(self, failed_worker: WorkerInstance, offers: list[GPUOffer]) -> bool:
         """Replace a failed or unresponsive worker with a new instance."""
         role_name = "Trainer" if failed_worker.role == "trainer" else f"Worker {failed_worker.worker_id}"
         print(f"\n[{role_name}] Replacing failed instance {failed_worker.instance_id}...")
+
+        # Blacklist the offer that produced the failed instance
+        if failed_worker.offer:
+            self.failed_offer_ids.add(failed_worker.offer.id)
 
         # Destroy the old instance
         if failed_worker.instance_id:
@@ -501,14 +328,15 @@ class DistributedOrchestrator:
             except Exception as e:
                 print(f"[{role_name}] Failed to destroy old instance: {e}")
 
-        # Find a new offer (use one not already in use)
+        # Find a new offer: skip in-use and previously failed offers
         used_offer_ids = {w.offer.id for w in self.workers if w.offer}
         if self.trainer and self.trainer.offer:
             used_offer_ids.add(self.trainer.offer.id)
+        skip_ids = used_offer_ids | self.failed_offer_ids
 
         new_offer = None
         for offer in offers:
-            if offer.id not in used_offer_ids:
+            if offer.id not in skip_ids:
                 new_offer = offer
                 break
 
@@ -516,35 +344,26 @@ class DistributedOrchestrator:
             # Refresh offers
             offers = self.find_offers()
             for offer in offers:
-                if offer.id not in used_offer_ids:
+                if offer.id not in skip_ids:
                     new_offer = offer
                     break
 
         if not new_offer:
-            print(f"[{role_name}] No available offers for replacement")
+            print(f"[{role_name}] No available offers for replacement (skipped {len(self.failed_offer_ids)} blacklisted)")
             return False
 
-        # Create new instance
-        try:
-            failed_worker.offer = new_offer
-            failed_worker.status = "creating"
-            instance_id = self.vast.create_instance(
-                new_offer.id,
-                image='pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime',
-                disk=30
-            )
-            failed_worker.instance_id = instance_id
-            print(f"[{role_name}] Created new instance {instance_id} ({new_offer.gpu_name} @ ${new_offer.dph_total:.3f}/hr)")
-            return True
-        except Exception as e:
-            print(f"[{role_name}] Failed to create replacement: {e}")
-            failed_worker.status = "failed"
-            return False
+        # Create replacement and reset activity timer
+        failed_worker.offer = new_offer
+        failed_worker.last_activity = time.time()  # Reset so it gets a full grace period
+        if failed_worker.role == "trainer":
+            return self._create_trainer_instance(failed_worker)
+        else:
+            return self._create_worker_instance(failed_worker)
 
     def _ensure_initial_model(self):
         """Create and upload initial model if none exists."""
         import requests
-        from razzle.ai.network import create_network, RazzleNet
+        from razzle.ai.network import create_network
 
         # Check if a model already exists
         try:
@@ -560,15 +379,12 @@ class DistributedOrchestrator:
         # Create and upload initial model
         print("\nNo model found. Creating initial model...")
         try:
-            # Create network with same config as workers
             network = create_network(preset=self.network_size, device='cpu')
 
-            # Save locally
             model_path = self.output_dir / "initial_model.pt"
             self.output_dir.mkdir(parents=True, exist_ok=True)
             network.save(model_path)
 
-            # Upload to API
             with open(model_path, 'rb') as f:
                 files = {'file': ('initial.pt', f, 'application/octet-stream')}
                 data = {
@@ -602,7 +418,6 @@ class DistributedOrchestrator:
                         print(f"  Destroyed existing instance {inst.id}")
                     except Exception as e:
                         print(f"  Failed to destroy {inst.id}: {e}")
-                # Wait for cleanup
                 time.sleep(5)
                 print("Cleanup complete")
         except Exception as e:
@@ -614,7 +429,6 @@ class DistributedOrchestrator:
         print("Cleaning up")
         print("=" * 60)
 
-        # Destroy worker instances
         for worker in self.workers:
             if worker.instance_id:
                 try:
@@ -623,7 +437,6 @@ class DistributedOrchestrator:
                 except Exception as e:
                     print(f"  Failed to destroy worker {worker.instance_id}: {e}")
 
-        # Destroy trainer instance
         if self.trainer and self.trainer.instance_id:
             try:
                 self.vast.destroy_instance(self.trainer.instance_id)
@@ -638,6 +451,8 @@ class DistributedOrchestrator:
         print("=" * 60)
 
         print(f"\nConfiguration:")
+        print(f"  Run ID: {self.run_id}")
+        print(f"  Image: {self.image}")
         print(f"  Instances: {self.num_workers} worker + {'1 trainer' if self.with_trainer else 'no trainer'}")
         print(f"  Workers per instance: {self.workers_per_instance}")
         print(f"  Total worker processes: {self.num_workers * self.workers_per_instance}")
@@ -657,8 +472,8 @@ class DistributedOrchestrator:
         # Clean up any existing instances from previous runs
         self._cleanup_existing_instances()
 
-        # Register cleanup
-        atexit.register(self.cleanup)
+        # Only cleanup on explicit Ctrl+C, not on normal exit
+        # (instances should keep running if the orchestrator disconnects)
 
         # Find offers
         offers = self.find_offers()
@@ -670,24 +485,12 @@ class DistributedOrchestrator:
         total_cost = sum(o.dph_total for o in offers[:num_instances])
         print(f"\nEstimated cost: ${total_cost:.2f}/hr ({num_instances} instances)")
 
-        # Create instances
-        if not self.create_instances(offers):
-            return 1
-
-        # Create package (do this while instances are starting)
-        package_path = create_package(self.output_dir)
-
         # Ensure initial model exists
         self._ensure_initial_model()
 
-        # Poll instances and setup each as soon as ready
-        running_count = self.poll_and_setup_instances(package_path)
-
-        # Don't exit immediately if running_count is 0 - workers may have started
-        # even if SSH timed out. We'll verify via API activity monitoring.
-        if running_count == 0:
-            print("\nWarning: No workers confirmed running, but they may have started.")
-            print("Continuing to monitor for activity...")
+        # Create instances (image pull + onstart_cmd handles everything)
+        if not self.create_instances(offers):
+            return 1
 
         # Print instructions
         print("\n" + "=" * 60)
@@ -705,124 +508,86 @@ class DistributedOrchestrator:
         print("  Press Ctrl+C")
         print("\n" + "=" * 60)
 
-        # Wait for interrupt with health monitoring
+        # Monitor via API dashboard (no SSH needed)
+        # Build map of our full worker IDs -> instance worker_id
+        # Workers register as "{run_id}_{sub_id}" in the dashboard
+        our_worker_map: dict[str, int] = {}
+        for w in self.workers:
+            for i in range(self.workers_per_instance):
+                sub_id = w.worker_id * self.workers_per_instance + i
+                full_id = f'{self.run_id}_{sub_id}'
+                our_worker_map[full_id] = w.worker_id
+
+        print(f"[Monitor] Run ID: {self.run_id} — tracking {len(our_worker_map)} sub-workers")
+
         try:
             import requests
-            check_interval = 60  # Check every 60 seconds
-            consecutive_failures = 0
-            max_failures = 15  # Exit after 15 consecutive failures (15 minutes)
-            startup_grace_period = 300  # 5 minutes startup grace period
-            startup_time = time.time()
-            worker_inactivity_threshold = 600  # 10 minutes of no games = unhealthy
-            last_worker_games: dict[str, int] = {}  # Track games per worker
-            any_activity_ever = False  # Track if we've ever seen activity
+            check_interval = 60
+            # Image pull + model download can take 5-10 min on slow hosts
+            worker_inactivity_threshold = 900  # 15 min before replacing
 
             while not self.shutdown_requested:
                 time.sleep(check_interval)
 
-                # Check worker status via API dashboard
                 try:
                     response = requests.get(f"{self.api_url}/training/dashboard", timeout=10)
-                    if response.status_code == 200:
-                        data = response.json()
-                        games_pending = data.get('games_pending', 0)
-                        games_total = data.get('games_total', 0)
-                        workers_data = data.get('workers', {})
-                        workers_active = len(workers_data)
-
-                        if games_total > 0 or workers_active > 0:
-                            consecutive_failures = 0
-                            any_activity_ever = True
-                            print(f"[Status] Games: {games_total} total, {games_pending} pending, {workers_active} workers active")
-
-                            # Check individual worker health
-                            current_time = time.time()
-                            for worker_id, worker_info in workers_data.items():
-                                games = worker_info.get('games_submitted', 0)
-                                # Check if worker has made progress
-                                prev_games = last_worker_games.get(worker_id, 0)
-                                if games > prev_games:
-                                    # Update activity time for matching local worker
-                                    for w in self.workers:
-                                        if str(w.worker_id) in worker_id or worker_id in str(w.worker_id * self.workers_per_instance):
-                                            w.last_activity = current_time
-                                            w.games_submitted = games
-                                last_worker_games[worker_id] = games
-
-                            # Check for unresponsive local workers
-                            for worker in self.workers:
-                                if worker.status == "running":
-                                    inactive_time = current_time - worker.last_activity
-                                    if inactive_time > worker_inactivity_threshold:
-                                        print(f"[Health] Worker {worker.worker_id} unresponsive for {inactive_time:.0f}s")
-                                        # Try to replace it
-                                        worker.status = "failed"
-                                        if self.replace_failed_instance(worker, offers):
-                                            # Let the monitoring loop pick it up
-                                            pass
-                        else:
-                            consecutive_failures += 1
-                            print(f"[Status] No activity detected ({consecutive_failures}/{max_failures})")
-                    else:
-                        consecutive_failures += 1
+                    if response.status_code != 200:
                         print(f"[Status] API error: {response.status_code}")
+                        continue
+
+                    data = response.json()
+                    games_total = data.get('games_total', 0)
+                    games_pending = data.get('games_pending', 0)
+                    workers_data = data.get('workers', {})
+
+                    # Count only OUR active workers from dashboard
+                    current_time = time.time()
+                    our_active = 0
+                    for worker_id_str, worker_info in workers_data.items():
+                        if worker_id_str not in our_worker_map:
+                            continue
+
+                        instance_wid = our_worker_map[worker_id_str]
+                        last_seen = worker_info.get('last_seen', '')
+                        games = worker_info.get('games_submitted', worker_info.get('games', 0))
+
+                        # Parse last_seen to check recency
+                        try:
+                            from datetime import datetime, timezone
+                            ls = datetime.fromisoformat(last_seen.replace('Z', '+00:00'))
+                            age_sec = (datetime.now(timezone.utc) - ls).total_seconds()
+                        except Exception:
+                            age_sec = float('inf')
+
+                        if age_sec < 300:  # Active in last 5 min
+                            our_active += 1
+                            for w in self.workers:
+                                if w.worker_id == instance_wid:
+                                    w.last_activity = current_time
+                                    w.games_submitted = games
+
+                    print(f"[Status] Games: {games_total} total, {games_pending} pending, "
+                          f"{our_active}/{len(self.workers)} of our workers active")
+
+                    # Replace unresponsive workers
+                    for worker in self.workers:
+                        if worker.status == "running":
+                            inactive_time = current_time - worker.last_activity
+                            if inactive_time > worker_inactivity_threshold:
+                                print(f"[Health] Worker {worker.worker_id} unresponsive for {inactive_time:.0f}s - replacing")
+                                worker.status = "failed"
+                                self.replace_failed_instance(worker, offers)
+
                 except Exception as e:
-                    consecutive_failures += 1
                     print(f"[Status] Check failed: {e}")
 
-                # Check for instances that need setup (replacements)
-                instances_needing_setup = [w for w in self.workers if w.status == "creating"]
-                if self.trainer and self.trainer.status == "creating":
-                    instances_needing_setup.append(self.trainer)
-
-                if instances_needing_setup:
-                    # Poll and setup any pending replacements
-                    for instance in instances_needing_setup:
-                        try:
-                            info = self.vast.get_instance(instance.instance_id)
-                            if info and info.actual_status == "running" and info.ssh_host:
-                                instance.host = info.ssh_host
-                                instance.port = info.ssh_port
-                                name = "Trainer" if instance.role == "trainer" else f"Worker {instance.worker_id}"
-                                print(f"  {name}: Replacement ready - starting setup")
-                                # Setup in background thread
-                                import threading
-                                threading.Thread(
-                                    target=setup_worker_instance,
-                                    args=(
-                                        self.vast, instance, package_path, self.api_url,
-                                        self.simulations, self.network_size,
-                                        self.training_threshold, self.workers_per_instance,
-                                        self.batch_size, self.random_opening_moves,
-                                        self.random_opening_fraction,
-                                        self.trainer_batch_size, self.replay_buffer_size,
-                                        self.gamma, self.td_lambda,
-                                    ),
-                                    daemon=True
-                                ).start()
-                        except Exception as e:
-                            pass  # Will retry next cycle
-
-                # Only exit for inactivity after grace period or if we had activity then lost it
-                time_since_start = time.time() - startup_time
-                in_grace_period = time_since_start < startup_grace_period
-
-                if consecutive_failures >= max_failures:
-                    if in_grace_period:
-                        print(f"[Status] Still in startup grace period ({time_since_start:.0f}s/{startup_grace_period}s)")
-                        consecutive_failures = max_failures - 1  # Don't exit yet
-                    elif not any_activity_ever:
-                        print(f"[Status] No activity yet, extending grace period...")
-                        consecutive_failures = max_failures // 2  # Give more time
-                    else:
-                        print("\nNo activity detected for too long after successful startup. Exiting.")
-                        break
-
         except KeyboardInterrupt:
-            print("\n\nShutdown requested...")
+            print("\n\nShutdown requested - destroying all instances...")
             self.shutdown_requested = True
+            self.cleanup()
 
-        self.cleanup()
+        print("\nOrchestrator exiting. Instances are still running.")
+        print("To destroy all instances: vastai destroy instance <id>")
         return 0
 
     def shutdown(self):
@@ -835,6 +600,8 @@ def main():
     parser.add_argument('--workers', type=int, default=3, help='Number of workers')
     parser.add_argument('--api-url', type=str, default='https://razzledazzle.lazybrains.com/api',
                         help='Training API URL (default: https://razzledazzle.lazybrains.com/api)')
+    parser.add_argument('--image', type=str, default=DEFAULT_IMAGE,
+                        help=f'Docker image for workers (default: {DEFAULT_IMAGE})')
     parser.add_argument('--gpu', type=str, default='RTX_3060', help='GPU type')
     parser.add_argument('--max-price', type=float, default=0.10, help='Max price per hour')
     parser.add_argument('--simulations', type=int, default=2000, help='MCTS simulations (default: 2000)')
@@ -844,8 +611,8 @@ def main():
                         help='Output directory')
     parser.add_argument('--no-trainer', action='store_true',
                         help='Do not create a trainer instance (run trainer separately)')
-    parser.add_argument('--threshold', type=int, default=50,
-                        help='Number of games before training (default: 50)')
+    parser.add_argument('--threshold', type=int, default=200,
+                        help='Number of games before training (default: 200)')
     parser.add_argument('--workers-per-instance', type=int, default=3,
                         help='Number of worker processes per GPU instance (default: 3)')
     parser.add_argument('--batch-size', type=int, default=32,
@@ -865,8 +632,6 @@ def main():
 
     args = parser.parse_args()
 
-    network_size = args.network_size
-
     # Ensure unbuffered output
     os.environ['PYTHONUNBUFFERED'] = '1'
 
@@ -874,10 +639,11 @@ def main():
         num_workers=args.workers,
         api_url=args.api_url,
         output_dir=args.output,
+        image=args.image,
         gpu_name=args.gpu,
         max_price=args.max_price,
         simulations=args.simulations,
-        network_size=network_size,
+        network_size=args.network_size,
         with_trainer=not args.no_trainer,
         training_threshold=args.threshold,
         workers_per_instance=args.workers_per_instance,

@@ -1,0 +1,17 @@
+FROM pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime
+
+# Install the only dependency not in the base image
+RUN pip install --no-cache-dir requests
+
+# Copy the razzle package and project config
+WORKDIR /workspace
+COPY pyproject.toml .
+COPY razzle/ razzle/
+
+# Install razzle package in editable mode
+RUN pip install --no-cache-dir -e .
+
+# Copy worker and trainer scripts
+COPY scripts/worker_selfplay.py scripts/worker_selfplay.py
+COPY scripts/trainer.py scripts/trainer.py
+COPY scripts/model_arena.py scripts/model_arena.py

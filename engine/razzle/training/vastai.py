@@ -177,20 +177,39 @@ class VastAI:
         self,
         offer_id: int,
         image: str = 'pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime',
-        disk: int = 20
+        disk: int = 20,
+        onstart_cmd: Optional[str] = None,
+        env: Optional[str] = None,
+        label: Optional[str] = None,
     ) -> int:
         """
         Create a new instance from an offer.
 
+        Args:
+            offer_id: Vast.ai offer ID
+            image: Docker image to use
+            disk: Disk space in GB
+            onstart_cmd: Command to run when instance starts
+            env: Environment variables as JSON string, e.g. '-e API_URL=http://...'
+            label: Label for the instance
+
         Returns instance ID.
         """
-        output = self._run(
+        cmd = [
             'create', 'instance',
             str(offer_id),
             '--image', image,
             '--disk', str(disk),
-            '--raw'
-        )
+        ]
+        if onstart_cmd:
+            cmd += ['--onstart-cmd', onstart_cmd]
+        if env:
+            cmd += ['--env', env]
+        if label:
+            cmd += ['--label', label]
+        cmd.append('--raw')
+
+        output = self._run(*cmd)
 
         try:
             data = json.loads(output)

@@ -54,7 +54,7 @@ import math
 @dataclass
 class WorkerStatus:
     """Status information for monitoring."""
-    worker_id: int
+    worker_id: str
     status: str  # starting, running, paused, stopped, error
     games_completed: int
     games_submitted: int
@@ -79,7 +79,7 @@ class SelfPlayWorker:
 
     def __init__(
         self,
-        worker_id: int,
+        worker_id: str,
         api_url: str,
         workspace: Path,
         device: str = 'cuda',
@@ -584,7 +584,7 @@ class SelfPlayWorker:
         """Submit a game to the API."""
         try:
             game_id = self.api_client.submit_game(
-                worker_id=f"worker_{self.worker_id}",
+                worker_id=self.worker_id,
                 moves=moves,
                 result=result,
                 visit_counts=visit_counts,
@@ -698,7 +698,7 @@ class SelfPlayWorker:
 
 def main():
     parser = argparse.ArgumentParser(description='Distributed self-play worker')
-    parser.add_argument('--worker-id', type=int, required=True, help='Unique worker ID')
+    parser.add_argument('--worker-id', type=str, required=True, help='Unique worker ID (e.g. a1b2c3_0)')
     parser.add_argument('--api-url', type=str, required=True,
                         help='Training API URL (e.g., http://server:8000)')
     parser.add_argument('--workspace', type=Path, default=Path('/workspace'),
