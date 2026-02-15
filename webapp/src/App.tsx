@@ -14,6 +14,7 @@ import AnalysisBoard from './components/AnalysisBoard';
 import OnlineLobby from './components/OnlineLobby';
 import WaitingForOpponent from './components/WaitingForOpponent';
 import OnlineGame from './components/OnlineGame';
+import EvaluationMeter from './components/EvaluationMeter';
 import { useGame } from './hooks/useGame';
 import { setSoundEnabled, isSoundEnabled } from './utils/sounds';
 import { healthCheck, listModels, type ModelInfo } from './api/engine';
@@ -42,6 +43,7 @@ function AppContent() {
   const [flipBoard, setFlipBoard] = useState(false);
   const [soundOn, setSoundOn] = useState(isSoundEnabled());
   const [showNewGameConfirm, setShowNewGameConfirm] = useState(false);
+  const [showResignConfirm, setShowResignConfirm] = useState(false);
   const [showRules, setShowRules] = useState(false);
   const [currentModel, setCurrentModel] = useState<string | null>(null);
 
@@ -60,6 +62,12 @@ function AppContent() {
 
   // Analysis board
   const [showAnalysisBoard, setShowAnalysisBoard] = useState(false);
+
+  // Training dashboard
+  const [showTrainingDashboard, setShowTrainingDashboard] = useState(false);
+
+  // Mobile menu
+  const [showMobileMenu, setShowMobileMenu] = useState(false);
 
   // Online multiplayer
   const [showOnlineLobby, setShowOnlineLobby] = useState(false);
@@ -92,11 +100,13 @@ function AppContent() {
     mustPass,
     lastMove,
     rawMoves,
+    evaluation,
     startNewGame,
     handleSquareClick,
     handleDragMove,
     endTurn,
     undoMove,
+    resign,
   } = useGame({ vsAI: gameMode === 'ai', aiSimulations: selectedSimulations, aiModel: selectedModel });
 
   // Fetch model info and available models from server
@@ -220,6 +230,7 @@ function AppContent() {
           setShowGameBrowser(false);
           setReplayGameId(null);
           setShowAnalysisBoard(false);
+          setShowTrainingDashboard(false);
           break;
         case '?':
         case '/':
@@ -230,6 +241,9 @@ function AppContent() {
           break;
         case 'a':
           setShowAnalysisBoard((prev) => !prev);
+          break;
+        case 't':
+          setShowTrainingDashboard((prev) => !prev);
           break;
       }
     };
@@ -292,17 +306,19 @@ function AppContent() {
   }, [waitingGame, navigate]);
 
   return (
-    <div className="min-h-screen bg-gray-900 text-white flex flex-col items-center justify-center p-2 sm:p-4">
-      {/* Header with user menu */}
-      <div className="absolute top-4 right-4">
+    <div className="min-h-screen bg-gray-900 text-white flex flex-col">
+      {/* Header bar */}
+      <header className="flex items-center justify-between px-4 py-3 shrink-0">
+        <div className="w-10" /> {/* Spacer for balance */}
+        <h1 className="text-2xl sm:text-3xl font-bold">Razzle Dazzle</h1>
         <UserMenu
           onOpenLogin={() => setShowLoginModal(true)}
           onOpenRegister={() => setShowRegisterModal(true)}
           onOpenBrowser={() => setShowGameBrowser(true)}
         />
-      </div>
+      </header>
 
-      <h1 className="text-2xl sm:text-3xl font-bold mb-3 sm:mb-4">Razzle Dazzle</h1>
+      <main className="flex-1 flex flex-col items-center justify-center p-2 sm:p-4 pb-4">
 
       {/* Game mode selector */}
       <div className="mb-4 flex gap-2">
@@ -420,6 +436,12 @@ function AppContent() {
               flipped={shouldFlip}
               lastMove={lastMove}
             />
+            {/* Evaluation meter - only in AI mode, hidden on mobile */}
+            {gameMode === 'ai' && (
+              <div className="hidden sm:block">
+                <EvaluationMeter value={evaluation} />
+              </div>
+            )}
             <div className="hidden sm:block">
               <MoveHistory moves={rawMoves} />
             </div>
@@ -449,59 +471,113 @@ function AppContent() {
             )}
           </div>
 
-          {/* Controls */}
-          <div className="mt-4 flex flex-wrap justify-center gap-2 sm:gap-4">
-            <button
-              onClick={handleNewGame}
-              disabled={isLoading}
-              className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 rounded font-medium transition-colors"
-            >
-              New Game
-            </button>
+          {/* Controls - Primary row (always visible) */}
+          <div className="mt-4 flex flex-wrap justify-center gap-2">
+            {/* New Game - only show when game hasn't started or is finished */}
+            {(gameState.ply === 0 || gameState.status === 'finished') && (
+              <button
+                onClick={handleNewGame}
+                disabled={isLoading}
+                className="px-3 py-2 sm:px-4 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 rounded font-medium transition-colors text-sm sm:text-base"
+              >
+                New Game
+              </button>
+            )}
+            {/* Resign - only show when game is in progress */}
+            {gameState.ply > 0 && gameState.status === 'playing' && (
+              <button
+                onClick={() => setShowResignConfirm(true)}
+                disabled={isLoading}
+                className="px-3 py-2 sm:px-4 bg-gray-600 hover:bg-red-700 text-gray-300 hover:text-white disabled:bg-gray-600 rounded font-medium transition-colors text-sm sm:text-base"
+              >
+                Resign
+              </button>
+            )}
             {canEndTurn && (
               <button
                 onClick={endTurn}
                 disabled={isLoading || aiThinking}
-                className="px-4 py-2 bg-green-600 hover:bg-green-700 disabled:bg-gray-600 rounded font-medium transition-colors animate-pulse"
+                className="px-3 py-2 sm:px-4 bg-green-600 hover:bg-green-700 disabled:bg-gray-600 rounded font-medium transition-colors animate-pulse text-sm sm:text-base"
               >
                 End Turn
               </button>
             )}
-            <button
-              onClick={undoMove}
-              disabled={isLoading || aiThinking || gameState.ply === 0}
-              className="px-4 py-2 bg-gray-600 hover:bg-gray-700 disabled:bg-gray-800 disabled:text-gray-500 rounded font-medium transition-colors"
-            >
-              Undo
-            </button>
+            {/* Undo - only for AI games (local PvP on same device is OK too) */}
+            {gameMode !== 'pvp' && (
+              <button
+                onClick={undoMove}
+                disabled={isLoading || aiThinking || gameState.ply === 0}
+                className="px-3 py-2 sm:px-4 bg-gray-600 hover:bg-gray-700 disabled:bg-gray-800 disabled:text-gray-500 rounded font-medium transition-colors text-sm sm:text-base"
+              >
+                Undo
+              </button>
+            )}
+            {/* Secondary buttons - hidden on mobile, shown on desktop */}
             <button
               onClick={toggleSound}
-              className="px-4 py-2 bg-gray-600 hover:bg-gray-700 rounded font-medium transition-colors"
+              className="hidden sm:block px-4 py-2 bg-gray-600 hover:bg-gray-700 rounded font-medium transition-colors"
               title={soundOn ? 'Mute sounds' : 'Enable sounds'}
             >
               {soundOn ? '🔊' : '🔇'}
             </button>
             <button
               onClick={() => setShowRules(true)}
-              className="px-4 py-2 bg-gray-600 hover:bg-gray-700 rounded font-medium transition-colors"
+              className="hidden sm:block px-4 py-2 bg-gray-600 hover:bg-gray-700 rounded font-medium transition-colors"
               title="Show rules"
             >
               ?
             </button>
             <button
               onClick={() => setShowGameBrowser(true)}
-              className="px-4 py-2 bg-gray-600 hover:bg-gray-700 rounded font-medium transition-colors"
+              className="hidden sm:block px-4 py-2 bg-gray-600 hover:bg-gray-700 rounded font-medium transition-colors"
               title="Game History (B)"
             >
               📜
             </button>
             <button
               onClick={() => setShowAnalysisBoard(true)}
-              className="px-4 py-2 bg-orange-600 hover:bg-orange-700 rounded font-medium transition-colors"
+              className="hidden sm:block px-4 py-2 bg-orange-600 hover:bg-orange-700 rounded font-medium transition-colors"
               title="Analysis Board (A)"
             >
               🔬
             </button>
+            {/* Mobile overflow menu */}
+            <div className="relative sm:hidden">
+              <button
+                onClick={() => setShowMobileMenu(!showMobileMenu)}
+                className="px-3 py-2 bg-gray-600 hover:bg-gray-700 rounded font-medium transition-colors"
+              >
+                ⋯
+              </button>
+              {showMobileMenu && (
+                <div className="absolute right-0 bottom-full mb-2 bg-gray-800 rounded-lg shadow-lg py-1 min-w-[140px] z-50">
+                  <button
+                    onClick={() => { toggleSound(); setShowMobileMenu(false); }}
+                    className="w-full px-4 py-2 text-left hover:bg-gray-700 flex items-center gap-2"
+                  >
+                    {soundOn ? '🔊' : '🔇'} Sound
+                  </button>
+                  <button
+                    onClick={() => { setShowRules(true); setShowMobileMenu(false); }}
+                    className="w-full px-4 py-2 text-left hover:bg-gray-700 flex items-center gap-2"
+                  >
+                    ? Rules
+                  </button>
+                  <button
+                    onClick={() => { setShowGameBrowser(true); setShowMobileMenu(false); }}
+                    className="w-full px-4 py-2 text-left hover:bg-gray-700 flex items-center gap-2"
+                  >
+                    📜 History
+                  </button>
+                  <button
+                    onClick={() => { setShowAnalysisBoard(true); setShowMobileMenu(false); }}
+                    className="w-full px-4 py-2 text-left hover:bg-gray-700 flex items-center gap-2"
+                  >
+                    🔬 Analysis
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
 
           {/* Game info */}
@@ -522,9 +598,10 @@ function AppContent() {
         <p className="mt-1">After passing, click "End Turn" to finish your turn.</p>
         <p className="mt-1">Blue aims for the top, Red aims for the bottom.</p>
         <p className="mt-2 text-xs hidden sm:block">
-          Shortcuts: N=New Game, U=Undo, E=End Turn, M=Mute, B=Browse, A=Analysis
+          Shortcuts: N=New Game, U=Undo, E=End Turn, M=Mute, B=Browse, A=Analysis, T=Training
         </p>
       </div>
+      </main>
 
       {/* Confirm New Game Dialog */}
       <ConfirmDialog
@@ -535,6 +612,20 @@ function AppContent() {
         cancelText="Cancel"
         onConfirm={confirmNewGame}
         onCancel={cancelNewGame}
+      />
+
+      {/* Confirm Resign Dialog */}
+      <ConfirmDialog
+        isOpen={showResignConfirm}
+        title="Resign Game?"
+        message="Are you sure you want to resign? Your opponent will win."
+        confirmText="Resign"
+        cancelText="Cancel"
+        onConfirm={() => {
+          setShowResignConfirm(false);
+          resign();
+        }}
+        onCancel={() => setShowResignConfirm(false)}
       />
 
       {/* Rules Modal */}
@@ -578,6 +669,14 @@ function AppContent() {
         isOpen={showAnalysisBoard}
         onClose={() => setShowAnalysisBoard(false)}
       />
+
+      {/* Training Dashboard */}
+      {showTrainingDashboard && (
+        <TrainingDashboard
+          onClose={() => setShowTrainingDashboard(false)}
+          refreshInterval={10000}
+        />
+      )}
 
       {/* Online Lobby */}
       <OnlineLobby

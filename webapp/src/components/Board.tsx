@@ -49,6 +49,7 @@ interface AnimatingPiece {
   toSquare: number;
   player: Player;
   hasBall: boolean;
+  isBallOnly: boolean; // True if this is a pass (only ball moves, piece stays)
   progress: number;
 }
 
@@ -179,6 +180,11 @@ export default function Board({
       const hasP1Ball = hasPiece(board.p1_ball, toSquare);
       const hasP2Ball = hasPiece(board.p2_ball, toSquare);
 
+      // Check if there's still a piece at the source (means it was a pass, not a knight move)
+      const hasP1PieceAtSource = hasPiece(board.p1_pieces, fromSquare);
+      const hasP2PieceAtSource = hasPiece(board.p2_pieces, fromSquare);
+      const isBallOnly = hasP1PieceAtSource || hasP2PieceAtSource;
+
       const player: Player = hasP1AtDest ? 0 : 1;
       const hasBall = hasP1Ball || hasP2Ball;
 
@@ -194,6 +200,7 @@ export default function Board({
           toSquare,
           player,
           hasBall,
+          isBallOnly,
           progress,
         });
 
@@ -331,10 +338,10 @@ export default function Board({
           />
         )}
 
-        {/* Pieces - hide piece only when actively dragging it */}
+        {/* Pieces - hide piece only when actively dragging it or during knight move animation */}
         {(hasP1Piece || hasP2Piece) &&
           !isDragging &&
-          !(animatingPiece && animatingPiece.toSquare === square && animatingPiece.progress < 1) && (
+          !(animatingPiece && animatingPiece.toSquare === square && animatingPiece.progress < 1 && !animatingPiece.isBallOnly) && (
           <g
             transform={`translate(${x}, ${y})`}
             onPointerDown={(e) => handlePiecePointerDown(square, e)}
@@ -342,7 +349,11 @@ export default function Board({
           >
             <Piece
               player={hasP1Piece ? 0 : 1}
-              hasBall={hasP1Ball || hasP2Ball}
+              hasBall={
+                (hasP1Ball || hasP2Ball) &&
+                // During pass animation, hide ball at destination until animation completes
+                !(animatingPiece && animatingPiece.toSquare === square && animatingPiece.isBallOnly && animatingPiece.progress < 1)
+              }
               isSelected={isSelected}
               isIneligible={isIneligible}
               mustPass={mustPass && (hasP1Ball || hasP2Ball) && (hasP1Piece ? 0 : 1) === currentPlayer}
@@ -393,7 +404,7 @@ export default function Board({
           );
         })()}
 
-        {/* Animating piece overlay */}
+        {/* Animating piece/ball overlay */}
         {animatingPiece && animatingPiece.progress < 1 && (() => {
           const fromPos = getSquarePosition(animatingPiece.fromSquare, flipped);
           const toPos = getSquarePosition(animatingPiece.toSquare, flipped);
@@ -401,6 +412,22 @@ export default function Board({
           const t = 1 - Math.pow(1 - animatingPiece.progress, 3);
           const x = fromPos.x + (toPos.x - fromPos.x) * t;
           const y = fromPos.y + (toPos.y - fromPos.y) * t;
+
+          if (animatingPiece.isBallOnly) {
+            // Pass animation - only the ball moves
+            return (
+              <g transform={`translate(${x + SQUARE_SIZE / 2}, ${y + SQUARE_SIZE / 2})`}>
+                <circle
+                  r="8"
+                  fill="#fbbf24"
+                  stroke="#92400e"
+                  strokeWidth="1.5"
+                />
+              </g>
+            );
+          }
+
+          // Knight move animation - whole piece moves
           return (
             <g transform={`translate(${x}, ${y})`}>
               <Piece

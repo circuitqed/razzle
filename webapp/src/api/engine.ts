@@ -87,6 +87,14 @@ export async function undoMove(gameId: string): Promise<GameState> {
   });
 }
 
+// Resign from the game
+export async function resignGame(gameId: string, player?: number): Promise<GameState> {
+  return request(`/games/${gameId}/resign`, {
+    method: 'POST',
+    body: JSON.stringify({ player }),
+  });
+}
+
 // Health check
 export async function healthCheck(): Promise<{ status: string; version: string; model?: string }> {
   return request('/health');

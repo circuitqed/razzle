@@ -42,22 +42,41 @@ export default function ReplayViewer({ gameId, onClose }: ReplayViewerProps) {
     loadGame();
   }, [gameId]);
 
-  // Auto-play timer
+  // Compute turn boundaries: plies where the current player changes
+  // These are the "interesting" positions to step between
+  const turnBoundaries = useMemo(() => {
+    if (positions.length === 0) return [0];
+    const boundaries = [0];
+    for (let i = 1; i < positions.length; i++) {
+      if (positions[i].currentPlayer !== positions[i - 1].currentPlayer) {
+        boundaries.push(i);
+      }
+    }
+    // Always include the final position
+    const lastPly = positions.length - 1;
+    if (boundaries[boundaries.length - 1] !== lastPly) {
+      boundaries.push(lastPly);
+    }
+    return boundaries;
+  }, [positions]);
+
+  // Auto-play timer (steps by complete turns)
   useEffect(() => {
     if (!isPlaying || !gameData) return;
 
     const interval = setInterval(() => {
       setCurrentPly((ply) => {
-        if (ply >= gameData.moves.length) {
+        const nextBoundary = turnBoundaries.find(b => b > ply);
+        if (nextBoundary === undefined) {
           setIsPlaying(false);
           return ply;
         }
-        return ply + 1;
+        return nextBoundary;
       });
     }, 1000 / playSpeed);
 
     return () => clearInterval(interval);
-  }, [isPlaying, gameData, playSpeed]);
+  }, [isPlaying, gameData, playSpeed, turnBoundaries]);
 
   const handleFirst = useCallback(() => {
     setCurrentPly(0);
@@ -65,13 +84,22 @@ export default function ReplayViewer({ gameId, onClose }: ReplayViewerProps) {
   }, []);
 
   const handlePrevious = useCallback(() => {
-    setCurrentPly((ply) => Math.max(0, ply - 1));
-  }, []);
+    setCurrentPly((ply) => {
+      // Find the last boundary strictly before current ply
+      for (let i = turnBoundaries.length - 1; i >= 0; i--) {
+        if (turnBoundaries[i] < ply) return turnBoundaries[i];
+      }
+      return 0;
+    });
+  }, [turnBoundaries]);
 
   const handleNext = useCallback(() => {
-    if (!gameData) return;
-    setCurrentPly((ply) => Math.min(gameData.moves.length, ply + 1));
-  }, [gameData]);
+    setCurrentPly((ply) => {
+      // Find the first boundary strictly after current ply
+      const next = turnBoundaries.find(b => b > ply);
+      return next !== undefined ? next : ply;
+    });
+  }, [turnBoundaries]);
 
   const handleLast = useCallback(() => {
     if (!gameData) return;

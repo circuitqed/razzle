@@ -34,11 +34,14 @@ interface UseGameReturn {
   moveHistory: MoveRecord[];
   /** Raw move integers including END_TURN (-1) for proper notation display */
   rawMoves: number[];
+  /** AI's evaluation of the position (from human's perspective: +1 = human winning) */
+  evaluation: number | null;
   startNewGame: () => Promise<void>;
   handleSquareClick: (square: number) => void;
   handleDragMove: (from: number, to: number) => void;
   endTurn: () => Promise<void>;
   undoMove: () => Promise<void>;
+  resign: () => Promise<void>;
 }
 
 const END_TURN_MOVE = -1;
@@ -54,6 +57,7 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
   const [lastMove, setLastMove] = useState<LastMove | null>(null);
   const [moveHistory, setMoveHistory] = useState<MoveRecord[]>([]);
   const [rawMoves, setRawMoves] = useState<number[]>([]);
+  const [evaluation, setEvaluation] = useState<number | null>(null);
 
   // Ref to track move-in-progress synchronously (avoids closure staleness)
   const moveInProgress = useRef(false);
@@ -125,6 +129,7 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
     setLastMove(null);
     setMoveHistory([]);
     setRawMoves([]);
+    setEvaluation(null);
 
     try {
       const { game_id } = await api.createGame({
@@ -187,6 +192,12 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
         currentState = aiResponse.game_state;
         setGameState(currentState); // Update UI after each AI move
 
+        // Update evaluation (flip sign: AI's value is from its perspective, we want human's)
+        // AI is player 1, value +1 = AI winning, we flip to get human's perspective
+        if (aiResponse.value !== undefined && aiResponse.value !== null) {
+          setEvaluation(-aiResponse.value);
+        }
+
         // A pass doesn't change the player, a knight move does
         const wasPass = currentState.current_player === prevPlayer;
         recordMove(aiResponse.move, 1, wasPass);
@@ -194,7 +205,8 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
         logger.info('[useGame] AI move complete', {
           move: aiResponse.algebraic,
           wasPass,
-          newPlayer: currentState.current_player
+          newPlayer: currentState.current_player,
+          evaluation: aiResponse.value,
         });
       }
 
@@ -392,6 +404,25 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
       });
   }, [gameState, vsAI, aiThinking, isLoading, handleAIMove, recordMove]);
 
+  // Resign from the game
+  const resign = useCallback(async () => {
+    if (!gameState || gameState.status !== 'playing') return;
+
+    setIsLoading(true);
+    setError(null);
+
+    try {
+      const newState = await api.resignGame(gameState.game_id, 0);  // Player 0 (human) resigns
+      setGameState(newState);
+      setSelectedSquare(null);
+      playLoseSound();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Resign failed');
+    } finally {
+      setIsLoading(false);
+    }
+  }, [gameState]);
+
   return {
     gameState,
     selectedSquare,
@@ -403,10 +434,12 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
     lastMove,
     moveHistory,
     rawMoves,
+    evaluation,
     startNewGame,
     handleSquareClick,
     handleDragMove,
     endTurn,
     undoMove,
+    resign,
   };
 }

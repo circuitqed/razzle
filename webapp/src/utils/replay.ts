@@ -279,11 +279,9 @@ export function formatMovesForDisplay(moves: number[], upToPly?: number): Format
   if (passChain.length > 0) {
     const chainStr = passChain.join('-');
     if (state.currentPlayer === 0) {
-      // Still blue's turn (hasn't ended yet)
       currentTurn.blue = chainStr;
     } else {
-      // Blue finished with pass, still ongoing
-      currentTurn.blue = chainStr;
+      currentTurn.red = chainStr;
     }
   }
 

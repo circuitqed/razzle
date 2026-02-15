@@ -240,12 +240,27 @@ export default function TrainingDashboard({ onClose, refreshInterval = 10000 }: 
       <div className="fixed inset-0 bg-gray-900 bg-opacity-95 z-50 overflow-auto p-4">
         <div className="max-w-6xl mx-auto">
           <DashboardHeader onClose={onClose} title="Training Dashboard" />
-          <div className="bg-gray-800 text-gray-300 p-8 rounded-lg text-center">
-            <p className="text-xl mb-4">No training metrics available</p>
-            <p className="text-sm text-gray-500">
-              Start distributed training with: <code className="bg-gray-700 px-2 py-1 rounded">python scripts/trainer.py</code>
-            </p>
-          </div>
+          {dashboard && dashboard.games_total > 0 ? (
+            <div className="space-y-4">
+              <div className="bg-gray-800 text-gray-300 p-6 rounded-lg text-center">
+                <p className="text-xl mb-2">Collecting self-play games...</p>
+                <p className="text-3xl font-bold text-blue-400 mb-1">
+                  {dashboard.games_pending} / {dashboard.latest_model?.games_trained_on !== undefined ? '512' : '512'} games
+                </p>
+                <p className="text-sm text-gray-500">
+                  Training will begin once enough games are collected.
+                </p>
+              </div>
+              <InfrastructureTab dashboard={dashboard} infraHistory={infraHistory} />
+            </div>
+          ) : (
+            <div className="bg-gray-800 text-gray-300 p-8 rounded-lg text-center">
+              <p className="text-xl mb-4">No training data yet</p>
+              <p className="text-sm text-gray-500">
+                Start distributed training with: <code className="bg-gray-700 px-2 py-1 rounded">python scripts/launch_training.py</code>
+              </p>
+            </div>
+          )}
         </div>
       </div>
     );
