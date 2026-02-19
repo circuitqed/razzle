@@ -254,9 +254,13 @@ class MCTS:
         """
         Search through pass sequence to find best outcome.
 
-        Since the same player is moving throughout a pass sequence,
-        we take the max value over all branches. This ensures we
-        properly evaluate positions where a pass chain leads to a win.
+        During a pass sequence the same player keeps moving, so we take
+        the max value over all branches. When a branch ends (via "end"
+        move or terminal), the returned value is converted to the
+        caller's perspective by negating if the player changed.
+
+        All values are returned from ``node.state.current_player``'s
+        perspective so the caller can compare branches with ``max()``.
 
         Args:
             node: Current node (must be expanded)
@@ -264,23 +268,30 @@ class MCTS:
             update_children: If True, seed children's Q values with quiescence results
 
         Returns:
-            Best value achievable from this position
+            Best value achievable from this position, from node's
+            current_player perspective.
         """
+        caller_player = node.state.current_player
+
         # Safety limit to prevent infinite loops
         if depth >= self.config.pass_quiescence_max_depth:
             _, value = self.evaluator.evaluate(node.state)
             self._track_eval(node.state, in_quiescence=True)
-            return value
+            return value  # Already from caller_player perspective
 
-        # Terminal state - return actual result
+        # Terminal state - return actual result from caller's perspective
         if node.state.is_terminal():
-            result = node.state.get_result(node.state.current_player)
+            result = node.state.get_result(caller_player)
             return 2 * result - 1  # Convert [0,1] to [-1,1]
 
         # Turn ended (has_passed=False) - evaluate this position
         if not node.state.has_passed:
             _, value = self.evaluator.evaluate(node.state)
             self._track_eval(node.state, in_quiescence=True)
+            # Value is from node's current_player perspective, which may
+            # differ from caller_player if an "end" move switched turns
+            if node.state.current_player != caller_player:
+                value = -value
             return value
 
         # Mid-pass: search all children and take max
@@ -299,15 +310,22 @@ class MCTS:
                 self._track_eval(child.state, in_quiescence=True)
                 child.expand(policy)
 
-            # Recursively search with update_children=True to seed all descendants
+            # Recursively search — returned value is from child's
+            # current_player perspective
             child_value = self._quiescence_search(child, depth + 1, update_children=update_children)
 
+            # Convert to caller's perspective if player changed
+            if child.state.current_player != caller_player:
+                child_value = -child_value
+
             # Seed child's Q value so UCB selection uses correct values
-            # This is critical: even if network gives low prior to winning moves,
-            # the correct Q value will cause them to be explored
+            # Store in child's own perspective (undo our negation)
             if update_children and child.visit_count == 0:
                 child.visit_count = 1
-                child.value_sum = child_value
+                if child.state.current_player != caller_player:
+                    child.value_sum = -child_value  # Back to child's perspective
+                else:
+                    child.value_sum = child_value
 
             best_value = max(best_value, child_value)
 
@@ -452,13 +470,19 @@ class MCTS:
             )
 
         # Run simulations in batches
-        remaining = self.config.num_simulations
+        sims_done = 0
         batch_size = self.config.batch_size
 
-        while remaining > 0:
-            current_batch = min(batch_size, remaining)
+        while sims_done < self.config.num_simulations:
+            current_batch = min(batch_size, self.config.num_simulations - sims_done)
             self._simulate_batch(root, current_batch)
-            remaining -= current_batch
+            sims_done += current_batch
+
+            if (self.config.early_termination and
+                sims_done >= self.config.min_sims_for_early_stop and
+                sims_done % self.config.check_early_stop_interval < batch_size and
+                self._should_stop_early(root, sims_done)):
+                break
 
         return root
 
@@ -541,14 +565,21 @@ class MCTS:
         Analyze search results.
 
         Returns list of top moves with statistics.
+        Values are from the root player's perspective (positive = good for root player).
         """
+        root_player = root.state.current_player
         moves = []
         for action, child in root.children.items():
+            # Convert child's Q value to root player's perspective
+            if child.state.current_player != root_player:
+                value = -child.value
+            else:
+                value = child.value
             moves.append({
                 'move': action,
                 'algebraic': move_to_algebraic(action),
                 'visits': child.visit_count,
-                'value': child.value,
+                'value': value,
                 'prior': child.prior
             })
 
