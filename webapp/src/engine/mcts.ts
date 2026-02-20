@@ -1,0 +1,382 @@
+/**
+ * Monte Carlo Tree Search for Razzle Dazzle (browser).
+ *
+ * Single-threaded PUCT implementation for client-side inference.
+ * Async because ONNX inference returns Promises.
+ */
+
+import { END_TURN_ACTION } from './bitboard';
+import { getLegalMoves } from './moves';
+import {
+  copyState,
+  applyMove,
+  isTerminal,
+  getResult,
+  type EngineState,
+} from './state';
+import type { Evaluator } from './evaluator';
+
+export interface MCTSConfig {
+  numSimulations: number;
+  cPuct: number;
+  temperature: number;
+  earlyTermination: boolean;
+  visitConcentrationThreshold: number;
+  minSimsForEarlyStop: number;
+  checkEarlyStopInterval: number;
+  passQuiescence: boolean;
+  passQuiescenceMaxDepth: number;
+}
+
+export const DEFAULT_CONFIG: MCTSConfig = {
+  numSimulations: 800,
+  cPuct: 1.5,
+  temperature: 0,
+  earlyTermination: true,
+  visitConcentrationThreshold: 0.85,
+  minSimsForEarlyStop: 100,
+  checkEarlyStopInterval: 50,
+  passQuiescence: true,
+  passQuiescenceMaxDepth: 10,
+};
+
+export interface MCTSNode {
+  state: EngineState;
+  prior: number;
+  visitCount: number;
+  valueSum: number;
+  children: Map<number, MCTSNode>;
+  isExpanded: boolean;
+}
+
+function createNode(state: EngineState, prior: number = 0): MCTSNode {
+  return {
+    state,
+    prior,
+    visitCount: 0,
+    valueSum: 0,
+    children: new Map(),
+    isExpanded: false,
+  };
+}
+
+function nodeValue(node: MCTSNode): number {
+  if (node.visitCount === 0) return 0;
+  return node.valueSum / node.visitCount;
+}
+
+function ucbScore(
+  child: MCTSNode,
+  parentVisits: number,
+  parentPlayer: number,
+  cPuct: number,
+): number {
+  const exploration =
+    cPuct *
+    child.prior *
+    Math.sqrt(parentVisits) /
+    (1 + child.visitCount);
+  const q = nodeValue(child);
+  if (child.state.currentPlayer !== parentPlayer) {
+    return -q + exploration;
+  }
+  return q + exploration;
+}
+
+function selectChild(
+  node: MCTSNode,
+  cPuct: number,
+): [number, MCTSNode] {
+  let bestScore = -Infinity;
+  let bestAction = -1;
+  let bestChild: MCTSNode | null = null;
+  const parentPlayer = node.state.currentPlayer;
+
+  for (const [action, child] of node.children) {
+    const score = ucbScore(child, node.visitCount, parentPlayer, cPuct);
+    if (score > bestScore) {
+      bestScore = score;
+      bestAction = action;
+      bestChild = child;
+    }
+  }
+
+  return [bestAction, bestChild!];
+}
+
+function expandNode(node: MCTSNode, policy: Float32Array): void {
+  if (node.isExpanded) return;
+
+  const legalMoves = getLegalMoves(node.state);
+
+  const getPrior = (move: number): number => {
+    if (move === -1) return policy[END_TURN_ACTION];
+    return policy[move];
+  };
+
+  let policySum = 0;
+  for (const move of legalMoves) {
+    policySum += getPrior(move);
+  }
+
+  for (const move of legalMoves) {
+    const childState = copyState(node.state);
+    applyMove(childState, move);
+    const prior = policySum > 0 ? getPrior(move) / policySum : 1.0 / legalMoves.length;
+    node.children.set(move, createNode(childState, prior));
+  }
+
+  node.isExpanded = true;
+}
+
+export interface SearchResult {
+  bestMove: number;
+  rootNode: MCTSNode;
+  simsDone: number;
+  value: number;
+}
+
+export interface SearchProgress {
+  simsDone: number;
+  totalSims: number;
+  bestMove: number;
+  value: number;
+}
+
+/**
+ * Run MCTS search. Async because ONNX inference is async.
+ *
+ * @param abortSignal - If provided, checked each simulation; if true, search stops early.
+ * @param onProgress - Called periodically with search progress.
+ */
+export async function search(
+  state: EngineState,
+  evaluator: Evaluator,
+  config: Partial<MCTSConfig> = {},
+  abortSignal?: { aborted: boolean },
+  onProgress?: (progress: SearchProgress) => void,
+): Promise<SearchResult> {
+  const cfg = { ...DEFAULT_CONFIG, ...config };
+  const root = createNode(copyState(state));
+
+  // Evaluate and expand root
+  const { policy: rootPolicy, value: rootValue } = await evaluator.evaluate(
+    root.state,
+  );
+  expandNode(root, rootPolicy);
+
+  // Pass quiescence for root
+  let initialValue = rootValue;
+  if (cfg.passQuiescence && root.state.hasPassed) {
+    initialValue = await quiescenceSearch(root, evaluator, cfg, 0);
+    root.visitCount = 1;
+    root.valueSum = initialValue;
+  }
+
+  let simsDone = 0;
+  const progressInterval = 50;
+
+  for (let i = 0; i < cfg.numSimulations; i++) {
+    if (abortSignal?.aborted) break;
+
+    await simulate(root, evaluator, cfg);
+    simsDone++;
+
+    // Report progress periodically
+    if (onProgress && simsDone % progressInterval === 0) {
+      const best = getBestMoveFromRoot(root);
+      onProgress({
+        simsDone,
+        totalSims: cfg.numSimulations,
+        bestMove: best.move,
+        value: best.value,
+      });
+    }
+
+    // Early termination check
+    if (
+      cfg.earlyTermination &&
+      simsDone >= cfg.minSimsForEarlyStop &&
+      simsDone % cfg.checkEarlyStopInterval === 0
+    ) {
+      if (shouldStopEarly(root, cfg)) break;
+    }
+  }
+
+  const best = getBestMoveFromRoot(root);
+
+  return {
+    bestMove: best.move,
+    rootNode: root,
+    simsDone,
+    value: best.value,
+  };
+}
+
+function getBestMoveFromRoot(root: MCTSNode): { move: number; value: number } {
+  let bestMove = -1;
+  let bestVisits = -1;
+  let bestValue = 0;
+  const rootPlayer = root.state.currentPlayer;
+
+  for (const [action, child] of root.children) {
+    if (child.visitCount > bestVisits) {
+      bestVisits = child.visitCount;
+      bestMove = action;
+      // Convert to root player's perspective
+      const q = nodeValue(child);
+      bestValue = child.state.currentPlayer !== rootPlayer ? -q : q;
+    }
+  }
+
+  return { move: bestMove, value: bestValue };
+}
+
+async function simulate(
+  root: MCTSNode,
+  evaluator: Evaluator,
+  cfg: MCTSConfig,
+): Promise<void> {
+  let node = root;
+  const path: MCTSNode[] = [node];
+
+  // SELECT: traverse tree to leaf
+  while (node.isExpanded && node.children.size > 0) {
+    if (isTerminal(node.state)) break;
+    [, node] = selectChild(node, cfg.cPuct);
+    path.push(node);
+  }
+
+  let leafPlayer: number;
+  let value: number;
+
+  // EVALUATE
+  if (isTerminal(node.state)) {
+    leafPlayer = node.state.currentPlayer;
+    const result = getResult(node.state, leafPlayer);
+    value = 2 * result - 1;
+  } else {
+    const { policy, value: evalValue } = await evaluator.evaluate(node.state);
+    expandNode(node, policy);
+
+    // Pass quiescence
+    if (cfg.passQuiescence && node.state.hasPassed) {
+      value = await quiescenceSearch(node, evaluator, cfg, 0);
+    } else {
+      value = evalValue;
+    }
+    leafPlayer = node.state.currentPlayer;
+  }
+
+  // BACKUP
+  for (const n of path) {
+    n.visitCount++;
+    if (n.state.currentPlayer === leafPlayer) {
+      n.valueSum += value;
+    } else {
+      n.valueSum -= value;
+    }
+  }
+}
+
+async function quiescenceSearch(
+  node: MCTSNode,
+  evaluator: Evaluator,
+  cfg: MCTSConfig,
+  depth: number,
+): Promise<number> {
+  const callerPlayer = node.state.currentPlayer;
+
+  if (depth >= cfg.passQuiescenceMaxDepth) {
+    const { value } = await evaluator.evaluate(node.state);
+    return value;
+  }
+
+  if (isTerminal(node.state)) {
+    const result = getResult(node.state, callerPlayer);
+    return 2 * result - 1;
+  }
+
+  // Turn ended (hasPassed=false) - evaluate this position
+  if (!node.state.hasPassed) {
+    const { value } = await evaluator.evaluate(node.state);
+    if (node.state.currentPlayer !== callerPlayer) {
+      return -value;
+    }
+    return value;
+  }
+
+  // Mid-pass: search all children and take max
+  if (node.children.size === 0) {
+    const { value } = await evaluator.evaluate(node.state);
+    return value;
+  }
+
+  let bestValue = -Infinity;
+  for (const [, child] of node.children) {
+    if (!child.isExpanded && !isTerminal(child.state)) {
+      const { policy } = await evaluator.evaluate(child.state);
+      expandNode(child, policy);
+    }
+
+    let childValue = await quiescenceSearch(child, evaluator, cfg, depth + 1);
+
+    if (child.state.currentPlayer !== callerPlayer) {
+      childValue = -childValue;
+    }
+
+    // Seed child's Q value
+    if (child.visitCount === 0) {
+      child.visitCount = 1;
+      if (child.state.currentPlayer !== callerPlayer) {
+        child.valueSum = -childValue;
+      } else {
+        child.valueSum = childValue;
+      }
+    }
+
+    bestValue = Math.max(bestValue, childValue);
+  }
+
+  return bestValue;
+}
+
+function shouldStopEarly(root: MCTSNode, cfg: MCTSConfig): boolean {
+  if (root.children.size === 0) return true;
+
+  let totalVisits = 0;
+  let maxVisits = 0;
+  for (const [, child] of root.children) {
+    totalVisits += child.visitCount;
+    if (child.visitCount > maxVisits) {
+      maxVisits = child.visitCount;
+    }
+  }
+
+  if (totalVisits === 0) return false;
+  return maxVisits / totalVisits >= cfg.visitConcentrationThreshold;
+}
+
+/**
+ * Get visit-count-based policy from root node.
+ * Returns Float32Array of length NUM_ACTIONS.
+ */
+export function getPolicy(root: MCTSNode): Float32Array {
+  // NUM_ACTIONS imported at top of file
+  const policySize = END_TURN_ACTION + 1; // 3137
+  const policy = new Float32Array(policySize);
+
+  let totalVisits = 0;
+  for (const [, child] of root.children) {
+    totalVisits += child.visitCount;
+  }
+
+  if (totalVisits > 0) {
+    for (const [action, child] of root.children) {
+      const idx = action === -1 ? END_TURN_ACTION : action;
+      policy[idx] = child.visitCount / totalVisits;
+    }
+  }
+
+  return policy;
+}

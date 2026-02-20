@@ -28,6 +28,8 @@ export interface GameState {
   touched_mask: string;  // String to preserve precision for JS
   // Whether the current player has passed this turn (can only pass more or end turn)
   has_passed: boolean;
+  // Destination of opponent's last knight move (-1 if none) for forced pass rule
+  last_knight_dst?: number;
 }
 
 // AI move response
