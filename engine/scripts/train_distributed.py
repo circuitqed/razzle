@@ -143,6 +143,10 @@ def _build_trainer_onstart(
     )
 
 
+# Permanently blacklisted offers/machines that consistently fail
+BLACKLISTED_OFFER_IDS: set[int] = {61866, 30784976, 30784982}  # machine 54400
+
+
 class DistributedOrchestrator:
     """
     Orchestrates distributed training workers and optional trainer.
@@ -198,7 +202,7 @@ class DistributedOrchestrator:
         self.workers: list[WorkerInstance] = []
         self.trainer: Optional[WorkerInstance] = None
         self.shutdown_requested = False
-        self.failed_offer_ids: set[int] = set()  # Offers that produced broken instances
+        self.failed_offer_ids: set[int] = set(BLACKLISTED_OFFER_IDS)  # Offers that produced broken instances
 
     def find_offers(self) -> list[GPUOffer]:
         """Find suitable GPU offers."""

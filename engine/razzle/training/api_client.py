@@ -365,6 +365,106 @@ class TrainingAPIClient:
         data = response.json()
         return data.get("metrics")
 
+    # --- Trainer State Methods ---
+
+    def upload_trainer_state(
+        self,
+        key: str,
+        file_path: Path,
+        iteration: int,
+        total_games_trained: int,
+        compress: bool = True,
+    ) -> None:
+        """
+        Upload trainer state (optimizer state, replay buffer, etc.) to the API.
+
+        Args:
+            key: State key (e.g. "trainer_state" or "replay_buffer")
+            file_path: Path to the file to upload
+            iteration: Current training iteration
+            total_games_trained: Total games trained so far
+            compress: Whether to gzip-compress before upload (False for already-compressed files like .npz)
+        """
+        with open(file_path, "rb") as f:
+            raw_data = f.read()
+
+        if compress:
+            compressed = io.BytesIO()
+            with gzip.GzipFile(fileobj=compressed, mode='wb', compresslevel=6) as gz:
+                gz.write(raw_data)
+            upload_data = compressed.getvalue()
+            logger.info(f"State compression ({key}): {len(raw_data)/1024/1024:.1f}MB -> {len(upload_data)/1024/1024:.1f}MB")
+        else:
+            upload_data = raw_data
+
+        files = {"file": (f"{key}.dat", upload_data, "application/octet-stream")}
+        data = {
+            "iteration": str(iteration),
+            "total_games_trained": str(total_games_trained),
+        }
+        if compress:
+            data["compressed"] = "true"
+
+        response = self.session.post(
+            self._url(f"/training/state/{key}"),
+            data=data,
+            files=files,
+            timeout=self.timeout * 4,
+        )
+        response.raise_for_status()
+
+    def download_trainer_state(self, key: str, dest_path: Path) -> Optional[Path]:
+        """
+        Download a trainer state file from the API.
+
+        Args:
+            key: State key (e.g. "trainer_state" or "replay_buffer")
+            dest_path: Where to save the file
+
+        Returns:
+            Path to the downloaded file, or None if not found (404)
+        """
+        try:
+            response = self.session.get(
+                self._url(f"/training/state/{key}/download"),
+                timeout=self.timeout * 4,
+                stream=True,
+            )
+            if response.status_code == 404:
+                return None
+            response.raise_for_status()
+        except requests.HTTPError as e:
+            if e.response is not None and e.response.status_code == 404:
+                return None
+            raise
+
+        dest_path = Path(dest_path)
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+
+        with open(dest_path, "wb") as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                f.write(chunk)
+
+        return dest_path
+
+    def get_trainer_state_info(self, key: str) -> Optional[dict]:
+        """
+        Get metadata about a trainer state file.
+
+        Args:
+            key: State key (e.g. "trainer_state" or "replay_buffer")
+
+        Returns:
+            Dict with state info, or None if not found
+        """
+        response = self.session.get(
+            self._url(f"/training/state/{key}"),
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
+        data = response.json()
+        return data.get("state")
+
     # --- Health Check ---
 
     def health_check(self) -> bool:

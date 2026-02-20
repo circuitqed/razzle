@@ -71,8 +71,8 @@ def play_game(
     while not state.is_terminal() and move_count < max_moves:
         mcts = mcts1 if state.current_player == 0 else mcts2
 
-        # Search
-        root = mcts.search(state, add_noise=False)
+        # Search (batched for better GPU utilization)
+        root = mcts.search_batched(state, add_noise=False)
 
         # Select move - use temperature for opening moves
         if move_count < opening_moves and opening_temperature > 0:
@@ -159,7 +159,7 @@ def run_match(
     eval1 = BatchedEvaluator(net1, device=device)
     eval2 = BatchedEvaluator(net2, device=device)
 
-    config = MCTSConfig(num_simulations=simulations)
+    config = MCTSConfig(num_simulations=simulations, batch_size=32)
     result = MatchResult()
 
     # Play games with alternating colors

@@ -15,7 +15,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from server import persistence
-from server.main import app, TRAINING_MODELS_DIR
+from server.main import app, TRAINING_MODELS_DIR, TRAINING_STATE_DIR
 
 
 @pytest.fixture
@@ -37,8 +37,17 @@ def temp_models_dir(monkeypatch):
 
 
 @pytest.fixture
-def client(temp_db, temp_models_dir, monkeypatch):
-    """Create a test client with temporary database and models directory."""
+def temp_state_dir(monkeypatch):
+    """Create a temporary directory for trainer state files."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        state_dir = Path(tmpdir)
+        monkeypatch.setattr("server.main.TRAINING_STATE_DIR", state_dir)
+        yield state_dir
+
+
+@pytest.fixture
+def client(temp_db, temp_models_dir, temp_state_dir, monkeypatch):
+    """Create a test client with temporary database, models, and state directories."""
     monkeypatch.setattr(persistence, 'DEFAULT_DB_PATH', temp_db)
     with TestClient(app) as client:
         yield client
@@ -481,3 +490,136 @@ class TestTrainingWorkflow:
         assert data["games_pending"] == 0  # All used
         assert len(data["models"]) == 3
         assert data["latest_model"]["version"] == "iter_003"
+
+
+class TestTrainerState:
+    """Tests for trainer state upload/download endpoints."""
+
+    def test_get_state_none_exists(self, client):
+        """Test getting state when none exists returns null."""
+        response = client.get("/training/state/trainer_state")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["state"] is None
+
+    def test_upload_and_download_roundtrip(self, client, temp_state_dir):
+        """Test uploading and downloading trainer state."""
+        # Upload
+        content = b"optimizer state data here"
+        files = {"file": ("trainer_state.dat", io.BytesIO(content), "application/octet-stream")}
+        data = {"iteration": "5", "total_games_trained": "1000"}
+
+        response = client.post("/training/state/trainer_state", data=data, files=files)
+        assert response.status_code == 200
+        assert response.json()["key"] == "trainer_state"
+        assert response.json()["status"] == "uploaded"
+
+        # Download
+        response = client.get("/training/state/trainer_state/download")
+        assert response.status_code == 200
+        assert response.content == content
+
+    def test_download_nonexistent(self, client):
+        """Test downloading state that doesn't exist returns 404."""
+        response = client.get("/training/state/nonexistent/download")
+        assert response.status_code == 404
+
+    def test_overwrite_on_reupload(self, client, temp_state_dir):
+        """Test that re-uploading overwrites existing state."""
+        # Upload first version
+        files = {"file": ("state.dat", io.BytesIO(b"version1"), "application/octet-stream")}
+        data = {"iteration": "1", "total_games_trained": "100"}
+        client.post("/training/state/trainer_state", data=data, files=files)
+
+        # Upload second version
+        files = {"file": ("state.dat", io.BytesIO(b"version2"), "application/octet-stream")}
+        data = {"iteration": "2", "total_games_trained": "200"}
+        client.post("/training/state/trainer_state", data=data, files=files)
+
+        # Download should return second version
+        response = client.get("/training/state/trainer_state/download")
+        assert response.content == b"version2"
+
+        # Metadata should reflect second upload
+        response = client.get("/training/state/trainer_state")
+        state = response.json()["state"]
+        assert state["iteration"] == 2
+        assert state["total_games_trained"] == 200
+
+    def test_state_info_endpoint(self, client, temp_state_dir):
+        """Test getting state metadata."""
+        content = b"some trainer state"
+        files = {"file": ("state.dat", io.BytesIO(content), "application/octet-stream")}
+        data = {"iteration": "10", "total_games_trained": "5000"}
+
+        client.post("/training/state/trainer_state", data=data, files=files)
+
+        response = client.get("/training/state/trainer_state")
+        assert response.status_code == 200
+        state = response.json()["state"]
+        assert state["key"] == "trainer_state"
+        assert state["iteration"] == 10
+        assert state["total_games_trained"] == 5000
+        assert state["file_size"] == len(content)
+        assert state["download_url"] == "/training/state/trainer_state/download"
+        assert "created_at" in state
+
+    def test_compressed_upload(self, client, temp_state_dir):
+        """Test uploading compressed state."""
+        import gzip as gzip_mod
+        original = b"uncompressed optimizer state data"
+        compressed = gzip_mod.compress(original)
+
+        files = {"file": ("state.dat.gz", io.BytesIO(compressed), "application/gzip")}
+        data = {"iteration": "3", "total_games_trained": "300", "compressed": "true"}
+
+        response = client.post("/training/state/trainer_state", data=data, files=files)
+        assert response.status_code == 200
+
+        # Download should return decompressed data
+        response = client.get("/training/state/trainer_state/download")
+        assert response.content == original
+
+    def test_multiple_keys(self, client, temp_state_dir):
+        """Test storing different state files with different keys."""
+        # Upload trainer_state
+        files = {"file": ("state.dat", io.BytesIO(b"optimizer"), "application/octet-stream")}
+        data = {"iteration": "5", "total_games_trained": "1000"}
+        client.post("/training/state/trainer_state", data=data, files=files)
+
+        # Upload replay_buffer
+        files = {"file": ("buffer.dat", io.BytesIO(b"replay data"), "application/octet-stream")}
+        data = {"iteration": "5", "total_games_trained": "1000"}
+        client.post("/training/state/replay_buffer", data=data, files=files)
+
+        # Both should be independently downloadable
+        response = client.get("/training/state/trainer_state/download")
+        assert response.content == b"optimizer"
+
+        response = client.get("/training/state/replay_buffer/download")
+        assert response.content == b"replay data"
+
+    def test_reset_clears_state(self, client, temp_state_dir):
+        """Test that training reset clears trainer state."""
+        # Upload state
+        files = {"file": ("state.dat", io.BytesIO(b"state data"), "application/octet-stream")}
+        data = {"iteration": "5", "total_games_trained": "1000"}
+        client.post("/training/state/trainer_state", data=data, files=files)
+
+        # Verify it exists
+        response = client.get("/training/state/trainer_state")
+        assert response.json()["state"] is not None
+
+        # Reset training
+        response = client.post("/training/reset")
+        assert response.status_code == 200
+        assert response.json()["trainer_states_deleted"] == 1
+
+        # Verify state is gone
+        response = client.get("/training/state/trainer_state")
+        assert response.json()["state"] is None
+
+        # Download should 404
+        response = client.get("/training/state/trainer_state/download")
+        assert response.status_code == 404

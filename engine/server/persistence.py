@@ -183,6 +183,20 @@ def init_db(db_path: Path = None) -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_arena_ratings_sims ON arena_ratings(simulations)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_arena_ratings_elo ON arena_ratings(elo_rating DESC)")
 
+        # Trainer state - optimizer state, replay buffer persisted across runs
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS trainer_state (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                key TEXT UNIQUE NOT NULL,
+                iteration INTEGER NOT NULL DEFAULT 0,
+                total_games_trained INTEGER NOT NULL DEFAULT 0,
+                file_path TEXT NOT NULL,
+                file_size INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+            )
+        """)
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_trainer_state_key ON trainer_state(key)")
+
         # Players table - unified humans and AI models with ELO ratings
         conn.execute("""
             CREATE TABLE IF NOT EXISTS players (
@@ -1152,6 +1166,12 @@ def clear_training_data(db_path: Path = None) -> dict:
         # Delete all training metrics
         conn.execute("DELETE FROM training_metrics")
 
+        # Delete trainer state records
+        trainer_state_count = conn.execute("SELECT COUNT(*) FROM trainer_state").fetchone()[0]
+        state_rows = conn.execute("SELECT file_path FROM trainer_state").fetchall()
+        state_files = [row["file_path"] for row in state_rows]
+        conn.execute("DELETE FROM trainer_state")
+
         conn.commit()
 
         # Delete model files from disk
@@ -1165,12 +1185,95 @@ def clear_training_data(db_path: Path = None) -> dict:
             except Exception:
                 pass  # Ignore file deletion errors
 
+        # Delete trainer state files from disk
+        for file_path in state_files:
+            try:
+                path = Path(file_path)
+                if path.exists():
+                    path.unlink()
+                    deleted_files += 1
+            except Exception:
+                pass
+
         return {
             "games_deleted": games_count,
             "models_deleted": models_count,
             "metrics_deleted": metrics_count,
+            "trainer_states_deleted": trainer_state_count,
             "files_deleted": deleted_files,
         }
+
+
+# --- Trainer State Management ---
+
+def save_trainer_state_record(
+    key: str,
+    iteration: int,
+    total_games_trained: int,
+    file_path: str,
+    file_size: int,
+    db_path: Path = None
+) -> int:
+    """
+    Save or update a trainer state record.
+
+    Uses INSERT...ON CONFLICT(key) DO UPDATE to upsert.
+
+    Returns the record ID.
+    """
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+    now = datetime.utcnow().isoformat() + 'Z'
+
+    with get_connection(db_path) as conn:
+        cursor = conn.execute("""
+            INSERT INTO trainer_state (key, iteration, total_games_trained, file_path, file_size, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET
+                iteration = excluded.iteration,
+                total_games_trained = excluded.total_games_trained,
+                file_path = excluded.file_path,
+                file_size = excluded.file_size,
+                created_at = excluded.created_at
+        """, (key, iteration, total_games_trained, file_path, file_size, now))
+        conn.commit()
+        return cursor.lastrowid
+
+
+def get_trainer_state_record(key: str, db_path: Path = None) -> Optional[dict]:
+    """Get a trainer state record by key. Returns dict or None."""
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+
+    with get_connection(db_path) as conn:
+        row = conn.execute(
+            "SELECT * FROM trainer_state WHERE key = ?", (key,)
+        ).fetchone()
+
+        if row is None:
+            return None
+
+        return {
+            "id": row["id"],
+            "key": row["key"],
+            "iteration": row["iteration"],
+            "total_games_trained": row["total_games_trained"],
+            "file_path": row["file_path"],
+            "file_size": row["file_size"],
+            "created_at": row["created_at"],
+        }
+
+
+def delete_trainer_state_records(db_path: Path = None) -> int:
+    """Delete all trainer state records. Returns count of deleted records."""
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+
+    with get_connection(db_path) as conn:
+        count = conn.execute("SELECT COUNT(*) FROM trainer_state").fetchone()[0]
+        conn.execute("DELETE FROM trainer_state")
+        conn.commit()
+        return count
 
 
 # --- Training Metrics Management ---

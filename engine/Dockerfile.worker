@@ -15,3 +15,5 @@ RUN pip install --no-cache-dir -e .
 COPY scripts/worker_selfplay.py scripts/worker_selfplay.py
 COPY scripts/trainer.py scripts/trainer.py
 COPY scripts/model_arena.py scripts/model_arena.py
+COPY scripts/arena_worker.py scripts/arena_worker.py
+COPY scripts/run_arena.py scripts/run_arena.py

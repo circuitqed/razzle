@@ -391,8 +391,12 @@ class SelfPlayWorker:
 
             # Use temperature for opening diversity (first 3 moves)
             temp = 1.0 if move_count < 6 else 0.0
+            # Mid-pass positions have narrow trees — use fewer sims
+            sims = self.simulations
+            if state.has_passed:
+                sims = max(50, sims // 10)
             config = MCTSConfig(
-                num_simulations=self.simulations,
+                num_simulations=sims,
                 temperature=temp,
                 batch_size=self.batch_size
             )
@@ -540,8 +544,12 @@ class SelfPlayWorker:
             else:
                 # Standard MCTS move
                 temp = 1.0 if move_count < self.temperature_moves else 0.0
+                # Mid-pass positions have narrow trees — use fewer sims
+                sims = self.simulations
+                if state.has_passed:
+                    sims = max(50, sims // 10)
                 config = MCTSConfig(
-                    num_simulations=self.simulations,
+                    num_simulations=sims,
                     temperature=temp,
                     batch_size=self.batch_size
                 )

@@ -520,9 +520,59 @@ class DistributedTrainer:
             )
             print(f"[Trainer] Saved trainer state and replay buffer ({len(self.replay_buffer)} positions)")
 
+        # Upload to API for persistence across runs
+        try:
+            self.api_client.upload_trainer_state(
+                key="trainer_state",
+                file_path=state_path,
+                iteration=self.iteration,
+                total_games_trained=self.total_games_trained,
+                compress=True,
+            )
+            print(f"[Trainer] Uploaded trainer_state to API")
+        except Exception as e:
+            print(f"[Trainer] Failed to upload trainer_state to API: {e}")
+
+        if replay_path.exists():
+            try:
+                self.api_client.upload_trainer_state(
+                    key="replay_buffer",
+                    file_path=replay_path,
+                    iteration=self.iteration,
+                    total_games_trained=self.total_games_trained,
+                    compress=False,  # Already npz-compressed
+                )
+                print(f"[Trainer] Uploaded replay_buffer to API")
+            except Exception as e:
+                print(f"[Trainer] Failed to upload replay_buffer to API: {e}")
+
     def _load_trainer_state(self):
-        """Load optimizer state and replay buffer if available."""
+        """Load optimizer state and replay buffer if available.
+
+        Tries local files first, falls back to downloading from API.
+        This enables persistence across vast.ai runs.
+        """
         state_path = self._get_state_path()
+        replay_path = self._get_replay_buffer_path()
+
+        # If local files are missing, try downloading from API
+        if not state_path.exists():
+            try:
+                result = self.api_client.download_trainer_state("trainer_state", state_path)
+                if result:
+                    print(f"[Trainer] Downloaded trainer_state from API")
+            except Exception as e:
+                print(f"[Trainer] Could not download trainer_state from API: {e}")
+
+        if not replay_path.exists():
+            try:
+                result = self.api_client.download_trainer_state("replay_buffer", replay_path)
+                if result:
+                    print(f"[Trainer] Downloaded replay_buffer from API")
+            except Exception as e:
+                print(f"[Trainer] Could not download replay_buffer from API: {e}")
+
+        # Load from local files (whether they existed or were just downloaded)
         if state_path.exists():
             try:
                 state = torch.load(state_path, map_location=self.device)
@@ -530,12 +580,12 @@ class DistributedTrainer:
                 self.total_games_trained = state.get('total_games_trained', 0)
                 if state.get('best_model_path'):
                     self.best_model_path = Path(state['best_model_path'])
-                print(f"[Trainer] Restored optimizer state (iteration {state.get('iteration', '?')})")
+                print(f"[Trainer] Restored optimizer state (iteration {state.get('iteration', '?')}, "
+                      f"{self.total_games_trained:,} games trained)")
             except Exception as e:
                 print(f"[Trainer] Could not restore optimizer state: {e}")
 
         # Load replay buffer
-        replay_path = self._get_replay_buffer_path()
         if replay_path.exists():
             try:
                 data = np.load(replay_path, allow_pickle=True)
