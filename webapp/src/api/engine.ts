@@ -68,6 +68,7 @@ export interface ModelInfo {
   name: string;
   path: string;
   mtime: number;
+  has_onnx: boolean;
 }
 
 // List available models
@@ -154,6 +155,26 @@ export function requestAIMove(ws: WebSocket, simulations?: number): void {
 // Request undo via WebSocket
 export function requestUndo(ws: WebSocket): void {
   ws.send(JSON.stringify({ type: 'undo' }));
+}
+
+// Get latest ONNX model info for client-side AI
+export interface OnnxModelInfo {
+  version: string;
+  url: string;
+  size_bytes: number;
+}
+
+export async function getOnnxModelInfo(): Promise<OnnxModelInfo> {
+  const info = await request<OnnxModelInfo>('/models/onnx/latest');
+  // Server returns a relative URL like "/models/onnx/file.onnx" but we need
+  // to go through the /api proxy, so prepend API_BASE.
+  return { ...info, url: `${API_BASE}${info.url}` };
+}
+
+// Get ONNX model info for a specific .pt model (triggers on-demand export if needed)
+export async function getOnnxModelInfoByName(modelName: string): Promise<OnnxModelInfo> {
+  const info = await request<OnnxModelInfo>(`/models/onnx/by-name/${encodeURIComponent(modelName)}`);
+  return { ...info, url: `${API_BASE}${info.url}` };
 }
 
 export { EngineAPIError };

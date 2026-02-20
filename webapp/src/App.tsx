@@ -96,6 +96,7 @@ function AppContent() {
     isLoading,
     error,
     aiThinking,
+    aiModelLoading,
     canEndTurn,
     mustPass,
     lastMove,
@@ -355,18 +356,23 @@ function AppContent() {
         <div className="mb-4 flex flex-wrap gap-4 items-end justify-center">
           <div>
             <label className="block text-xs text-gray-400 mb-1">Model</label>
-            <select
-              value={selectedModel || ''}
-              onChange={(e) => setSelectedModel(e.target.value || undefined)}
-              className="px-3 py-1.5 bg-gray-700 text-white rounded border border-gray-600 text-sm min-w-[140px]"
-            >
-              <option value="">Latest</option>
-              {availableModels.map((model) => (
-                <option key={model.path} value={model.path}>
-                  {model.name}
-                </option>
-              ))}
-            </select>
+            <div className="flex items-center gap-2">
+              <select
+                value={selectedModel || ''}
+                onChange={(e) => setSelectedModel(e.target.value || undefined)}
+                className="px-3 py-1.5 bg-gray-700 text-white rounded border border-gray-600 text-sm min-w-[140px]"
+              >
+                <option value="">Latest</option>
+                {availableModels.map((model) => (
+                  <option key={model.path} value={model.path}>
+                    {model.name}{model.name !== 'random_weights' && !model.has_onnx ? ' *' : ''}
+                  </option>
+                ))}
+              </select>
+              {aiModelLoading && (
+                <span className="text-xs text-yellow-400 animate-pulse whitespace-nowrap">Loading model...</span>
+              )}
+            </div>
           </div>
           <div>
             <label className="block text-xs text-gray-400 mb-1">Simulations</label>

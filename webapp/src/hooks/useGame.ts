@@ -2,8 +2,11 @@ import { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import type { GameState, Player } from '../types';
 import { encodeMove, decodeMove, TOTAL_SQUARES, squareToAlgebraic } from '../types';
 import * as api from '../api/engine';
+import { getOnnxModelInfoByName } from '../api/engine';
 import { logger } from '../utils/logger';
 import { playMoveSound, playPassSound, playEndTurnSound, playWinSound, playLoseSound, playSelectSound } from '../utils/sounds';
+import { useAIWorker } from './useAIWorker';
+import type { EngineState } from '../engine/state';
 
 interface UseGameOptions {
   vsAI?: boolean;
@@ -28,6 +31,7 @@ interface UseGameReturn {
   isLoading: boolean;
   error: string | null;
   aiThinking: boolean;
+  aiModelLoading: boolean;
   canEndTurn: boolean;
   mustPass: boolean;
   lastMove: LastMove | null;
@@ -36,6 +40,8 @@ interface UseGameReturn {
   rawMoves: number[];
   /** AI's evaluation of the position (from human's perspective: +1 = human winning) */
   evaluation: number | null;
+  /** Client-side AI search progress */
+  aiProgress: { simsDone: number; totalSims: number } | null;
   startNewGame: () => Promise<void>;
   handleSquareClick: (square: number) => void;
   handleDragMove: (from: number, to: number) => void;
@@ -45,6 +51,19 @@ interface UseGameReturn {
 }
 
 const END_TURN_MOVE = -1;
+
+/** Convert API GameState to client-side EngineState for local AI search. */
+function apiStateToEngineState(gs: GameState): EngineState {
+  return {
+    pieces: [BigInt(gs.board.p1_pieces), BigInt(gs.board.p2_pieces)],
+    balls: [BigInt(gs.board.p1_ball), BigInt(gs.board.p2_ball)],
+    currentPlayer: gs.current_player,
+    touchedMask: BigInt(gs.touched_mask),
+    hasPassed: gs.has_passed,
+    lastKnightDst: gs.last_knight_dst ?? -1,
+    ply: gs.ply,
+  };
+}
 
 export function useGame(options: UseGameOptions = {}): UseGameReturn {
   const { vsAI = true, aiSimulations = 800, aiModel } = options;
@@ -58,6 +77,11 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
   const [moveHistory, setMoveHistory] = useState<MoveRecord[]>([]);
   const [rawMoves, setRawMoves] = useState<number[]>([]);
   const [evaluation, setEvaluation] = useState<number | null>(null);
+  const [aiProgress, setAiProgress] = useState<{ simsDone: number; totalSims: number } | null>(null);
+
+  // Client-side AI worker
+  const aiWorker = useAIWorker();
+  const loadedModelRef = useRef<string | null>(null);
 
   // Ref to track move-in-progress synchronously (avoids closure staleness)
   const moveInProgress = useRef(false);
@@ -121,6 +145,67 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
     }
   }, [gameState, vsAI]);
 
+  // Helper to record a move and play sound
+  const recordMove = useCallback((move: number, player: Player, isPass: boolean) => {
+    // Always add to rawMoves for proper notation display
+    setRawMoves(prev => [...prev, move]);
+
+    if (move === END_TURN_MOVE) return; // Don't record end turn in formatted history
+    const { src, dst } = decodeMove(move);
+    const algebraic = `${squareToAlgebraic(src)}-${squareToAlgebraic(dst)}`;
+    setLastMove({ from: src, to: dst });
+    setMoveHistory(prev => [...prev, { move, algebraic, player }]);
+
+    // Play appropriate sound
+    if (isPass) {
+      playPassSound();
+    } else {
+      playMoveSound();
+    }
+  }, []);
+
+  // Load client-side AI model reactively when aiModel changes
+  useEffect(() => {
+    if (!vsAI) return;
+
+    // Determine which model key we want loaded
+    const modelKey = aiModel ?? 'latest';
+
+    // Skip if already loaded or currently loading this model
+    if (loadedModelRef.current === modelKey) return;
+
+    // Mark this model as the target (prevents duplicate loads)
+    loadedModelRef.current = modelKey;
+
+    if (modelKey === 'random_weights') {
+      aiWorker.loadRandomEvaluator();
+      logger.info('[useGame] Loading random evaluator for client-side AI');
+      return;
+    }
+
+    // Extract filename from path for the by-name endpoint
+    const filename = modelKey === 'latest' ? null : modelKey.split('/').pop();
+
+    const fetchAndLoad = filename
+      ? () => getOnnxModelInfoByName(filename)
+      : () => api.getOnnxModelInfo();
+
+    fetchAndLoad()
+      .then((modelInfo) => {
+        // Check we haven't switched models while fetching
+        if (loadedModelRef.current !== modelKey) return;
+        aiWorker.loadModel(modelInfo.url, modelInfo.version);
+        logger.info('[useGame] Loading client-side AI model:', modelInfo.version);
+      })
+      .catch((err) => {
+        logger.info('[useGame] ONNX model not available, using server AI:', err);
+        // Reset so user can retry
+        if (loadedModelRef.current === modelKey) {
+          loadedModelRef.current = null;
+        }
+      });
+  }, [vsAI, aiModel, aiWorker]);
+
   // Start a new game
   const startNewGame = useCallback(async () => {
     setIsLoading(true);
@@ -146,36 +231,16 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
     }
   }, [vsAI, aiSimulations]);
 
-  // Helper to record a move and play sound
-  const recordMove = useCallback((move: number, player: Player, isPass: boolean) => {
-    // Always add to rawMoves for proper notation display
-    setRawMoves(prev => [...prev, move]);
-
-    if (move === END_TURN_MOVE) return; // Don't record end turn in formatted history
-    const { src, dst } = decodeMove(move);
-    const algebraic = `${squareToAlgebraic(src)}-${squareToAlgebraic(dst)}`;
-    setLastMove({ from: src, to: dst });
-    setMoveHistory(prev => [...prev, { move, algebraic, player }]);
-
-    // Play appropriate sound
-    if (isPass) {
-      playPassSound();
-    } else {
-      playMoveSound();
-    }
-  }, []);
-
   // Handle AI move - loop until AI's turn is complete
+  // Uses client-side AI if loaded, falls back to server AI
   const handleAIMove = useCallback(async (gameId: string) => {
     setAiThinking(true);
     try {
-      // Use the state from the response instead of fetching again
       let aiMoveCount = 0;
-      const MAX_AI_MOVES = 10; // Safety limit to prevent infinite loops
+      const MAX_AI_MOVES = 10;
 
       let currentState = await api.getGameState(gameId);
 
-      // Keep making moves while it's still AI's turn (player 1) and game is playing
       while (currentState.status === 'playing' && currentState.current_player === 1) {
         aiMoveCount++;
         if (aiMoveCount > MAX_AI_MOVES) {
@@ -184,29 +249,66 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
           break;
         }
 
-        logger.info('[useGame] AI making move...', { moveNumber: aiMoveCount });
-        const prevPlayer = currentState.current_player;
-        const aiResponse = await api.getAIMove(gameId, { simulations: aiSimulations, model: aiModel });
-
-        // Use the state from the AI response instead of fetching again
-        currentState = aiResponse.game_state;
-        setGameState(currentState); // Update UI after each AI move
-
-        // Update evaluation (flip sign: AI's value is from its perspective, we want human's)
-        // AI is player 1, value +1 = AI winning, we flip to get human's perspective
-        if (aiResponse.value !== undefined && aiResponse.value !== null) {
-          setEvaluation(-aiResponse.value);
+        // Use client-side AI if ready, otherwise fall back to server
+        // Don't wait for model load — use server for fast first response
+        const clientReady = aiWorker.isLoaded;
+        if (!clientReady && !aiWorker.isLoading) {
+          logger.warn('[useGame] Client-side AI not available', {
+            loadError: aiWorker.loadError,
+            backend: aiWorker.backend,
+          });
         }
 
-        // A pass doesn't change the player, a knight move does
+        logger.info('[useGame] AI making move...', { moveNumber: aiMoveCount, clientSide: clientReady });
+
+        const prevPlayer = currentState.current_player;
+        let aiMove: number;
+        let aiValue: number | null = null;
+
+        // Try client-side AI first
+        if (clientReady) {
+          try {
+            const engineState = apiStateToEngineState(currentState);
+            const result = await aiWorker.search(engineState, {
+              numSimulations: aiSimulations,
+            });
+
+            aiMove = result.bestMove;
+            aiValue = result.value;
+            setAiProgress(null);
+
+            // Sync move to server
+            currentState = await api.makeMove(gameId, aiMove);
+          } catch (clientErr) {
+            logger.error('[useGame] Client-side AI failed, falling back to server:', clientErr);
+            // Fall back to server AI
+            const aiResponse = await api.getAIMove(gameId, { simulations: aiSimulations, model: aiModel });
+            currentState = aiResponse.game_state;
+            aiMove = aiResponse.move;
+            aiValue = aiResponse.value;
+          }
+        } else {
+          // Server-side AI
+          const aiResponse = await api.getAIMove(gameId, { simulations: aiSimulations, model: aiModel });
+          currentState = aiResponse.game_state;
+          aiMove = aiResponse.move;
+          aiValue = aiResponse.value;
+        }
+
+        setGameState(currentState);
+
+        if (aiValue !== undefined && aiValue !== null) {
+          setEvaluation(-aiValue);
+        }
+
         const wasPass = currentState.current_player === prevPlayer;
-        recordMove(aiResponse.move, 1, wasPass);
+        recordMove(aiMove, 1, wasPass);
 
         logger.info('[useGame] AI move complete', {
-          move: aiResponse.algebraic,
+          move: aiMove,
           wasPass,
           newPlayer: currentState.current_player,
-          evaluation: aiResponse.value,
+          evaluation: aiValue,
         });
       }
 
@@ -216,8 +318,9 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
       setError(err instanceof Error ? err.message : 'AI move failed');
     } finally {
       setAiThinking(false);
+      setAiProgress(null);
     }
-  }, [aiSimulations, aiModel, recordMove]);
+  }, [aiSimulations, aiModel, recordMove, aiWorker]);
 
   // End turn explicitly (after passing)
   const endTurn = useCallback(async () => {
@@ -429,12 +532,14 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
     isLoading,
     error,
     aiThinking,
+    aiModelLoading: aiWorker.isLoading,
     canEndTurn,
     mustPass,
     lastMove,
     moveHistory,
     rawMoves,
     evaluation,
+    aiProgress,
     startNewGame,
     handleSquareClick,
     handleDragMove,

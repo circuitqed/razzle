@@ -10,8 +10,10 @@ import gzip
 import logging
 import os
 import secrets
+import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
@@ -85,6 +87,7 @@ class GameStateResponse(BaseModel):
     ply: int
     touched_mask: str  # Bitboard of ineligible receivers (string for JS precision)
     has_passed: bool  # Whether a pass has been made this turn
+    last_knight_dst: int = -1  # Destination of opponent's last knight move (-1 if none)
     time_control: Optional[float] = None  # Total time per player in seconds
     time_remaining: Optional[list[float]] = None  # Remaining time [p1, p2] if time controlled
 
@@ -271,6 +274,29 @@ class LatestModelResponse(BaseModel):
 class UploadModelResponse(BaseModel):
     """Response after uploading a model."""
     version: str
+    status: str = "uploaded"
+
+
+# --- Trainer State Models ---
+
+class TrainerStateInfo(BaseModel):
+    """Metadata about a trainer state file."""
+    key: str
+    iteration: int
+    total_games_trained: int
+    file_size: int
+    download_url: str
+    created_at: str
+
+
+class TrainerStateResponse(BaseModel):
+    """Response with trainer state info, or null if none exists."""
+    state: Optional[TrainerStateInfo] = None
+
+
+class UploadTrainerStateResponse(BaseModel):
+    """Response after uploading trainer state."""
+    key: str
     status: str = "uploaded"
 
 
@@ -477,6 +503,7 @@ class Game:
             ply=self.state.ply,
             touched_mask=str(self.state.touched_mask),
             has_passed=self.state.has_passed,
+            last_knight_dst=self.state.last_knight_dst,
             time_control=self.time_control,
             time_remaining=time_remaining
         )
@@ -570,6 +597,8 @@ _model_mtime: float = 0  # Track model file modification time
 
 # Directories to search for models (in priority order)
 MODEL_SEARCH_DIRS = [
+    Path("models"),  # Docker volume mount (/app/models)
+    Path("/app/models"),  # Docker container path (absolute)
     Path("output/models"),  # New training pipeline models
     Path("/app/output/models"),  # Docker container path
     Path("/home/projects/razzle/engine/output/new_rules_500"),
@@ -911,6 +940,7 @@ class AvailableModelInfo(BaseModel):
     name: str  # Display name (filename)
     path: str  # Full path for selection
     mtime: float  # Modification time for sorting
+    has_onnx: bool = False  # Whether an ONNX export exists alongside the .pt file
 
 
 class ModelsResponse(BaseModel):
@@ -936,10 +966,12 @@ async def list_models():
                         continue
                     seen_paths.add(path_str)
                     mtime = model_path.stat().st_mtime
+                    onnx_path = model_path.with_suffix(".onnx")
                     models.append(AvailableModelInfo(
                         name=model_path.name,
                         path=path_str,
-                        mtime=mtime
+                        mtime=mtime,
+                        has_onnx=onnx_path.exists(),
                     ))
                 except OSError:
                     continue
@@ -951,6 +983,163 @@ async def list_models():
     models.insert(0, AvailableModelInfo(name="random_weights", path="random_weights", mtime=0))
 
     return ModelsResponse(models=models, current=get_model_info())
+
+
+# --- On-demand ONNX export ---
+_onnx_export_locks: dict[str, threading.Lock] = {}
+_onnx_export_locks_lock = threading.Lock()
+_onnx_thread_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="onnx-export")
+
+
+def _get_export_lock(pt_path: str) -> threading.Lock:
+    """Get or create a per-model lock for ONNX export."""
+    with _onnx_export_locks_lock:
+        if pt_path not in _onnx_export_locks:
+            _onnx_export_locks[pt_path] = threading.Lock()
+        return _onnx_export_locks[pt_path]
+
+
+def _export_onnx_sync(pt_path: Path, onnx_path: Path) -> None:
+    """Export a .pt model to .onnx (runs in thread pool). Uses legacy TorchScript exporter."""
+    import torch
+    from razzle.core.bitboard import ROWS, COLS
+
+    lock = _get_export_lock(str(pt_path))
+    with lock:
+        # Double-check after acquiring lock
+        if onnx_path.exists():
+            return
+
+        logging.info(f"Exporting ONNX: {pt_path} -> {onnx_path}")
+        net = RazzleNet.load(pt_path, device="cpu")
+        net.eval()
+        dummy = torch.randn(1, 7, ROWS, COLS)
+        torch.onnx.export(
+            net,
+            dummy,
+            str(onnx_path),
+            opset_version=17,
+            input_names=["board_input"],
+            output_names=["policy", "value", "difficulty"],
+            dynamic_axes={
+                "board_input": {0: "batch"},
+                "policy": {0: "batch"},
+                "value": {0: "batch"},
+                "difficulty": {0: "batch"},
+            },
+            dynamo=False,  # Use legacy TorchScript exporter (no onnxscript dep)
+        )
+        size_kb = onnx_path.stat().st_size / 1024
+        logging.info(f"ONNX export complete: {onnx_path} ({size_kb:.1f} KB)")
+
+
+def _find_pt_model(model_name: str) -> Optional[Path]:
+    """Find a .pt model file by name across MODEL_SEARCH_DIRS."""
+    if not model_name.endswith(".pt"):
+        return None
+    if "/" in model_name or "\\" in model_name:
+        return None
+    for search_dir in MODEL_SEARCH_DIRS:
+        candidate = search_dir / model_name
+        if candidate.exists():
+            return candidate
+    return None
+
+
+class OnnxModelInfo(BaseModel):
+    """Info about available ONNX model."""
+    version: str
+    url: str
+    size_bytes: int
+
+
+@app.get("/models/onnx/latest")
+async def get_latest_onnx_model():
+    """Get info about the latest ONNX model available for browser inference.
+
+    If no ONNX file exists, auto-exports from the latest .pt model.
+    """
+    # Look for existing ONNX files in model directories
+    onnx_files = []
+    search_dirs = list(MODEL_SEARCH_DIRS) + [Path("models"), Path(".")]
+    for search_dir in search_dirs:
+        if not search_dir.exists():
+            continue
+        for onnx_path in search_dir.glob("*.onnx"):
+            try:
+                onnx_files.append(onnx_path)
+            except OSError:
+                continue
+
+    if not onnx_files:
+        # No ONNX files exist — try to auto-export from the latest .pt
+        latest = find_latest_model()
+        if not latest:
+            raise HTTPException(status_code=404, detail="No model available")
+        pt_path, _ = latest
+        onnx_path = pt_path.with_suffix(".onnx")
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(_onnx_thread_pool, _export_onnx_sync, pt_path, onnx_path)
+        return OnnxModelInfo(
+            version=onnx_path.stem,
+            url=f"/models/onnx/{onnx_path.name}",
+            size_bytes=onnx_path.stat().st_size,
+        )
+
+    # Use most recent
+    onnx_files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    best = onnx_files[0]
+
+    return OnnxModelInfo(
+        version=best.stem,
+        url=f"/models/onnx/{best.name}",
+        size_bytes=best.stat().st_size,
+    )
+
+
+@app.get("/models/onnx/by-name/{model_name}")
+async def get_onnx_model_by_name(model_name: str):
+    """Get or export an ONNX model for a specific .pt file.
+
+    If the ONNX file doesn't exist alongside the .pt, it will be exported on demand.
+    Export takes ~2-3 seconds and is protected by per-model locking.
+    """
+    pt_path = _find_pt_model(model_name)
+    if pt_path is None:
+        raise HTTPException(status_code=404, detail=f"Model not found: {model_name}")
+
+    onnx_path = pt_path.with_suffix(".onnx")
+
+    if not onnx_path.exists():
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(_onnx_thread_pool, _export_onnx_sync, pt_path, onnx_path)
+
+    return OnnxModelInfo(
+        version=onnx_path.stem,
+        url=f"/models/onnx/{onnx_path.name}",
+        size_bytes=onnx_path.stat().st_size,
+    )
+
+
+@app.get("/models/onnx/{filename}")
+async def download_onnx_model(filename: str):
+    """Download an ONNX model file."""
+    # Security: only allow .onnx files, no path traversal
+    if not filename.endswith(".onnx") or "/" in filename or "\\" in filename:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+
+    search_dirs = list(MODEL_SEARCH_DIRS) + [Path("models"), Path(".")]
+    for search_dir in search_dirs:
+        candidate = search_dir / filename
+        if candidate.exists():
+            return FileResponse(
+                path=candidate,
+                filename=filename,
+                media_type="application/octet-stream",
+                headers={"Cache-Control": "public, max-age=86400"},
+            )
+
+    raise HTTPException(status_code=404, detail="Model file not found")
 
 
 # Training output directories to check
@@ -1065,6 +1254,10 @@ async def get_training_status():
 # Models directory for storing uploaded models
 TRAINING_MODELS_DIR = Path(os.environ.get("RAZZLE_MODELS_DIR", "output/models"))
 TRAINING_MODELS_DIR.mkdir(parents=True, exist_ok=True)
+
+# Trainer state directory for storing optimizer state and replay buffers
+TRAINING_STATE_DIR = Path(os.environ.get("RAZZLE_STATE_DIR", "output/trainer_state"))
+TRAINING_STATE_DIR.mkdir(parents=True, exist_ok=True)
 
 
 @app.post("/training/games", response_model=SubmitGameResponse)
@@ -1379,18 +1572,95 @@ async def get_latest_training_metrics():
     return LatestMetricsResponse(metrics=TrainingMetricsData(**metrics))
 
 
+# --- Trainer State Endpoints ---
+
+@app.post("/training/state/{key}", response_model=UploadTrainerStateResponse)
+async def upload_trainer_state(
+    key: str,
+    iteration: int = Form(0),
+    total_games_trained: int = Form(0),
+    compressed: Optional[str] = Form(None),
+    file: UploadFile = File(...),
+):
+    """Upload trainer state (optimizer state, replay buffer, etc.)."""
+    content = await file.read()
+
+    # Decompress if needed
+    if compressed == "true":
+        try:
+            content = gzip.decompress(content)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Failed to decompress: {e}")
+
+    # Save file
+    file_path = TRAINING_STATE_DIR / f"{key}.dat"
+    with open(file_path, "wb") as f:
+        f.write(content)
+
+    # Save metadata to DB
+    persistence.save_trainer_state_record(
+        key=key,
+        iteration=iteration,
+        total_games_trained=total_games_trained,
+        file_path=str(file_path),
+        file_size=len(content),
+    )
+
+    return UploadTrainerStateResponse(key=key, status="uploaded")
+
+
+@app.get("/training/state/{key}", response_model=TrainerStateResponse)
+async def get_trainer_state(key: str):
+    """Get metadata about a trainer state file."""
+    record = persistence.get_trainer_state_record(key)
+
+    if record is None:
+        return TrainerStateResponse(state=None)
+
+    return TrainerStateResponse(
+        state=TrainerStateInfo(
+            key=record["key"],
+            iteration=record["iteration"],
+            total_games_trained=record["total_games_trained"],
+            file_size=record["file_size"],
+            download_url=f"/training/state/{record['key']}/download",
+            created_at=record["created_at"],
+        )
+    )
+
+
+@app.get("/training/state/{key}/download")
+async def download_trainer_state(key: str):
+    """Download a trainer state file."""
+    record = persistence.get_trainer_state_record(key)
+
+    if record is None:
+        raise HTTPException(status_code=404, detail="Trainer state not found")
+
+    file_path = Path(record["file_path"])
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="Trainer state file not found on disk")
+
+    return FileResponse(
+        path=file_path,
+        filename=f"{key}.dat",
+        media_type="application/octet-stream",
+    )
+
+
 class ResetTrainingResponse(BaseModel):
     """Response from training reset."""
     games_deleted: int
     models_deleted: int
     metrics_deleted: int
+    trainer_states_deleted: int = 0
     files_deleted: int
 
 
 @app.post("/training/reset", response_model=ResetTrainingResponse)
 async def reset_training():
     """
-    Reset all training data (games, models, metrics).
+    Reset all training data (games, models, metrics, trainer state).
 
     WARNING: This permanently deletes all training progress!
     Use this to start fresh training from scratch.
@@ -1640,13 +1910,18 @@ async def get_ai_move(
         else:  # "neural"
             ev = get_evaluator_for_model(request.model)
 
-        # Use temperature for opening diversity (first ~5 moves = ~10 ply)
+        # Use temperature for opening diversity (first 2-3 moves = ~6 ply)
         temperature = request.temperature
-        if game.state.ply < 10 and temperature == 0.0:
+        if game.state.ply < 6 and temperature == 0.0:
             temperature = 1.0  # Opening diversity
 
+        # Mid-pass positions have narrow trees — use fewer sims
+        sims = request.simulations
+        if game.state.has_passed:
+            sims = max(50, sims // 10)
+
         config = MCTSConfig(
-            num_simulations=request.simulations,
+            num_simulations=sims,
             temperature=temperature,
             batch_size=16 if bot_type == "neural" else 1  # Batching only helps with NN
         )
@@ -3005,9 +3280,16 @@ async def websocket_endpoint(websocket: WebSocket, game_id: str):
                     await send_error(websocket, "Game already finished", "GAME_FINISHED")
                     continue
 
+                # Mid-pass positions have narrow trees — use fewer sims
+                sims = simulations
+                if game.state.has_passed:
+                    sims = max(50, sims // 10)
+
                 # Run AI with batched search
                 ev = get_evaluator()
-                config = MCTSConfig(num_simulations=simulations, temperature=0.0, batch_size=16)
+                # Use temperature for opening diversity (first 2-3 moves = ~6 ply)
+                temperature = 1.0 if game.state.ply < 6 else 0.0
+                config = MCTSConfig(num_simulations=sims, temperature=temperature, batch_size=16)
                 mcts = MCTS(ev, config)
                 root = mcts.search_batched(game.state, add_noise=False)
                 move = mcts.select_move(root)

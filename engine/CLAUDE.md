@@ -151,13 +151,9 @@ python scripts/train_distributed.py \
 - [x] Distributed training API
 - [x] Unit tests (229+ tests)
 - [x] Training bug fixes (player perspective, END_TURN handling)
-- [ ] Trained model
-
-## Next Steps
-
-1. Run distributed training to generate trained model (requires fresh start due to architecture changes)
-2. Validate with policy diagnostics (`scripts/diagnose_policy.py`)
-3. Increase default simulations for better tactical play (currently 800, consider 1600-2000)
+- [x] Trained model (262 iterations via distributed training)
+- [x] On-demand ONNX export for browser inference
+- [x] Model arena for comparing model strengths
 
 ## Future Optimizations
 

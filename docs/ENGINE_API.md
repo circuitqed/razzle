@@ -254,6 +254,155 @@ WS /games/{game_id}/ws
 | GAME_FINISHED | 409 | Game is already over |
 | INTERNAL_ERROR | 500 | Server error |
 
+### Resign
+
+```
+POST /games/{game_id}/resign
+Content-Type: application/json
+
+Request:
+{
+  "player": 0    // Which player is resigning (0 or 1)
+}
+
+Response: GameState object (status: "finished", winner set to opponent)
+```
+
+## Model Endpoints
+
+### List Available Models
+
+```
+GET /models
+
+Response:
+{
+  "models": [
+    {"name": "random_weights", "path": "random_weights", "mtime": 0, "has_onnx": false},
+    {"name": "iter_262.pt", "path": "/app/models/iter_262.pt", "mtime": 1707..., "has_onnx": true},
+    ...
+  ],
+  "current": "models/iter_262.pt"
+}
+```
+
+### Get Latest ONNX Model
+
+Returns info about the latest ONNX model. Auto-exports from the latest `.pt` if no ONNX exists.
+
+```
+GET /models/onnx/latest
+
+Response:
+{
+  "version": "iter_262",
+  "url": "/models/onnx/iter_262.onnx",
+  "size_bytes": 9896431
+}
+```
+
+### Get ONNX Model by Name
+
+Returns ONNX model info for a specific `.pt` file. Exports on demand if the ONNX file doesn't exist (~1-2s first time, instant after).
+
+```
+GET /models/onnx/by-name/{model_name}
+
+Example: GET /models/onnx/by-name/iter_200.pt
+
+Response:
+{
+  "version": "iter_200",
+  "url": "/models/onnx/iter_200.onnx",
+  "size_bytes": 9896431
+}
+```
+
+### Download ONNX Model
+
+```
+GET /models/onnx/{filename}
+
+Response: Binary ONNX file (application/octet-stream)
+Cache-Control: public, max-age=86400
+```
+
+## Training API
+
+### Submit Self-Play Game
+
+```
+POST /training/games
+Content-Type: application/json
+
+Request:
+{
+  "worker_id": "worker-0",
+  "moves": [184, 240, ...],
+  "result": 1.0,
+  "visit_counts": [{"184": 450, "240": 200}, ...],
+  "model_version": "iter_100"
+}
+
+Response: {"id": 1, "status": "accepted"}
+```
+
+### Fetch Pending Games
+
+```
+GET /training/games?limit=100
+
+Response:
+{
+  "games": [...],
+  "count": 100,
+  "total_pending": 500
+}
+```
+
+### Upload Model
+
+```
+POST /training/models
+Content-Type: multipart/form-data
+
+Form fields: file (the .pt file), version, iteration, games_trained_on, ...
+
+Response: {"version": "iter_101", "status": "uploaded"}
+```
+
+### Get Latest Model
+
+```
+GET /training/models/latest
+
+Response:
+{
+  "model": {
+    "version": "iter_262",
+    "iteration": 262,
+    "download_url": "/training/models/iter_262.pt",
+    "created_at": "2025-02-19T..."
+  }
+}
+```
+
+### Training Dashboard
+
+```
+GET /training/dashboard
+
+Response:
+{
+  "status": "training",
+  "games_pending": 50,
+  "games_total": 26200,
+  "latest_model": {...},
+  "workers": {"worker-0": {"games": 100, "last_seen": "..."}},
+  "models": [...]
+}
+```
+
 ## Utility Endpoints
 
 ### Convert Move Format
@@ -270,5 +419,5 @@ Response: {"encoded": 184, "src": 3, "dst": 16}
 
 ```
 GET /health
-Response: {"status": "ok", "version": "0.1.0"}
+Response: {"status": "ok", "version": "0.1.0", "model": "models/iter_262.pt"}
 ```

@@ -9,11 +9,9 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - ./engine:/app
-      - engine_models:/app/models
+      - ./engine/output/models:/app/models
     environment:
       - PYTHONUNBUFFERED=1
-    command: uvicorn server.main:app --host 0.0.0.0 --port 8000 --reload
     restart: unless-stopped
 
   webapp:
@@ -23,15 +21,7 @@ services:
     container_name: razzle-webapp
     ports:
       - "7492:5000"
-    volumes:
-      - ./webapp:/app
-      - webapp_node_modules:/app/node_modules
-    environment:
-      - ENGINE_URL=http://engine:8000
     depends_on:
       - engine
     restart: unless-stopped
 
-volumes:
-  engine_models:
-  webapp_node_modules:

@@ -34,6 +34,7 @@ server = [
     "websockets>=11.0",
     "pyjwt>=2.8.0",
     "python-multipart>=0.0.6",
+    "onnx>=1.14.0",
 ]
 all = [
     "razzle[dev,training,server]",
