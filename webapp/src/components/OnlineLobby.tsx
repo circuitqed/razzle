@@ -11,7 +11,6 @@ interface OnlineLobbyProps {
   onClose: () => void;
   onGameCreated: (gameId: string, joinCode: string, hostColor: number) => void;
   onGameJoined: (gameId: string, yourColor: number) => void;
-  onOpenLogin: () => void;
 }
 
 export default function OnlineLobby({
@@ -19,7 +18,6 @@ export default function OnlineLobby({
   onClose,
   onGameCreated,
   onGameJoined,
-  onOpenLogin,
 }: OnlineLobbyProps) {
   const { user } = useAuth();
   const [activeTab, setActiveTab] = useState<'create' | 'join'>('create');
@@ -52,11 +50,6 @@ export default function OnlineLobby({
   if (!isOpen) return null;
 
   const handleCreateGame = async () => {
-    if (!user) {
-      onOpenLogin();
-      return;
-    }
-
     setError(null);
     setIsLoading(true);
 
@@ -74,11 +67,6 @@ export default function OnlineLobby({
 
   const handleJoinGame = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!user) {
-      onOpenLogin();
-      return;
-    }
-
     if (!joinCode.trim()) {
       setError('Please enter a game code');
       return;
@@ -123,18 +111,6 @@ export default function OnlineLobby({
             &times;
           </button>
         </div>
-
-        {!user && (
-          <div className="mb-4 p-3 bg-yellow-600 bg-opacity-20 border border-yellow-600 rounded">
-            <p className="text-yellow-400 text-sm">
-              You need to{' '}
-              <button onClick={onOpenLogin} className="underline hover:text-yellow-300">
-                log in
-              </button>{' '}
-              to play online.
-            </p>
-          </div>
-        )}
 
         {error && (
           <div className="mb-4 bg-red-600 text-white px-3 py-2 rounded text-sm">
@@ -199,7 +175,7 @@ export default function OnlineLobby({
 
             <button
               onClick={handleCreateGame}
-              disabled={isLoading || !user}
+              disabled={isLoading}
               className="w-full px-4 py-3 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 text-white rounded font-medium transition-colors"
             >
               {isLoading ? 'Creating...' : 'Create Game'}
@@ -225,7 +201,7 @@ export default function OnlineLobby({
 
             <button
               type="submit"
-              disabled={isLoading || !user || !joinCode.trim()}
+              disabled={isLoading || !joinCode.trim()}
               className="w-full px-4 py-3 bg-green-600 hover:bg-green-700 disabled:bg-gray-600 text-white rounded font-medium transition-colors"
             >
               {isLoading ? 'Joining...' : 'Join Game'}

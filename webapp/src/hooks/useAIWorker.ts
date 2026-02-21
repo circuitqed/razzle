@@ -3,6 +3,11 @@
  *
  * Handles worker lifecycle, model loading, and MCTS search.
  * BigInt values are serialized as strings when communicating with the worker.
+ *
+ * IMPORTANT: The worker is terminated and recreated after each search to fully
+ * release WASM linear memory. Without this, WASM memory grows monotonically
+ * (pages are never returned to the OS) and iOS kills the tab after a few moves.
+ * The model is cached in IndexedDB so reloading is fast (~300ms).
  */
 
 import { useState, useCallback, useRef, useEffect } from 'react';
@@ -44,6 +49,11 @@ function serializeState(s: EngineState) {
 
 export function useAIWorker(): UseAIWorkerReturn {
   const workerRef = useRef<Worker | null>(null);
+  // Track model info for reloading after worker recycle
+  const modelInfoRef = useRef<{ url: string; version: string; isRandom: boolean } | null>(null);
+  // Use refs for internal state to avoid stale closures
+  const isLoadedRef = useRef(false);
+
   const [state, setState] = useState<AIWorkerState>({
     isLoaded: false,
     isLoading: false,
@@ -54,145 +64,239 @@ export function useAIWorker(): UseAIWorkerReturn {
     progress: null,
   });
 
-  // Pending search promise resolver
+  // Pending promise resolvers
   const searchResolverRef = useRef<{
     resolve: (result: { bestMove: number; simsDone: number; value: number }) => void;
     reject: (error: Error) => void;
   } | null>(null);
-
-  // Pending load promise resolver + shared promise for waitForLoad
   const loadResolverRef = useRef<{
-    resolve: () => void;
-    reject: (error: Error) => void;
+    resolve: (success: boolean) => void;
   } | null>(null);
   const loadPromiseRef = useRef<Promise<boolean> | null>(null);
 
-  // Create worker on mount
+  // Track if component is mounted to avoid state updates after unmount
+  const mountedRef = useRef(true);
   useEffect(() => {
-    const worker = new Worker(
-      new URL('../workers/ai.worker.ts', import.meta.url),
-      { type: 'module' },
-    );
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
 
-    worker.onmessage = (event) => {
-      const msg = event.data;
-      switch (msg.type) {
-        case 'loaded':
-          if (msg.success) {
-            setState((prev) => ({
-              ...prev,
-              isLoaded: true,
-              isLoading: false,
-              isRandom: msg.isRandom ?? false,
-              backend: msg.backend ?? (msg.isRandom ? 'random' : 'wasm'),
-              loadError: null,
-            }));
-            loadResolverRef.current?.resolve();
-          } else {
-            setState((prev) => ({
-              ...prev,
-              isLoaded: false,
-              isLoading: false,
-              loadError: msg.error,
-            }));
-            loadResolverRef.current?.reject(new Error(msg.error));
-          }
-          loadResolverRef.current = null;
-          break;
+  // Create a new worker and wire up message handlers
+  const createWorker = useCallback((): Worker | null => {
+    try {
+      const worker = new Worker(
+        new URL('../workers/ai.worker.ts', import.meta.url),
+        { type: 'module' },
+      );
 
-        case 'loading_progress':
-          // Could show download/init progress in the future
-          break;
-
-        case 'search_progress':
+      worker.onerror = (event) => {
+        console.warn('[useAIWorker] Worker error:', event.message);
+        event.preventDefault();
+        isLoadedRef.current = false;
+        if (mountedRef.current) {
           setState((prev) => ({
             ...prev,
-            progress: {
-              simsDone: msg.simsDone,
-              totalSims: msg.totalSims,
-              bestMove: msg.bestMove,
-              value: msg.value,
-            },
+            isLoaded: false,
+            isLoading: false,
+            loadError: event.message || 'Worker initialization failed',
           }));
-          break;
+        }
+        loadResolverRef.current?.resolve(false);
+        loadResolverRef.current = null;
+        searchResolverRef.current?.reject(new Error(event.message || 'Worker error'));
+        searchResolverRef.current = null;
+      };
 
-        case 'search_result':
-          setState((prev) => ({ ...prev, isSearching: false, progress: null }));
-          if (msg.success) {
-            searchResolverRef.current?.resolve({
-              bestMove: msg.bestMove,
-              simsDone: msg.simsDone,
-              value: msg.value,
-            });
-          } else {
-            searchResolverRef.current?.reject(new Error(msg.error));
-          }
-          searchResolverRef.current = null;
-          break;
+      worker.onmessage = (event) => {
+        const msg = event.data;
+        switch (msg.type) {
+          case 'loaded':
+            if (msg.success) {
+              isLoadedRef.current = true;
+              if (mountedRef.current) {
+                setState((prev) => ({
+                  ...prev,
+                  isLoaded: true,
+                  isLoading: false,
+                  isRandom: msg.isRandom ?? false,
+                  backend: msg.backend ?? (msg.isRandom ? 'random' : 'wasm'),
+                  loadError: null,
+                }));
+              }
+              loadResolverRef.current?.resolve(true);
+            } else {
+              isLoadedRef.current = false;
+              if (mountedRef.current) {
+                setState((prev) => ({
+                  ...prev,
+                  isLoaded: false,
+                  isLoading: false,
+                  loadError: msg.error,
+                }));
+              }
+              loadResolverRef.current?.resolve(false);
+            }
+            loadResolverRef.current = null;
+            break;
+
+          case 'loading_progress':
+            break;
+
+          case 'search_progress':
+            if (mountedRef.current) {
+              setState((prev) => ({
+                ...prev,
+                progress: {
+                  simsDone: msg.simsDone,
+                  totalSims: msg.totalSims,
+                  bestMove: msg.bestMove,
+                  value: msg.value,
+                },
+              }));
+            }
+            break;
+
+          case 'search_result':
+            if (mountedRef.current) {
+              setState((prev) => ({ ...prev, isSearching: false, progress: null }));
+            }
+            if (msg.success) {
+              searchResolverRef.current?.resolve({
+                bestMove: msg.bestMove,
+                simsDone: msg.simsDone,
+                value: msg.value,
+              });
+            } else {
+              searchResolverRef.current?.reject(new Error(msg.error));
+            }
+            searchResolverRef.current = null;
+            break;
+        }
+      };
+
+      workerRef.current = worker;
+      return worker;
+    } catch (err) {
+      console.warn('[useAIWorker] Failed to create Web Worker:', err);
+      if (mountedRef.current) {
+        setState((prev) => ({
+          ...prev,
+          loadError: 'Web Worker not supported',
+        }));
+      }
+      return null;
+    }
+  }, []);
+
+  // Send load message to a worker
+  const sendLoadMessage = useCallback((worker: Worker, info: { url: string; version: string; isRandom: boolean }) => {
+    isLoadedRef.current = false;
+    loadPromiseRef.current = new Promise<boolean>((resolve) => {
+      loadResolverRef.current = { resolve };
+    });
+    if (mountedRef.current) {
+      setState((prev) => ({ ...prev, isLoading: true, isLoaded: false, loadError: null }));
+    }
+
+    if (info.isRandom) {
+      worker.postMessage({ type: 'load', modelUrl: '', modelVersion: 'random', useRandom: true });
+    } else {
+      worker.postMessage({ type: 'load', modelUrl: info.url, modelVersion: info.version });
+    }
+
+    return loadPromiseRef.current;
+  }, []);
+
+  // Terminate current worker and create a fresh one after a delay.
+  // The delay gives iOS time to reclaim the old worker's WASM memory
+  // before the new worker allocates its own.
+  const recycleWorker = useCallback(() => {
+    if (workerRef.current) {
+      workerRef.current.terminate();
+      workerRef.current = null;
+    }
+    isLoadedRef.current = false;
+    if (mountedRef.current) {
+      setState((prev) => ({ ...prev, isLoaded: false }));
+    }
+
+    // Delay creation to let OS reclaim old worker's memory
+    setTimeout(() => {
+      if (!mountedRef.current || !modelInfoRef.current) return;
+      const worker = createWorker();
+      if (worker) {
+        sendLoadMessage(worker, modelInfoRef.current);
+      }
+    }, 300);
+  }, [createWorker, sendLoadMessage]);
+
+  // Create initial worker on mount
+  useEffect(() => {
+    createWorker();
+    return () => {
+      if (workerRef.current) {
+        workerRef.current.terminate();
+        workerRef.current = null;
       }
     };
+  }, [createWorker]);
 
-    workerRef.current = worker;
-
-    return () => {
-      worker.terminate();
-      workerRef.current = null;
-    };
-  }, []);
-
+  // Public: load model (called on mount or model change)
   const loadModel = useCallback((modelUrl: string, modelVersion: string) => {
-    if (!workerRef.current) return;
-    setState((prev) => ({ ...prev, isLoading: true, loadError: null }));
-    loadPromiseRef.current = new Promise<boolean>((resolve) => {
-      loadResolverRef.current = {
-        resolve: () => resolve(true),
-        reject: () => resolve(false),
-      };
-    });
-    workerRef.current.postMessage({
-      type: 'load',
-      modelUrl,
-      modelVersion,
-    });
-  }, []);
+    modelInfoRef.current = { url: modelUrl, version: modelVersion, isRandom: false };
+    if (workerRef.current) {
+      sendLoadMessage(workerRef.current, modelInfoRef.current);
+    }
+  }, [sendLoadMessage]);
 
   const loadRandomEvaluator = useCallback(() => {
-    if (!workerRef.current) return;
-    setState((prev) => ({ ...prev, isLoading: true, loadError: null }));
-    workerRef.current.postMessage({
-      type: 'load',
-      modelUrl: '',
-      modelVersion: 'random',
-      useRandom: true,
-    });
-  }, []);
+    modelInfoRef.current = { url: '', version: 'random', isRandom: true };
+    if (workerRef.current) {
+      sendLoadMessage(workerRef.current, modelInfoRef.current);
+    }
+  }, [sendLoadMessage]);
 
+  // Public: run MCTS search — waits for load if needed, recycles worker after
   const searchFn = useCallback(
-    (
+    async (
       engineState: EngineState,
       config?: Partial<MCTSConfig>,
     ): Promise<{ bestMove: number; simsDone: number; value: number }> => {
-      return new Promise((resolve, reject) => {
-        if (!workerRef.current) {
-          reject(new Error('Worker not initialized'));
-          return;
-        }
-        if (!state.isLoaded) {
-          reject(new Error('Model not loaded'));
-          return;
-        }
+      // Wait for worker to be loaded (may be loading after a recycle)
+      if (!isLoadedRef.current && loadPromiseRef.current) {
+        const loaded = await loadPromiseRef.current;
+        if (!loaded) throw new Error('Model failed to load');
+      }
+      if (!workerRef.current || !isLoadedRef.current) {
+        throw new Error('Worker not initialized or model not loaded');
+      }
 
-        searchResolverRef.current = { resolve, reject };
+      if (mountedRef.current) {
         setState((prev) => ({ ...prev, isSearching: true, progress: null }));
+      }
 
-        workerRef.current.postMessage({
-          type: 'search',
-          state: serializeState(engineState),
-          config,
-        });
-      });
+      const result = await new Promise<{ bestMove: number; simsDone: number; value: number }>(
+        (resolve, reject) => {
+          searchResolverRef.current = { resolve, reject };
+          workerRef.current!.postMessage({
+            type: 'search',
+            state: serializeState(engineState),
+            config,
+          });
+        },
+      );
+
+      // Recycle the worker to fully release WASM memory.
+      // Without this, WASM linear memory grows monotonically and
+      // iOS kills the tab after a few moves.
+      // Skip for random evaluator (no WASM memory issue).
+      if (!modelInfoRef.current?.isRandom) {
+        recycleWorker();
+      }
+
+      return result;
     },
-    [state.isLoaded],
+    [recycleWorker],
   );
 
   const abort = useCallback(() => {
@@ -200,10 +304,10 @@ export function useAIWorker(): UseAIWorkerReturn {
   }, []);
 
   const waitForLoad = useCallback(async (): Promise<boolean> => {
-    if (state.isLoaded) return true;
+    if (isLoadedRef.current) return true;
     if (!loadPromiseRef.current) return false;
     return loadPromiseRef.current;
-  }, [state.isLoaded]);
+  }, []);
 
   return {
     ...state,

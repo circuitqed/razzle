@@ -2,6 +2,7 @@
  * Evaluator interfaces and implementations for Razzle Dazzle MCTS.
  *
  * - OnnxEvaluator: Uses ONNX Runtime Web for neural network inference.
+ * - PureTSEvaluator: Pure TypeScript inference — no WASM, iOS-compatible.
  * - RandomEvaluator: Uniform policy over legal moves, value=0 (for testing).
  */
 
@@ -10,6 +11,7 @@ import { getLegalMoves } from './moves';
 import { stateToTensor } from './tensor';
 import { rotatePolicy180 } from './symmetry';
 import type { EngineState } from './state';
+import type { PureTSModel } from './inference';
 
 export interface Evaluator {
   evaluate(state: EngineState): Promise<{ policy: Float32Array; value: number }>;
@@ -43,8 +45,53 @@ export class OnnxEvaluator implements Evaluator {
     const feeds = { board_input: inputTensor };
 
     const results = await this.session.run(feeds);
-    const logPolicy = results.policy.data as Float32Array;
+
+    // Copy data out of WASM heap BEFORE disposing tensors.
+    // Tensor .data is a view into WASM linear memory — reading after
+    // dispose is use-after-free that corrupts/crashes after a few inferences.
+    const logPolicy = new Float32Array(results.policy.data as Float32Array);
     const value = (results.value.data as Float32Array)[0];
+
+    // Dispose ONNX tensors to free WASM heap memory.
+    inputTensor.dispose();
+    results.policy.dispose();
+    results.value.dispose();
+
+    // Exponentiate log-softmax to get probabilities
+    let policy = new Float32Array(NUM_ACTIONS);
+    for (let i = 0; i < NUM_ACTIONS; i++) {
+      policy[i] = Math.exp(logPolicy[i]);
+    }
+
+    // Rotate policy back for player 1 (the network sees a rotated board)
+    if (state.currentPlayer === 1) {
+      policy = rotatePolicy180(policy);
+    }
+
+    return { policy, value };
+  }
+}
+
+/**
+ * Pure TypeScript evaluator — no WASM, no SharedArrayBuffer.
+ *
+ * Uses PureTSModel for inference (im2col + GEMM in plain JS).
+ * This is the iOS-compatible inference path. On desktop, OnnxEvaluator
+ * is preferred for its WASM SIMD acceleration.
+ */
+export class PureTSEvaluator implements Evaluator {
+  private model: PureTSModel;
+
+  constructor(model: PureTSModel) {
+    this.model = model;
+  }
+
+  async evaluate(
+    state: EngineState,
+  ): Promise<{ policy: Float32Array; value: number }> {
+    const tensor = stateToTensor(state);
+
+    const { policy: logPolicy, value } = this.model.forward(tensor);
 
     // Exponentiate log-softmax to get probabilities
     let policy = new Float32Array(NUM_ACTIONS);

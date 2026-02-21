@@ -1874,18 +1874,25 @@ def join_online_game(
         # Get opponent info
         opponent = None
         if host_user_id:
-            opponent_row = conn.execute("""
-                SELECT u.user_id, u.display_name, p.elo_rating
-                FROM users u
-                LEFT JOIN players p ON p.user_id = u.user_id AND p.player_type = 'human'
-                WHERE u.user_id = ?
-            """, (host_user_id,)).fetchone()
-            if opponent_row:
+            if host_user_id.startswith("anon_"):
                 opponent = {
-                    "user_id": opponent_row["user_id"],
-                    "display_name": opponent_row["display_name"],
-                    "elo_rating": opponent_row["elo_rating"] or 1000.0,
+                    "user_id": host_user_id,
+                    "display_name": "Anonymous",
+                    "elo_rating": 1000.0,
                 }
+            else:
+                opponent_row = conn.execute("""
+                    SELECT u.user_id, u.display_name, p.elo_rating
+                    FROM users u
+                    LEFT JOIN players p ON p.user_id = u.user_id AND p.player_type = 'human'
+                    WHERE u.user_id = ?
+                """, (host_user_id,)).fetchone()
+                if opponent_row:
+                    opponent = {
+                        "user_id": opponent_row["user_id"],
+                        "display_name": opponent_row["display_name"],
+                        "elo_rating": opponent_row["elo_rating"] or 1000.0,
+                    }
 
     return {
         "game_id": game_id,
@@ -1973,15 +1980,17 @@ def get_online_game_status(
         # Opponent info
         opponent = None
         if your_color == 0 and row["player2_user_id"]:
+            opp_id = row["player2_user_id"]
             opponent = {
-                "user_id": row["player2_user_id"],
-                "display_name": row["p2_name"],
+                "user_id": opp_id,
+                "display_name": row["p2_name"] or ("Anonymous" if opp_id.startswith("anon_") else opp_id),
                 "elo_rating": row["p2_elo"] or 1000.0,
             }
         elif your_color == 1 and row["player1_user_id"]:
+            opp_id = row["player1_user_id"]
             opponent = {
-                "user_id": row["player1_user_id"],
-                "display_name": row["p1_name"],
+                "user_id": opp_id,
+                "display_name": row["p1_name"] or ("Anonymous" if opp_id.startswith("anon_") else opp_id),
                 "elo_rating": row["p1_elo"] or 1000.0,
             }
 

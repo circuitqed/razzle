@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react';
+import { Component, useEffect, useState, useCallback, useMemo, useRef } from 'react';
+import type { ReactNode, ErrorInfo } from 'react';
 import { BrowserRouter, Routes, Route, useParams, useNavigate } from 'react-router-dom';
 import Board from './components/Board';
 import MoveHistory from './components/MoveHistory';
@@ -15,42 +16,34 @@ import OnlineLobby from './components/OnlineLobby';
 import WaitingForOpponent from './components/WaitingForOpponent';
 import OnlineGame from './components/OnlineGame';
 import EvaluationMeter from './components/EvaluationMeter';
+import NewGameDialog from './components/NewGameDialog';
+import type { NewGameSettings } from './components/NewGameDialog';
 import { useGame } from './hooks/useGame';
 import { setSoundEnabled, isSoundEnabled } from './utils/sounds';
-import { healthCheck, listModels, type ModelInfo } from './api/engine';
+import { listModels, type ModelInfo } from './api/engine';
+import { formatMovesForDisplay } from './utils/replay';
 import * as onlineApi from './api/online';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 
-// Simulation options (powers of 2)
-const SIMULATION_OPTIONS = [
-  { value: 64, label: '64' },
-  { value: 128, label: '128' },
-  { value: 256, label: '256' },
-  { value: 512, label: '512' },
-  { value: 1024, label: '1K' },
-  { value: 2048, label: '2K' },
-  { value: 4096, label: '4K' },
-  { value: 8192, label: '8K' },
-  { value: 16384, label: '16K' },
-  { value: 32768, label: '32K' },
-  { value: 65536, label: '64K' },
-];
-
-type GameMode = 'ai' | 'pvp';
-
 function AppContent() {
-  const [gameMode, setGameMode] = useState<GameMode>('ai');
+  // Game settings (persisted across new games)
+  const [settings, setSettings] = useState<NewGameSettings>({
+    mode: 'ai',
+    model: undefined,
+    simulations: 256,
+    colorChoice: 'random',
+  });
+  const [playerColor, setPlayerColor] = useState(0); // Actual color for current game
+  const [gameGeneration, setGameGeneration] = useState(0); // Bumped to force new game
+
   const [flipBoard, setFlipBoard] = useState(false);
   const [soundOn, setSoundOn] = useState(isSoundEnabled());
-  const [showNewGameConfirm, setShowNewGameConfirm] = useState(false);
   const [showResignConfirm, setShowResignConfirm] = useState(false);
   const [showRules, setShowRules] = useState(false);
-  const [currentModel, setCurrentModel] = useState<string | null>(null);
+  const [showNewGameDialog, setShowNewGameDialog] = useState(false);
 
-  // AI settings
+  // Available models from server
   const [availableModels, setAvailableModels] = useState<ModelInfo[]>([]);
-  const [selectedModel, setSelectedModel] = useState<string | undefined>(undefined); // undefined = latest
-  const [selectedSimulations, setSelectedSimulations] = useState(1024);
 
   // Auth modals
   const [showLoginModal, setShowLoginModal] = useState(false);
@@ -66,9 +59,6 @@ function AppContent() {
   // Training dashboard
   const [showTrainingDashboard, setShowTrainingDashboard] = useState(false);
 
-  // Mobile menu
-  const [showMobileMenu, setShowMobileMenu] = useState(false);
-
   // Online multiplayer
   const [showOnlineLobby, setShowOnlineLobby] = useState(false);
   const [waitingGame, setWaitingGame] = useState<{
@@ -76,13 +66,9 @@ function AppContent() {
     joinCode: string;
     hostColor: number;
   } | null>(null);
-  // Reserved for future use when tracking active online games
-  // const [activeOnlineGame, setActiveOnlineGame] = useState<{
-  //   gameId: string;
-  //   myColor: number;
-  // } | null>(null);
 
   const navigate = useNavigate();
+  const { user } = useAuth();
 
   const toggleSound = () => {
     const newValue = !soundOn;
@@ -99,111 +85,170 @@ function AppContent() {
     aiModelLoading,
     canEndTurn,
     mustPass,
+    isPassing,
     lastMove,
     rawMoves,
     evaluation,
+    viewPly,
+    isViewingHistory,
     startNewGame,
     handleSquareClick,
     handleDragMove,
     endTurn,
     undoMove,
     resign,
-  } = useGame({ vsAI: gameMode === 'ai', aiSimulations: selectedSimulations, aiModel: selectedModel });
+    cancelPass,
+    goForward,
+    goBack,
+    goToStart,
+    goToEnd,
+  } = useGame({
+    vsAI: settings.mode === 'ai',
+    aiSimulations: settings.simulations,
+    aiModel: settings.model,
+    playerColor,
+  });
 
-  // Fetch model info and available models from server
-  const fetchModelInfo = async () => {
+  // Fetch available models from server
+  const fetchModels = useCallback(async () => {
     try {
-      // Fetch available models
       const modelsResponse = await listModels();
       setAvailableModels(modelsResponse.models);
-
-      // Set current model display name
-      if (modelsResponse.current) {
-        const modelName = modelsResponse.current.split('/').pop() || modelsResponse.current;
-        setCurrentModel(modelName);
-      }
     } catch (e) {
-      console.error('Failed to fetch model info:', e);
-      // Fallback to health check
-      try {
-        const health = await healthCheck();
-        if (health.model) {
-          const modelName = health.model.split('/').pop() || health.model;
-          setCurrentModel(modelName);
-        }
-      } catch {
-        // ignore
-      }
+      console.error('Failed to fetch models:', e);
+    }
+  }, []);
+
+  // Auto-start game on mount
+  useEffect(() => {
+    startNewGame();
+    fetchModels();
+  }, []);
+
+  // Resolve color choice for new games
+  const resolveColor = useCallback((choice: NewGameSettings['colorChoice']) => {
+    if (choice === 'random') return Math.random() < 0.5 ? 0 : 1;
+    return choice === 'blue' ? 0 : 1;
+  }, []);
+
+  // Handle new game from dialog
+  const handleStartGame = useCallback((newSettings: NewGameSettings) => {
+    setSettings(newSettings);
+    setShowNewGameDialog(false);
+    const color = newSettings.mode === 'ai' ? resolveColor(newSettings.colorChoice) : 0;
+    setPlayerColor(color);
+    setGameGeneration(g => g + 1); // Force new game even if settings unchanged
+  }, [resolveColor]);
+
+  // Re-start game when generation changes (after dialog)
+  const initialMountRef = useRef(true);
+  useEffect(() => {
+    if (initialMountRef.current) {
+      initialMountRef.current = false;
+      return; // Skip initial mount (handled by the mount effect above)
+    }
+    startNewGame();
+  }, [gameGeneration]);
+
+  // Handle new game button
+  const handleNewGameClick = () => {
+    if (gameState && gameState.status === 'playing' && gameState.ply > 0) {
+      // Game in progress - show dialog (which doubles as confirmation)
+      setShowNewGameDialog(true);
+    } else {
+      setShowNewGameDialog(true);
     }
   };
 
-  // Start a game on mount and when mode changes
-  useEffect(() => {
+  // Quick new game (same settings, new random color if applicable)
+  const handleQuickNewGame = useCallback(() => {
+    if (settings.mode === 'ai') {
+      setPlayerColor(resolveColor(settings.colorChoice));
+    }
     startNewGame();
-    fetchModelInfo();
-  }, [gameMode]);
+    fetchModels();
+  }, [settings, resolveColor, startNewGame, fetchModels]);
 
-  // Auto-flip board in PvP mode based on current player
-  const shouldFlip = gameMode === 'pvp' && flipBoard && gameState?.current_player === 1;
+  // Board flipping: default is player looking up
+  const shouldFlipBoard = useMemo(() => {
+    if (settings.mode === 'pvp') {
+      // In PvP, flip when it's red's turn if auto-flip is on
+      return flipBoard && gameState?.current_player === 1;
+    }
+    // In AI mode, flip if player is red or manual flip
+    const baseFlip = playerColor === 1;
+    return flipBoard ? !baseFlip : baseFlip;
+  }, [settings.mode, flipBoard, gameState?.current_player, playerColor]);
 
-  // Get winner text based on mode
+  // Player names
+  const playerName = useMemo(() => {
+    if (settings.mode === 'ai') {
+      return user?.display_name || user?.username || 'You';
+    }
+    return 'Blue';
+  }, [settings.mode, user]);
+
+  const opponentName = useMemo(() => {
+    if (settings.mode === 'ai') {
+      let modelName: string;
+      if (settings.model) {
+        modelName = settings.model.split('/').pop()?.replace('.pt', '') || 'AI';
+      } else {
+        // Resolve "latest" to the actual model name from available models
+        const latest = availableModels.find(m => m.name !== 'random_weights');
+        modelName = latest ? latest.name.replace('.pt', '') : 'AI';
+      }
+      return `${modelName} - ${settings.simulations} sims`;
+    }
+    return 'Red';
+  }, [settings.mode, settings.model, settings.simulations, availableModels]);
+
+  // Labels positioned relative to board orientation
+  // In AI mode, human is always at the bottom (shouldFlipBoard ensures this)
+  // In PvP mode, names follow the flip
+  const bottomName = settings.mode === 'ai' ? playerName : (shouldFlipBoard ? 'Red' : 'Blue');
+  const topName = settings.mode === 'ai' ? opponentName : (shouldFlipBoard ? 'Blue' : 'Red');
+
+  // Winner text
   const getWinnerText = () => {
     if (!gameState || gameState.winner === null) return '';
-    if (gameMode === 'ai') {
-      return gameState.winner === 0 ? 'You Win!' : 'AI Wins!';
+    if (settings.mode === 'ai') {
+      return gameState.winner === playerColor ? 'You Win!' : `${opponentName} Wins!`;
     }
     return gameState.winner === 0 ? 'Blue Wins!' : 'Red Wins!';
   };
 
-  // Handle mode change - start new game with new mode
-  const handleModeChange = (mode: GameMode) => {
-    if (mode !== gameMode) {
-      setGameMode(mode);
-      // Game will restart on next render with new mode
+  // Turn indicator text (consolidated with AI thinking)
+  const turnIndicator = useMemo(() => {
+    if (!gameState) return null;
+    if (gameState.status === 'finished') return null;
+
+    const isPlayerTurn = settings.mode !== 'ai' || gameState.current_player === playerColor;
+    const color = gameState.current_player === 0 ? 'Blue' : 'Red';
+    const colorClass = gameState.current_player === 0 ? 'bg-blue-500' : 'bg-red-500';
+
+    let text = `${color}'s Turn`;
+    if (settings.mode === 'ai') {
+      text = isPlayerTurn ? 'Your Turn' : `${opponentName}`;
     }
-  };
 
-  // Start new game with current mode
-  const handleNewGame = () => {
-    // Show confirmation if game is in progress (more than 1 ply)
-    if (gameState && gameState.status === 'playing' && gameState.ply > 0) {
-      setShowNewGameConfirm(true);
-    } else {
-      startNewGame();
-      fetchModelInfo();  // Check for new model on new game
-    }
-  };
+    return { text, colorClass, isThinking: aiThinking };
+  }, [gameState, settings.mode, playerColor, opponentName, aiThinking]);
 
-  const confirmNewGame = () => {
-    setShowNewGameConfirm(false);
-    startNewGame();
-    fetchModelInfo();  // Check for new model on new game
-  };
-
-  const cancelNewGame = () => {
-    setShowNewGameConfirm(false);
-  };
+  // Compact move history for inline display
+  const formattedTurns = useMemo(() => {
+    return formatMovesForDisplay(rawMoves);
+  }, [rawMoves]);
 
   // Keyboard shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      // Don't trigger shortcuts when typing in input fields
-      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
-        return;
-      }
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
 
-      // Handle modals
-      if (showNewGameConfirm) {
+      if (showNewGameDialog || showResignConfirm || showRules) {
         if (e.key === 'Escape') {
-          cancelNewGame();
-        } else if (e.key === 'Enter') {
-          confirmNewGame();
-        }
-        return;
-      }
-
-      if (showRules) {
-        if (e.key === 'Escape') {
+          setShowNewGameDialog(false);
+          setShowResignConfirm(false);
           setShowRules(false);
         }
         return;
@@ -211,47 +256,59 @@ function AppContent() {
 
       switch (e.key.toLowerCase()) {
         case 'n':
-          handleNewGame();
+          handleNewGameClick();
           break;
         case 'u':
-          if (gameState && gameState.ply > 0 && !isLoading && !aiThinking) {
-            undoMove();
-          }
+          if (gameState && gameState.ply > 0 && !isLoading && !aiThinking) undoMove();
           break;
         case 'e':
-          if (canEndTurn && !isLoading && !aiThinking) {
-            endTurn();
-          }
+          if (canEndTurn && !isLoading && !aiThinking) endTurn();
           break;
         case 'm':
           toggleSound();
           break;
+        case 'f':
+          setFlipBoard(f => !f);
+          break;
+        case 'arrowleft':
+          e.preventDefault();
+          goBack();
+          break;
+        case 'arrowright':
+          e.preventDefault();
+          goForward();
+          break;
+        case 'home':
+          e.preventDefault();
+          goToStart();
+          break;
+        case 'end':
+          e.preventDefault();
+          goToEnd();
+          break;
         case 'escape':
-          // Close any open modals
           setShowGameBrowser(false);
           setReplayGameId(null);
           setShowAnalysisBoard(false);
           setShowTrainingDashboard(false);
+          if (isViewingHistory) goToEnd();
           break;
         case '?':
         case '/':
           setShowRules(true);
           break;
         case 'b':
-          setShowGameBrowser((prev) => !prev);
-          break;
-        case 'a':
-          setShowAnalysisBoard((prev) => !prev);
+          setShowGameBrowser(prev => !prev);
           break;
         case 't':
-          setShowTrainingDashboard((prev) => !prev);
+          setShowTrainingDashboard(prev => !prev);
           break;
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [gameState, isLoading, aiThinking, canEndTurn, showNewGameConfirm, showRules, handleNewGame, undoMove, endTurn, toggleSound]);
+  }, [gameState, isLoading, aiThinking, canEndTurn, showNewGameDialog, showResignConfirm, showRules, isViewingHistory]);
 
   const handleSelectGameForReplay = (gameId: string) => {
     setShowGameBrowser(false);
@@ -281,37 +338,26 @@ function AppContent() {
     setWaitingGame(null);
   };
 
-
-  // WebSocket connection for waiting game - detect when opponent joins
+  // WebSocket for waiting game
   useEffect(() => {
     if (!waitingGame) return;
-
     const ws = onlineApi.connectOnlineGameWebSocket(waitingGame.gameId, {
-      onPlayerJoined: (data) => {
-        console.log('Opponent joined waiting game:', data);
-        // Navigate to the online game
+      onPlayerJoined: () => {
         setWaitingGame(null);
         navigate(`/online/${waitingGame.gameId}`);
       },
-      onError: (error) => {
-        console.error('WebSocket error:', error);
-      },
-      onClose: () => {
-        console.log('WebSocket closed');
-      },
+      onError: (error) => console.error('WebSocket error:', error),
+      onClose: () => console.log('WebSocket closed'),
     });
-
-    return () => {
-      ws.close();
-    };
+    return () => { ws.close(); };
   }, [waitingGame, navigate]);
 
   return (
     <div className="min-h-screen bg-gray-900 text-white flex flex-col">
       {/* Header bar */}
-      <header className="flex items-center justify-between px-4 py-3 shrink-0">
-        <div className="w-10" /> {/* Spacer for balance */}
-        <h1 className="text-2xl sm:text-3xl font-bold">Razzle Dazzle</h1>
+      <header className="flex items-center justify-between px-4 py-2 shrink-0">
+        <div className="w-20" /> {/* Spacer for balance */}
+        <h1 className="text-xl sm:text-2xl font-bold">Razzle Dazzle</h1>
         <UserMenu
           onOpenLogin={() => setShowLoginModal(true)}
           onOpenRegister={() => setShowRegisterModal(true)}
@@ -319,305 +365,290 @@ function AppContent() {
         />
       </header>
 
-      <main className="flex-1 flex flex-col items-center justify-center p-2 sm:p-4 pb-4">
+      <main className="flex-1 flex flex-col items-center p-2 sm:p-4 pb-4">
 
-      {/* Game mode selector */}
-      <div className="mb-4 flex gap-2">
-        <button
-          onClick={() => handleModeChange('ai')}
-          className={`px-4 py-2 rounded font-medium transition-colors ${
-            gameMode === 'ai'
-              ? 'bg-blue-600 text-white'
-              : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
-          }`}
-        >
-          vs AI
-        </button>
-        <button
-          onClick={() => handleModeChange('pvp')}
-          className={`px-4 py-2 rounded font-medium transition-colors ${
-            gameMode === 'pvp'
-              ? 'bg-purple-600 text-white'
-              : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
-          }`}
-        >
-          2 Player
-        </button>
-        <button
-          onClick={() => setShowOnlineLobby(true)}
-          className="px-4 py-2 rounded font-medium transition-colors bg-green-600 hover:bg-green-700 text-white"
-        >
-          Play Online
-        </button>
-      </div>
+        {error && (
+          <div className="mb-2 px-4 py-1.5 bg-red-600 text-white rounded text-sm">
+            {error}
+          </div>
+        )}
 
-      {/* AI settings */}
-      {gameMode === 'ai' && (
-        <div className="mb-4 flex flex-wrap gap-4 items-end justify-center">
-          <div>
-            <label className="block text-xs text-gray-400 mb-1">Model</label>
-            <div className="flex items-center gap-2">
-              <select
-                value={selectedModel || ''}
-                onChange={(e) => setSelectedModel(e.target.value || undefined)}
-                className="px-3 py-1.5 bg-gray-700 text-white rounded border border-gray-600 text-sm min-w-[140px]"
-              >
-                <option value="">Latest</option>
-                {availableModels.map((model) => (
-                  <option key={model.path} value={model.path}>
-                    {model.name}{model.name !== 'random_weights' && !model.has_onnx ? ' *' : ''}
-                  </option>
-                ))}
-              </select>
-              {aiModelLoading && (
-                <span className="text-xs text-yellow-400 animate-pulse whitespace-nowrap">Loading model...</span>
+        {isLoading && !gameState && (
+          <div className="text-gray-400">Loading...</div>
+        )}
+
+        {gameState && (
+          <>
+            {/* Status line: turn indicator / game over / AI thinking */}
+            <div className="mb-2 text-center h-7 flex items-center justify-center gap-2">
+              {gameState.status === 'finished' && gameState.winner !== null && (
+                <span className="text-xl font-bold text-yellow-400">{getWinnerText()}</span>
+              )}
+              {gameState.status === 'finished' && gameState.winner === null && (
+                <span className="text-xl font-bold text-gray-400">Draw!</span>
+              )}
+              {turnIndicator && gameState.status === 'playing' && (
+                <>
+                  <span className={`inline-block px-3 py-0.5 rounded text-white text-sm font-medium ${turnIndicator.colorClass}`}>
+                    {turnIndicator.text}
+                  </span>
+                  {turnIndicator.isThinking && (
+                    <span className="text-blue-400 text-sm animate-pulse">thinking...</span>
+                  )}
+                  {aiModelLoading && !turnIndicator.isThinking && (
+                    <span className="text-yellow-400 text-xs animate-pulse">loading model...</span>
+                  )}
+                  {mustPass && !aiThinking && (
+                    <span className="text-yellow-400 text-xs">forced pass</span>
+                  )}
+                </>
+              )}
+              {isViewingHistory && (
+                <span className="text-gray-400 text-xs ml-2 sm:hidden">
+                  (move {viewPly}/{rawMoves.length})
+                </span>
               )}
             </div>
-          </div>
-          <div>
-            <label className="block text-xs text-gray-400 mb-1">Simulations</label>
-            <select
-              value={selectedSimulations}
-              onChange={(e) => setSelectedSimulations(Number(e.target.value))}
-              className="px-3 py-1.5 bg-gray-700 text-white rounded border border-gray-600 text-sm"
-            >
-              {SIMULATION_OPTIONS.map((opt) => (
-                <option key={opt.value} value={opt.value}>
-                  {opt.label}
-                </option>
-              ))}
-            </select>
-          </div>
-        </div>
-      )}
 
-      {/* PvP options */}
-      {gameMode === 'pvp' && (
-        <div className="mb-4">
-          <label className="flex items-center gap-2 text-sm text-gray-400 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={flipBoard}
-              onChange={(e) => setFlipBoard(e.target.checked)}
-              className="rounded"
-            />
-            Flip board for Red's turn
-          </label>
-        </div>
-      )}
+            {/* Opponent name above board */}
+            <div className="text-xs text-gray-500 mb-1">{topName}</div>
 
-      {error && (
-        <div className="mb-4 px-4 py-2 bg-red-600 text-white rounded">
-          {error}
-        </div>
-      )}
-
-      {isLoading && !gameState && (
-        <div className="text-gray-400">Loading...</div>
-      )}
-
-      {gameState && (
-        <>
-          {/* Turn indicator */}
-          <div className="mb-2 text-center">
-            <span
-              className={`inline-block px-3 py-1 rounded text-white text-sm font-medium ${
-                gameState.current_player === 0 ? 'bg-blue-500' : 'bg-red-500'
-              }`}
-            >
-              {gameState.current_player === 0 ? 'Blue' : 'Red'}'s Turn
-            </span>
-          </div>
-
-          <div className="flex flex-col sm:flex-row gap-4 items-center sm:items-start w-full max-w-md sm:max-w-none sm:w-auto">
-            <Board
-              board={gameState.board}
-              currentPlayer={gameState.current_player}
-              legalMoves={gameState.legal_moves}
-              selectedSquare={selectedSquare}
-              onSquareClick={handleSquareClick}
-              onDragMove={handleDragMove}
-              touchedMask={gameState.touched_mask}
-              mustPass={mustPass}
-              flipped={shouldFlip}
-              lastMove={lastMove}
-            />
-            {/* Evaluation meter - only in AI mode, hidden on mobile */}
-            {gameMode === 'ai' && (
-              <div className="hidden sm:block">
+            {/* Board + eval meter + move history (desktop) row */}
+            <div className="flex gap-2 items-start">
+              <Board
+                board={gameState.board}
+                currentPlayer={gameState.current_player}
+                legalMoves={gameState.legal_moves}
+                selectedSquare={selectedSquare}
+                onSquareClick={handleSquareClick}
+                onDragMove={handleDragMove}
+                touchedMask={gameState.touched_mask}
+                mustPass={mustPass}
+                flipped={shouldFlipBoard}
+                lastMove={lastMove}
+                animate={!isViewingHistory}
+              />
+              {/* Eval meter - AI mode only, right of board */}
+              {settings.mode === 'ai' && (
                 <EvaluationMeter value={evaluation} />
+              )}
+              {/* Desktop move history panel */}
+              <div className="hidden sm:block">
+                <MoveHistory moves={rawMoves} />
               </div>
-            )}
-            <div className="hidden sm:block">
-              <MoveHistory moves={rawMoves} />
             </div>
-          </div>
 
-          {/* Game status - fixed height to prevent layout shift */}
-          <div className="mt-4 text-center h-8 flex items-center justify-center">
-            {gameState.status === 'finished' && gameState.winner !== null && (
-              <div className="text-2xl font-bold text-yellow-400">
-                {getWinnerText()}
-              </div>
-            )}
-            {(gameState.status === 'draw' || (gameState.status === 'finished' && gameState.winner === null)) && (
-              <div className="text-2xl font-bold text-gray-400">
-                Draw!
-              </div>
-            )}
-            {aiThinking && (
-              <div className="text-blue-400 animate-pulse">
-                AI is thinking...
-              </div>
-            )}
-            {mustPass && !aiThinking && gameState.status === 'playing' && (
-              <div className="text-yellow-400 animate-pulse">
-                Forced to pass! Opponent moved adjacent to your ball.
-              </div>
-            )}
-          </div>
+            {/* Player name below board */}
+            <div className="text-xs text-gray-500 mt-1">{bottomName}</div>
 
-          {/* Controls - Primary row (always visible) */}
-          <div className="mt-4 flex flex-wrap justify-center gap-2">
-            {/* New Game - only show when game hasn't started or is finished */}
-            {(gameState.ply === 0 || gameState.status === 'finished') && (
+            {/* Desktop: navigation buttons below board */}
+            <div className="hidden sm:flex items-center gap-2 mt-2 justify-center">
               <button
-                onClick={handleNewGame}
+                onClick={goToStart}
+                disabled={rawMoves.length === 0}
+                className="px-2 py-1 text-sm bg-gray-700 hover:bg-gray-600 disabled:bg-gray-800 disabled:text-gray-600 rounded transition-colors"
+                title="Go to start (Home)"
+              >
+                {'\u{25C0}\u{25C0}'}
+              </button>
+              <button
+                onClick={goBack}
+                disabled={rawMoves.length === 0 && viewPly === null}
+                className="px-2 py-1 text-sm bg-gray-700 hover:bg-gray-600 disabled:bg-gray-800 disabled:text-gray-600 rounded transition-colors"
+                title="Back (Left arrow)"
+              >
+                {'\u{25C0}'}
+              </button>
+              {isViewingHistory && (
+                <span className="text-gray-400 text-xs">
+                  move {viewPly}/{rawMoves.length}
+                </span>
+              )}
+              <button
+                onClick={goForward}
+                disabled={viewPly === null}
+                className="px-2 py-1 text-sm bg-gray-700 hover:bg-gray-600 disabled:bg-gray-800 disabled:text-gray-600 rounded transition-colors"
+                title="Forward (Right arrow)"
+              >
+                {'\u{25B6}'}
+              </button>
+              <button
+                onClick={goToEnd}
+                disabled={viewPly === null}
+                className="px-2 py-1 text-sm bg-gray-700 hover:bg-gray-600 disabled:bg-gray-800 disabled:text-gray-600 rounded transition-colors"
+                title="Go to end (End)"
+              >
+                {'\u{25B6}\u{25B6}'}
+              </button>
+            </div>
+
+            {/* Mobile: compact move history bar + navigation */}
+            <div className="mt-2 w-full max-w-[400px] sm:hidden">
+              <div className="flex items-center gap-1 justify-center">
+                <button
+                  onClick={goToStart}
+                  disabled={rawMoves.length === 0}
+                  className="px-2 py-1 text-sm bg-gray-700 hover:bg-gray-600 disabled:bg-gray-800 disabled:text-gray-600 rounded transition-colors"
+                  title="Go to start (Home)"
+                >
+                  {'\u{25C0}\u{25C0}'}
+                </button>
+                <button
+                  onClick={goBack}
+                  disabled={rawMoves.length === 0 && viewPly === null}
+                  className="px-2 py-1 text-sm bg-gray-700 hover:bg-gray-600 disabled:bg-gray-800 disabled:text-gray-600 rounded transition-colors"
+                  title="Back (Left arrow)"
+                >
+                  {'\u{25C0}'}
+                </button>
+
+                {/* Scrollable move history */}
+                <div className="flex-1 overflow-x-auto whitespace-nowrap bg-gray-800 rounded px-2 py-1 text-xs min-h-[28px] flex items-center gap-1 scrollbar-thin">
+                  {formattedTurns.length === 0 && (
+                    <span className="text-gray-600 italic">No moves</span>
+                  )}
+                  {formattedTurns.map((turn: { blue: string; red: string }, idx: number) => (
+                    <span key={idx} className="inline-flex items-center gap-0.5">
+                      <span className="text-gray-500">{idx + 1}.</span>
+                      {turn.blue && <span className="text-blue-400">{turn.blue}</span>}
+                      {turn.red && <span className="text-red-400">{turn.red}</span>}
+                    </span>
+                  ))}
+                </div>
+
+                <button
+                  onClick={goForward}
+                  disabled={viewPly === null}
+                  className="px-2 py-1 text-sm bg-gray-700 hover:bg-gray-600 disabled:bg-gray-800 disabled:text-gray-600 rounded transition-colors"
+                  title="Forward (Right arrow)"
+                >
+                  {'\u{25B6}'}
+                </button>
+                <button
+                  onClick={goToEnd}
+                  disabled={viewPly === null}
+                  className="px-2 py-1 text-sm bg-gray-700 hover:bg-gray-600 disabled:bg-gray-800 disabled:text-gray-600 rounded transition-colors"
+                  title="Go to end (End)"
+                >
+                  {'\u{25B6}\u{25B6}'}
+                </button>
+              </div>
+            </div>
+
+            {/* Action buttons */}
+            <div className="mt-3 flex flex-wrap justify-center gap-2">
+              {/* Complete Pass / Cancel Pass (during pass chain) */}
+              {isPassing && !isViewingHistory && gameState.status === 'playing' && (
+                <>
+                  <button
+                    onClick={endTurn}
+                    disabled={isLoading || aiThinking || !canEndTurn}
+                    className="px-3 py-2 sm:px-4 bg-green-600 hover:bg-green-700 disabled:bg-gray-600 rounded font-medium transition-colors animate-pulse text-sm sm:text-base"
+                  >
+                    Complete Pass
+                  </button>
+                  <button
+                    onClick={cancelPass}
+                    disabled={isLoading || aiThinking}
+                    className="px-3 py-2 sm:px-4 bg-gray-600 hover:bg-gray-700 rounded font-medium transition-colors text-sm sm:text-base"
+                  >
+                    Cancel Pass
+                  </button>
+                </>
+              )}
+
+              {/* End Turn (non-pass, e.g. forced pass scenario where canEndTurn is true but no pass chain yet) */}
+              {canEndTurn && !isPassing && !isViewingHistory && gameState.status === 'playing' && (
+                <button
+                  onClick={endTurn}
+                  disabled={isLoading || aiThinking}
+                  className="px-3 py-2 sm:px-4 bg-green-600 hover:bg-green-700 disabled:bg-gray-600 rounded font-medium transition-colors animate-pulse text-sm sm:text-base"
+                >
+                  End Turn
+                </button>
+              )}
+
+              {/* New Game */}
+              <button
+                onClick={gameState.status === 'finished' ? handleQuickNewGame : handleNewGameClick}
                 disabled={isLoading}
                 className="px-3 py-2 sm:px-4 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 rounded font-medium transition-colors text-sm sm:text-base"
               >
                 New Game
               </button>
-            )}
-            {/* Resign - only show when game is in progress */}
-            {gameState.ply > 0 && gameState.status === 'playing' && (
-              <button
-                onClick={() => setShowResignConfirm(true)}
-                disabled={isLoading}
-                className="px-3 py-2 sm:px-4 bg-gray-600 hover:bg-red-700 text-gray-300 hover:text-white disabled:bg-gray-600 rounded font-medium transition-colors text-sm sm:text-base"
-              >
-                Resign
-              </button>
-            )}
-            {canEndTurn && (
-              <button
-                onClick={endTurn}
-                disabled={isLoading || aiThinking}
-                className="px-3 py-2 sm:px-4 bg-green-600 hover:bg-green-700 disabled:bg-gray-600 rounded font-medium transition-colors animate-pulse text-sm sm:text-base"
-              >
-                End Turn
-              </button>
-            )}
-            {/* Undo - only for AI games (local PvP on same device is OK too) */}
-            {gameMode !== 'pvp' && (
-              <button
-                onClick={undoMove}
-                disabled={isLoading || aiThinking || gameState.ply === 0}
-                className="px-3 py-2 sm:px-4 bg-gray-600 hover:bg-gray-700 disabled:bg-gray-800 disabled:text-gray-500 rounded font-medium transition-colors text-sm sm:text-base"
-              >
-                Undo
-              </button>
-            )}
-            {/* Secondary buttons - hidden on mobile, shown on desktop */}
-            <button
-              onClick={toggleSound}
-              className="hidden sm:block px-4 py-2 bg-gray-600 hover:bg-gray-700 rounded font-medium transition-colors"
-              title={soundOn ? 'Mute sounds' : 'Enable sounds'}
-            >
-              {soundOn ? '🔊' : '🔇'}
-            </button>
-            <button
-              onClick={() => setShowRules(true)}
-              className="hidden sm:block px-4 py-2 bg-gray-600 hover:bg-gray-700 rounded font-medium transition-colors"
-              title="Show rules"
-            >
-              ?
-            </button>
-            <button
-              onClick={() => setShowGameBrowser(true)}
-              className="hidden sm:block px-4 py-2 bg-gray-600 hover:bg-gray-700 rounded font-medium transition-colors"
-              title="Game History (B)"
-            >
-              📜
-            </button>
-            <button
-              onClick={() => setShowAnalysisBoard(true)}
-              className="hidden sm:block px-4 py-2 bg-orange-600 hover:bg-orange-700 rounded font-medium transition-colors"
-              title="Analysis Board (A)"
-            >
-              🔬
-            </button>
-            {/* Mobile overflow menu */}
-            <div className="relative sm:hidden">
-              <button
-                onClick={() => setShowMobileMenu(!showMobileMenu)}
-                className="px-3 py-2 bg-gray-600 hover:bg-gray-700 rounded font-medium transition-colors"
-              >
-                ⋯
-              </button>
-              {showMobileMenu && (
-                <div className="absolute right-0 bottom-full mb-2 bg-gray-800 rounded-lg shadow-lg py-1 min-w-[140px] z-50">
-                  <button
-                    onClick={() => { toggleSound(); setShowMobileMenu(false); }}
-                    className="w-full px-4 py-2 text-left hover:bg-gray-700 flex items-center gap-2"
-                  >
-                    {soundOn ? '🔊' : '🔇'} Sound
-                  </button>
-                  <button
-                    onClick={() => { setShowRules(true); setShowMobileMenu(false); }}
-                    className="w-full px-4 py-2 text-left hover:bg-gray-700 flex items-center gap-2"
-                  >
-                    ? Rules
-                  </button>
-                  <button
-                    onClick={() => { setShowGameBrowser(true); setShowMobileMenu(false); }}
-                    className="w-full px-4 py-2 text-left hover:bg-gray-700 flex items-center gap-2"
-                  >
-                    📜 History
-                  </button>
-                  <button
-                    onClick={() => { setShowAnalysisBoard(true); setShowMobileMenu(false); }}
-                    className="w-full px-4 py-2 text-left hover:bg-gray-700 flex items-center gap-2"
-                  >
-                    🔬 Analysis
-                  </button>
-                </div>
+
+              {/* Resign - only during active game */}
+              {gameState.ply > 0 && gameState.status === 'playing' && !isPassing && !isViewingHistory && (
+                <button
+                  onClick={() => setShowResignConfirm(true)}
+                  disabled={isLoading}
+                  className="px-3 py-2 sm:px-4 bg-gray-600 hover:bg-red-700 text-gray-300 hover:text-white disabled:bg-gray-600 rounded font-medium transition-colors text-sm sm:text-base"
+                >
+                  Resign
+                </button>
               )}
+
+              {/* Undo - not during pass */}
+              {settings.mode === 'ai' && !isPassing && !isViewingHistory && (
+                <button
+                  onClick={undoMove}
+                  disabled={isLoading || aiThinking || gameState.ply === 0}
+                  className="px-3 py-2 sm:px-4 bg-gray-600 hover:bg-gray-700 disabled:bg-gray-800 disabled:text-gray-500 rounded font-medium transition-colors text-sm sm:text-base"
+                >
+                  Undo
+                </button>
+              )}
+
+              {/* Sound toggle */}
+              <button
+                onClick={toggleSound}
+                className="px-3 py-2 bg-gray-600 hover:bg-gray-700 rounded font-medium transition-colors text-sm"
+                title={soundOn ? 'Mute (M)' : 'Unmute (M)'}
+              >
+                {soundOn ? '\u{1F50A}' : '\u{1F507}'}
+              </button>
+
+              {/* Flip board */}
+              <button
+                onClick={() => setFlipBoard(f => !f)}
+                className="px-3 py-2 bg-gray-600 hover:bg-gray-700 rounded font-medium transition-colors text-sm"
+                title="Flip board (F)"
+              >
+                {'\u{21C5}'}
+              </button>
+
+              {/* Rules */}
+              <button
+                onClick={() => setShowRules(true)}
+                className="px-3 py-2 bg-gray-600 hover:bg-gray-700 rounded font-medium transition-colors text-sm"
+                title="Rules (?)"
+              >
+                ?
+              </button>
             </div>
-          </div>
+          </>
+        )}
 
-          {/* Game info */}
-          <div className="mt-4 text-sm text-gray-400 text-center">
-            <span>Ply: {gameState.ply}</span>
-            {gameMode === 'ai' && (
-              <span className="ml-4 text-gray-500">
-                {selectedModel ? selectedModel.split('/').pop() : (currentModel || 'Latest')} @ {selectedSimulations} sims
-              </span>
-            )}
-          </div>
-        </>
-      )}
-
-      {/* Instructions */}
-      <div className="mt-8 text-sm text-gray-500 max-w-md text-center">
-        <p>Click a piece to select it, then click a highlighted square to move or pass.</p>
-        <p className="mt-1">After passing, click "End Turn" to finish your turn.</p>
-        <p className="mt-1">Blue aims for the top, Red aims for the bottom.</p>
-        <p className="mt-2 text-xs hidden sm:block">
-          Shortcuts: N=New Game, U=Undo, E=End Turn, M=Mute, B=Browse, A=Analysis, T=Training
-        </p>
-      </div>
+        {/* Instructions - collapsed on mobile */}
+        <div className="mt-4 text-xs text-gray-600 max-w-md text-center hidden sm:block">
+          <p>Click a piece to select, then click a destination. After passing, click "Complete Pass".</p>
+          <p className="mt-1">
+            Keys: N=New Game, U=Undo, E=End Turn, F=Flip, M=Mute, ?=Rules, {'\u{2190}\u{2192}'}=History
+          </p>
+        </div>
       </main>
 
-      {/* Confirm New Game Dialog */}
-      <ConfirmDialog
-        isOpen={showNewGameConfirm}
-        title="Start New Game?"
-        message="Your current game will be lost. Are you sure you want to start a new game?"
-        confirmText="New Game"
-        cancelText="Cancel"
-        onConfirm={confirmNewGame}
-        onCancel={cancelNewGame}
+      {/* New Game Dialog */}
+      <NewGameDialog
+        isOpen={showNewGameDialog}
+        onClose={() => setShowNewGameDialog(false)}
+        onStartGame={handleStartGame}
+        onPlayOnline={() => {
+          setShowNewGameDialog(false);
+          setShowOnlineLobby(true);
+        }}
+        availableModels={availableModels}
+        currentSettings={settings}
       />
 
       {/* Confirm Resign Dialog */}
@@ -690,10 +721,6 @@ function AppContent() {
         onClose={() => setShowOnlineLobby(false)}
         onGameCreated={handleGameCreated}
         onGameJoined={handleGameJoined}
-        onOpenLogin={() => {
-          setShowOnlineLobby(false);
-          setShowLoginModal(true);
-        }}
       />
 
       {/* Waiting for Opponent */}
@@ -739,19 +766,11 @@ function OnlineGamePage() {
 function JoinGamePage() {
   const { code } = useParams<{ code: string }>();
   const navigate = useNavigate();
-  const { user } = useAuth();
   const [error, setError] = useState<string | null>(null);
   const [isJoining, setIsJoining] = useState(false);
 
   useEffect(() => {
     if (!code) {
-      navigate('/');
-      return;
-    }
-
-    if (!user) {
-      // Store the code and redirect to login
-      sessionStorage.setItem('pendingJoinCode', code);
       navigate('/');
       return;
     }
@@ -767,7 +786,6 @@ function JoinGamePage() {
         } else {
           setError('Failed to join game');
         }
-        // Redirect to home after showing error
         setTimeout(() => navigate('/'), 3000);
       } finally {
         setIsJoining(false);
@@ -775,7 +793,7 @@ function JoinGamePage() {
     };
 
     joinGame();
-  }, [code, user, navigate]);
+  }, [code, navigate]);
 
   return (
     <div className="min-h-screen bg-gray-900 text-white flex flex-col items-center justify-center p-4">
@@ -792,32 +810,58 @@ function JoinGamePage() {
           <p className="text-gray-400">Redirecting to home...</p>
         </div>
       )}
-      {!user && !isJoining && (
-        <div className="text-center">
-          <p className="text-yellow-400 mb-4">Please log in to join the game.</p>
-          <p className="text-gray-400">Redirecting to home...</p>
-        </div>
-      )}
     </div>
   );
 }
 
-// Need to wrap AppContent with navigation hooks
+// Error boundary to prevent white-screen crashes
+class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
+  state = { error: null as Error | null };
+
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    console.error('[ErrorBoundary]', error, info.componentStack);
+  }
+
+  render() {
+    if (this.state.error) {
+      return (
+        <div className="min-h-screen bg-gray-900 text-white flex flex-col items-center justify-center p-4">
+          <h1 className="text-2xl font-bold mb-4">Something went wrong</h1>
+          <p className="text-gray-400 mb-4 text-center max-w-md">{this.state.error.message}</p>
+          <button
+            onClick={() => { this.setState({ error: null }); window.location.reload(); }}
+            className="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded font-medium"
+          >
+            Reload
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 function AppContentWrapper() {
   return <AppContent />;
 }
 
 export default function App() {
   return (
-    <BrowserRouter>
-      <AuthProvider>
-        <Routes>
-          <Route path="/" element={<AppContentWrapper />} />
-          <Route path="/dashboard" element={<TrainingDashboardPage />} />
-          <Route path="/online/:gameId" element={<OnlineGamePage />} />
-          <Route path="/join/:code" element={<JoinGamePage />} />
-        </Routes>
-      </AuthProvider>
-    </BrowserRouter>
+    <ErrorBoundary>
+      <BrowserRouter>
+        <AuthProvider>
+          <Routes>
+            <Route path="/" element={<AppContentWrapper />} />
+            <Route path="/dashboard" element={<TrainingDashboardPage />} />
+            <Route path="/online/:gameId" element={<OnlineGamePage />} />
+            <Route path="/join/:code" element={<JoinGamePage />} />
+          </Routes>
+        </AuthProvider>
+      </BrowserRouter>
+    </ErrorBoundary>
   );
 }

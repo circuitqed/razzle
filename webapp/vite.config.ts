@@ -8,7 +8,8 @@ export default defineConfig({
     viteStaticCopy({
       targets: [
         {
-          src: 'node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.*',
+          // Copy all WASM variants so ONNX Runtime can pick the best one for the device
+          src: 'node_modules/onnxruntime-web/dist/ort-wasm*',
           dest: '.',
         },
       ],

@@ -2,12 +2,20 @@
  * Evaluation Meter component.
  * Displays AI's evaluation of the position as a vertical bar.
  * Red (top) = good for AI, Blue (bottom) = good for player.
+ *
+ * Uses self-stretch to match the board SVG height, then excludes
+ * the bottom label area (3.4% of total) so the bar aligns with
+ * just the board squares.
  */
 
 interface EvaluationMeterProps {
   /** Evaluation from player's perspective: +1 = player winning, -1 = AI winning */
   value: number | null;
 }
+
+// The board SVG viewBox is 414 tall (400 squares + 14 label padding).
+// The bar should span only the squares portion = 400/414 ≈ 96.6%.
+const LABEL_BOTTOM_PCT = 3.4; // 14/414 * 100
 
 export default function EvaluationMeter({ value }: EvaluationMeterProps) {
   // Indicator position as percentage from top
@@ -22,13 +30,13 @@ export default function EvaluationMeter({ value }: EvaluationMeterProps) {
   const redWinning = value !== null && value < 0;
 
   return (
-    <div className="flex flex-col items-center gap-1">
-      {/* Label */}
-      <div className="text-xs text-gray-500 hidden sm:block">Eval</div>
-
+    <div
+      className="self-stretch flex flex-col items-center"
+      style={{ paddingBottom: `${LABEL_BOTTOM_PCT}%` }}
+    >
       {/* Meter container - gradient from red (top) to blue (bottom) */}
       <div
-        className="relative w-3 h-64 bg-gradient-to-b from-red-600 via-gray-500 to-blue-600 rounded-full overflow-hidden"
+        className="relative w-3 flex-1 bg-gradient-to-b from-red-600 via-gray-500 to-blue-600 rounded-full overflow-hidden"
         title={value !== null ? `Evaluation: ${value > 0 ? '+' : ''}${(value * 100).toFixed(0)}%` : 'No evaluation yet'}
       >
         {/* Darkened overlay on the losing side */}
@@ -59,7 +67,7 @@ export default function EvaluationMeter({ value }: EvaluationMeterProps) {
 
       {/* Numeric value shown below */}
       {value !== null && (
-        <div className="text-xs text-gray-400 tabular-nums">
+        <div className="text-xs text-gray-400 tabular-nums mt-1">
           {value > 0 ? '+' : ''}{(value * 100).toFixed(0)}%
         </div>
       )}

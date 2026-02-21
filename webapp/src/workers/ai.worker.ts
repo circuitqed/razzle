@@ -1,31 +1,101 @@
 /**
  * Web Worker for client-side AI computation.
  *
- * Handles ONNX model loading and MCTS search off the main thread.
+ * Handles model loading and MCTS search off the main thread.
  * BigInt values are serialized as strings in messages (BigInt can't cross postMessage).
  *
- * GPU acceleration: uses WebGPU when available, falls back to WASM.
- * WebGPU is fastest (direct GPU compute shaders), WASM is the CPU fallback.
+ * Backend selection:
+ * - iOS: Pure TypeScript inference (no WASM, no SharedArrayBuffer)
+ * - Desktop with WebGPU: ONNX Runtime with WebGPU backend
+ * - Desktop fallback: ONNX Runtime with WASM backend
  */
 
-// Import 'all' bundle to get WebGPU + WASM backends.
-// We detect WebGPU availability before trying it to avoid poisoning initWasm().
-import * as ort from 'onnxruntime-web/all';
-import { OnnxEvaluator, RandomEvaluator } from '../engine/evaluator';
+import { OnnxEvaluator, PureTSEvaluator, RandomEvaluator } from '../engine/evaluator';
+import { createModelFromOnnx } from '../engine/inference';
 import { search, type MCTSConfig, DEFAULT_CONFIG } from '../engine/mcts';
 import type { EngineState } from '../engine/state';
 import { getCachedModel, cacheModel } from '../engine/modelCache';
 
-// Make ort available globally for the evaluator
-(self as unknown as Record<string, unknown>).ort = ort;
+// ONNX Runtime is loaded dynamically to handle import failures gracefully
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let ort: any = null;
 
-// Tell ONNX Runtime where to find WASM files (copied to root by vite-plugin-static-copy)
-ort.env.wasm.wasmPaths = '/';
-
-let session: ort.InferenceSession | null = null;
-let evaluator: OnnxEvaluator | RandomEvaluator | null = null;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let session: any = null;
+let evaluator: OnnxEvaluator | PureTSEvaluator | RandomEvaluator | null = null;
 let abortFlag = { aborted: false };
 let activeBackend: string = 'wasm';
+let ortLoadFailed = false;
+
+/** Detect iOS/iPadOS (all browsers on iOS use WebKit) */
+const isIOS = /iPhone|iPad|iPod/i.test(navigator.userAgent) ||
+  (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+
+/**
+ * Check if WebGPU is actually usable (not just present in the API).
+ * On iOS, navigator.gpu exists but WebGPU inference in Workers crashes the process.
+ */
+async function isWebGPUUsable(): Promise<boolean> {
+  if (isIOS) {
+    console.log('[ai.worker] Skipping WebGPU on iOS — using WASM backend');
+    return false;
+  }
+  if (typeof navigator === 'undefined' || !('gpu' in navigator)) return false;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const gpu = (navigator as any).gpu;
+    const adapter = await gpu.requestAdapter();
+    return adapter !== null;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Dynamically load ONNX Runtime.
+ * On platforms with working WebGPU, loads the 'all' bundle (WebGPU + WASM).
+ * Otherwise, loads the base WASM-only bundle.
+ */
+async function ensureOrt(needsWebGPU: boolean): Promise<boolean> {
+  if (ort) return true;
+  if (ortLoadFailed) return false;
+
+  if (needsWebGPU) {
+    try {
+      ort = await import('onnxruntime-web/all');
+    } catch {
+      console.warn('[ai.worker] Full ONNX bundle failed, trying WASM-only');
+      needsWebGPU = false; // fall through to WASM-only
+    }
+  }
+
+  if (!ort) {
+    try {
+      ort = await import('onnxruntime-web');
+    } catch (err) {
+      console.error('[ai.worker] Failed to load ONNX Runtime:', err);
+      ortLoadFailed = true;
+      return false;
+    }
+  }
+
+  // Make ort available globally for the evaluator
+  (self as unknown as Record<string, unknown>).ort = ort;
+
+  // Tell ONNX Runtime where to find WASM files (copied to root by vite-plugin-static-copy)
+  ort.env.wasm.wasmPaths = '/';
+
+  // On iOS, limit WASM threads to reduce memory pressure.
+  // Default is navigator.hardwareConcurrency (6 on iPhone 15) which spawns
+  // 5 pthread workers + the AI worker = 7 JS contexts with shared memory.
+  // With numThreads=2, we get: AI worker + 1 pthread = 3 contexts total.
+  if (isIOS) {
+    ort.env.wasm.numThreads = 2;
+    console.log('[ai.worker] iOS: limiting WASM threads to 2');
+  }
+
+  return true;
+}
 
 // Types for messages to/from worker
 interface LoadMessage {
@@ -68,6 +138,86 @@ function deserializeState(s: SerializedEngineState): EngineState {
   };
 }
 
+/**
+ * Download (or load from cache) the ONNX model file.
+ */
+async function getModelBuffer(msg: LoadMessage): Promise<ArrayBuffer> {
+  let modelBuffer = await getCachedModel(msg.modelVersion);
+
+  if (!modelBuffer) {
+    self.postMessage({ type: 'loading_progress', stage: 'downloading' });
+    const response = await fetch(msg.modelUrl);
+    if (!response.ok) {
+      throw new Error(`Failed to download model: ${response.status}`);
+    }
+    modelBuffer = await response.arrayBuffer();
+    await cacheModel(msg.modelVersion, modelBuffer);
+  }
+
+  return modelBuffer;
+}
+
+/**
+ * Load model using pure TypeScript inference (no WASM).
+ * Parses ONNX protobuf for weight tensors and runs inference in JS.
+ */
+async function loadPureTS(msg: LoadMessage): Promise<void> {
+  const modelBuffer = await getModelBuffer(msg);
+
+  self.postMessage({ type: 'loading_progress', stage: 'initializing' });
+  const t0 = performance.now();
+  const model = createModelFromOnnx(modelBuffer);
+  const elapsed = ((performance.now() - t0)).toFixed(0);
+  console.log(`[ai.worker] Pure TS model created in ${elapsed}ms:`, model.config);
+
+  evaluator = new PureTSEvaluator(model);
+  activeBackend = 'pure-ts';
+  self.postMessage({ type: 'loaded', success: true, isRandom: false, backend: activeBackend });
+}
+
+/**
+ * Load model using ONNX Runtime (WASM or WebGPU).
+ */
+async function loadOnnxRuntime(msg: LoadMessage): Promise<void> {
+  const useWebGPU = await isWebGPUUsable();
+  console.log('[ai.worker] WebGPU usable:', useWebGPU);
+
+  const ortReady = await ensureOrt(useWebGPU);
+  if (!ortReady) {
+    throw new Error('ONNX Runtime not available on this device');
+  }
+
+  const modelBuffer = await getModelBuffer(msg);
+
+  self.postMessage({ type: 'loading_progress', stage: 'initializing' });
+
+  if (useWebGPU) {
+    try {
+      session = await ort.InferenceSession.create(modelBuffer, {
+        executionProviders: ['webgpu'],
+        graphOptimizationLevel: 'all',
+      });
+      activeBackend = 'webgpu';
+    } catch (gpuErr) {
+      console.warn('[ai.worker] WebGPU session failed, falling back to WASM:', gpuErr);
+      session = await ort.InferenceSession.create(modelBuffer, {
+        executionProviders: ['wasm'],
+        graphOptimizationLevel: 'all',
+      });
+      activeBackend = 'wasm';
+    }
+  } else {
+    session = await ort.InferenceSession.create(modelBuffer, {
+      executionProviders: ['wasm'],
+      graphOptimizationLevel: 'all',
+    });
+    activeBackend = 'wasm';
+  }
+
+  evaluator = new OnnxEvaluator(session!);
+  self.postMessage({ type: 'loaded', success: true, isRandom: false, backend: activeBackend });
+}
+
 async function handleLoad(msg: LoadMessage): Promise<void> {
   try {
     if (msg.useRandom) {
@@ -76,56 +226,16 @@ async function handleLoad(msg: LoadMessage): Promise<void> {
       return;
     }
 
-    // Try IndexedDB cache first
-    let modelBuffer = await getCachedModel(msg.modelVersion);
-
-    if (!modelBuffer) {
-      // Download model
-      self.postMessage({ type: 'loading_progress', stage: 'downloading' });
-      const response = await fetch(msg.modelUrl);
-      if (!response.ok) {
-        throw new Error(`Failed to download model: ${response.status}`);
-      }
-      modelBuffer = await response.arrayBuffer();
-
-      // Cache for next time
-      await cacheModel(msg.modelVersion, modelBuffer);
-    }
-
-    // Create ONNX session — try WebGPU if available, otherwise WASM.
-    // We check navigator.gpu first to avoid trying WebGPU when it's not
-    // supported, which would poison onnxruntime's initWasm() cache and
-    // prevent the WASM fallback from working.
-    self.postMessage({ type: 'loading_progress', stage: 'initializing' });
-
-    const hasWebGPU = typeof navigator !== 'undefined' && 'gpu' in navigator;
-
-    if (hasWebGPU) {
-      try {
-        session = await ort.InferenceSession.create(modelBuffer, {
-          executionProviders: ['webgpu'],
-          graphOptimizationLevel: 'all',
-        });
-        activeBackend = 'webgpu';
-      } catch (gpuErr) {
-        console.warn('[ai.worker] WebGPU failed, falling back to WASM:', gpuErr);
-        session = await ort.InferenceSession.create(modelBuffer, {
-          executionProviders: ['wasm'],
-          graphOptimizationLevel: 'all',
-        });
-        activeBackend = 'wasm';
-      }
+    if (isIOS) {
+      // iOS: use pure TypeScript inference to avoid WASM memory issues.
+      // WASM linear memory only grows (never shrinks), and iOS kills tabs
+      // that exceed memory limits after just a few MCTS searches.
+      console.log('[ai.worker] iOS detected — using pure TypeScript inference');
+      await loadPureTS(msg);
     } else {
-      session = await ort.InferenceSession.create(modelBuffer, {
-        executionProviders: ['wasm'],
-        graphOptimizationLevel: 'all',
-      });
-      activeBackend = 'wasm';
+      // Desktop: use ONNX Runtime for WASM SIMD / WebGPU acceleration
+      await loadOnnxRuntime(msg);
     }
-
-    evaluator = new OnnxEvaluator(session!);
-
-    self.postMessage({ type: 'loaded', success: true, isRandom: false, backend: activeBackend });
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Unknown error loading model';
     self.postMessage({ type: 'loaded', success: false, error: message });
@@ -148,6 +258,9 @@ async function handleSearch(msg: SearchMessage): Promise<void> {
     const state = deserializeState(msg.state);
     const config = { ...DEFAULT_CONFIG, ...msg.config };
 
+    const t0 = performance.now();
+    console.log('[ai.worker] Search starting, sims:', config.numSimulations);
+
     const result = await search(state, evaluator, config, abortFlag, (progress) => {
       self.postMessage({
         type: 'search_progress',
@@ -158,12 +271,21 @@ async function handleSearch(msg: SearchMessage): Promise<void> {
       });
     });
 
+    const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
+    console.log(`[ai.worker] Search done: ${result.simsDone} sims in ${elapsed}s, move=${result.bestMove}, value=${result.value.toFixed(3)}`);
+
+    // Extract scalars before dropping the tree reference.
+    // The MCTS tree holds hundreds of EngineState objects with BigInt bitboards —
+    // clearing the reference immediately lets GC reclaim that memory between moves.
+    const { bestMove, simsDone, value } = result;
+    result.rootNode.children.clear();
+
     self.postMessage({
       type: 'search_result',
       success: true,
-      bestMove: result.bestMove,
-      simsDone: result.simsDone,
-      value: result.value,
+      bestMove,
+      simsDone,
+      value,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Search failed';
@@ -174,6 +296,9 @@ async function handleSearch(msg: SearchMessage): Promise<void> {
     });
   }
 }
+
+// Signal that the worker is alive (even before ONNX loads)
+self.postMessage({ type: 'worker_ready' });
 
 self.onmessage = (event: MessageEvent) => {
   const msg = event.data as LoadMessage | SearchMessage | AbortMessage;

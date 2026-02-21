@@ -6,12 +6,14 @@ import { getOnnxModelInfoByName } from '../api/engine';
 import { logger } from '../utils/logger';
 import { playMoveSound, playPassSound, playEndTurnSound, playWinSound, playLoseSound, playSelectSound } from '../utils/sounds';
 import { useAIWorker } from './useAIWorker';
+import { replayToPosition, getLastMoveAtPosition } from '../utils/replay';
 import type { EngineState } from '../engine/state';
 
 interface UseGameOptions {
   vsAI?: boolean;
   aiSimulations?: number;
   aiModel?: string;  // Model path or 'random_weights'
+  playerColor?: number;  // 0 = blue, 1 = red (only for AI games)
 }
 
 interface MoveRecord {
@@ -34,6 +36,8 @@ interface UseGameReturn {
   aiModelLoading: boolean;
   canEndTurn: boolean;
   mustPass: boolean;
+  /** Whether a pass chain is in progress (ball has been passed at least once) */
+  isPassing: boolean;
   lastMove: LastMove | null;
   moveHistory: MoveRecord[];
   /** Raw move integers including END_TURN (-1) for proper notation display */
@@ -42,12 +46,24 @@ interface UseGameReturn {
   evaluation: number | null;
   /** Client-side AI search progress */
   aiProgress: { simsDone: number; totalSims: number } | null;
+  /** Current ply being viewed (null = live position) */
+  viewPly: number | null;
+  /** Whether we're viewing a historical position */
+  isViewingHistory: boolean;
   startNewGame: () => Promise<void>;
   handleSquareClick: (square: number) => void;
   handleDragMove: (from: number, to: number) => void;
   endTurn: () => Promise<void>;
   undoMove: () => Promise<void>;
   resign: () => Promise<void>;
+  /** Cancel the current pass chain (undo all passes, return to pre-pass state) */
+  cancelPass: () => Promise<void>;
+  /** Navigate to a specific ply in history (view-only) */
+  goToMove: (ply: number) => void;
+  goForward: () => void;
+  goBack: () => void;
+  goToStart: () => void;
+  goToEnd: () => void;
 }
 
 const END_TURN_MOVE = -1;
@@ -66,7 +82,7 @@ function apiStateToEngineState(gs: GameState): EngineState {
 }
 
 export function useGame(options: UseGameOptions = {}): UseGameReturn {
-  const { vsAI = true, aiSimulations = 800, aiModel } = options;
+  const { vsAI = true, aiSimulations = 256, aiModel, playerColor = 0 } = options;
 
   const [gameState, setGameState] = useState<GameState | null>(null);
   const [selectedSquare, setSelectedSquare] = useState<number | null>(null);
@@ -78,6 +94,7 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
   const [rawMoves, setRawMoves] = useState<number[]>([]);
   const [evaluation, setEvaluation] = useState<number | null>(null);
   const [aiProgress, setAiProgress] = useState<{ simsDone: number; totalSims: number } | null>(null);
+  const [viewPly, setViewPly] = useState<number | null>(null);
 
   // Client-side AI worker
   const aiWorker = useAIWorker();
@@ -86,10 +103,22 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
   // Ref to track move-in-progress synchronously (avoids closure staleness)
   const moveInProgress = useRef(false);
 
+  // Track pass chain length for cancelPass
+  const passChainStartRef = useRef<number>(0);
+
+  // Which player the human controls (for AI games)
+  const humanPlayer = vsAI ? playerColor : -1; // -1 means both
+  const aiPlayer = vsAI ? (1 - playerColor) : -1;
+
   // Check if end turn is available
   const canEndTurn = useMemo(() => {
     if (!gameState) return false;
     return gameState.legal_moves.includes(END_TURN_MOVE);
+  }, [gameState]);
+
+  // Whether a pass chain is in progress
+  const isPassing = useMemo(() => {
+    return gameState?.has_passed ?? false;
   }, [gameState]);
 
   // Check if player must pass (forced pass rule - opponent moved adjacent to ball)
@@ -122,6 +151,10 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
     });
   }, [gameState]);
 
+  // History navigation state
+  const isViewingHistory = viewPly !== null;
+  const totalPlies = rawMoves.length;
+
   // Play sound when game ends
   const prevStatusRef = useRef<string | null>(null);
   useEffect(() => {
@@ -131,19 +164,17 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
     prevStatusRef.current = gameState.status;
 
     if (wasPlaying && gameState.status === 'finished' && gameState.winner !== null) {
-      // In AI mode, player is 0 (blue)
       if (vsAI) {
-        if (gameState.winner === 0) {
+        if (gameState.winner === humanPlayer) {
           playWinSound();
         } else {
           playLoseSound();
         }
       } else {
-        // In PvP, just play a neutral end sound (win sound for winner)
         playWinSound();
       }
     }
-  }, [gameState, vsAI]);
+  }, [gameState, vsAI, humanPlayer]);
 
   // Helper to record a move and play sound
   const recordMove = useCallback((move: number, player: Player, isPass: boolean) => {
@@ -164,6 +195,10 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
     }
   }, []);
 
+  // Ref for stable access to aiWorker functions (avoids dependency on aiWorker object)
+  const aiWorkerRef = useRef(aiWorker);
+  aiWorkerRef.current = aiWorker;
+
   // Load client-side AI model reactively when aiModel changes
   useEffect(() => {
     if (!vsAI) return;
@@ -174,11 +209,11 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
     // Skip if already loaded or currently loading this model
     if (loadedModelRef.current === modelKey) return;
 
-    // Mark this model as the target (prevents duplicate loads)
+    // Mark this model as the target (prevents duplicate loads and retries)
     loadedModelRef.current = modelKey;
 
     if (modelKey === 'random_weights') {
-      aiWorker.loadRandomEvaluator();
+      aiWorkerRef.current.loadRandomEvaluator();
       logger.info('[useGame] Loading random evaluator for client-side AI');
       return;
     }
@@ -194,17 +229,15 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
       .then((modelInfo) => {
         // Check we haven't switched models while fetching
         if (loadedModelRef.current !== modelKey) return;
-        aiWorker.loadModel(modelInfo.url, modelInfo.version);
+        aiWorkerRef.current.loadModel(modelInfo.url, modelInfo.version);
         logger.info('[useGame] Loading client-side AI model:', modelInfo.version);
       })
       .catch((err) => {
         logger.info('[useGame] ONNX model not available, using server AI:', err);
-        // Reset so user can retry
-        if (loadedModelRef.current === modelKey) {
-          loadedModelRef.current = null;
-        }
+        // Don't reset loadedModelRef - prevents infinite retry loop on devices
+        // where ONNX isn't supported. Server-side AI will be used as fallback.
       });
-  }, [vsAI, aiModel, aiWorker]);
+  }, [vsAI, aiModel]);
 
   // Start a new game
   const startNewGame = useCallback(async () => {
@@ -215,6 +248,8 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
     setMoveHistory([]);
     setRawMoves([]);
     setEvaluation(null);
+    setViewPly(null);
+    passChainStartRef.current = 0;
 
     try {
       const { game_id } = await api.createGame({
@@ -224,12 +259,19 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
       });
       const state = await api.getGameState(game_id);
       setGameState(state);
+
+      // If human plays as red (player 1), AI needs to move first
+      if (vsAI && aiPlayer === 0 && state.status === 'playing' && state.current_player === 0) {
+        // AI is player 0, needs to move first
+        setIsLoading(false);
+        // Trigger AI move after state is set - handled by the effect below
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to start game');
     } finally {
       setIsLoading(false);
     }
-  }, [vsAI, aiSimulations]);
+  }, [vsAI, aiSimulations, aiPlayer]);
 
   // Handle AI move - loop until AI's turn is complete
   // Uses client-side AI if loaded, falls back to server AI
@@ -241,7 +283,7 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
 
       let currentState = await api.getGameState(gameId);
 
-      while (currentState.status === 'playing' && currentState.current_player === 1) {
+      while (currentState.status === 'playing' && currentState.current_player === aiPlayer) {
         aiMoveCount++;
         if (aiMoveCount > MAX_AI_MOVES) {
           logger.error('[useGame] AI move loop exceeded max iterations');
@@ -250,7 +292,6 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
         }
 
         // Use client-side AI if ready, otherwise fall back to server
-        // Don't wait for model load — use server for fast first response
         const clientReady = aiWorker.isLoaded;
         if (!clientReady && !aiWorker.isLoading) {
           logger.warn('[useGame] Client-side AI not available', {
@@ -281,14 +322,12 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
             currentState = await api.makeMove(gameId, aiMove);
           } catch (clientErr) {
             logger.error('[useGame] Client-side AI failed, falling back to server:', clientErr);
-            // Fall back to server AI
             const aiResponse = await api.getAIMove(gameId, { simulations: aiSimulations, model: aiModel });
             currentState = aiResponse.game_state;
             aiMove = aiResponse.move;
             aiValue = aiResponse.value;
           }
         } else {
-          // Server-side AI
           const aiResponse = await api.getAIMove(gameId, { simulations: aiSimulations, model: aiModel });
           currentState = aiResponse.game_state;
           aiMove = aiResponse.move;
@@ -302,7 +341,7 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
         }
 
         const wasPass = currentState.current_player === prevPlayer;
-        recordMove(aiMove, 1, wasPass);
+        recordMove(aiMove, aiPlayer as Player, wasPass);
 
         logger.info('[useGame] AI move complete', {
           move: aiMove,
@@ -320,13 +359,27 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
       setAiThinking(false);
       setAiProgress(null);
     }
-  }, [aiSimulations, aiModel, recordMove, aiWorker]);
+  }, [aiSimulations, aiModel, aiPlayer, recordMove, aiWorker]);
 
-  // End turn explicitly (after passing)
+  // Trigger AI move when it's AI's turn (e.g., after new game where AI goes first)
+  useEffect(() => {
+    if (!vsAI || !gameState || gameState.status !== 'playing') return;
+    if (aiThinking || isLoading) return;
+    if (gameState.current_player !== aiPlayer) return;
+    // Only trigger if no moves have been made yet and AI goes first,
+    // or after we've returned from a move
+    if (gameState.ply === 0 && aiPlayer === 0) {
+      handleAIMove(gameState.game_id);
+    }
+  }, [vsAI, gameState?.game_id, gameState?.current_player, gameState?.ply, aiPlayer, aiThinking, isLoading]);
+
+  // End turn explicitly (after passing) - "Complete Pass"
   const endTurn = useCallback(async () => {
     logger.info('[useGame] endTurn called:', { gameId: gameState?.game_id, canEndTurn });
     if (!gameState || !canEndTurn) return;
 
+    // Return to live view if viewing history
+    setViewPly(null);
     setIsLoading(true);
     setError(null);
 
@@ -336,10 +389,11 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
       setGameState(newState);
       setSelectedSquare(null);
       setRawMoves(prev => [...prev, END_TURN_MOVE]);
+      passChainStartRef.current = 0;
       playEndTurnSound();
 
       // If vs AI and it's now AI's turn
-      if (vsAI && newState.status === 'playing' && newState.current_player === 1) {
+      if (vsAI && newState.status === 'playing' && newState.current_player === aiPlayer) {
         await handleAIMove(newState.game_id);
       }
     } catch (err) {
@@ -347,12 +401,65 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
     } finally {
       setIsLoading(false);
     }
-  }, [gameState, canEndTurn, vsAI, handleAIMove]);
+  }, [gameState, canEndTurn, vsAI, aiPlayer, handleAIMove]);
+
+  // Cancel the current pass chain
+  const cancelPass = useCallback(async () => {
+    if (!gameState || !isPassing) return;
+
+    setIsLoading(true);
+    setError(null);
+
+    try {
+      // Count how many pass moves we need to undo
+      // Walk backwards from the end of rawMoves until we hit a non-pass move or the start
+      let undoCount = 0;
+      for (let i = rawMoves.length - 1; i >= 0; i--) {
+        const move = rawMoves[i];
+        if (move === END_TURN_MOVE) break; // Shouldn't happen during a pass, but safety
+        undoCount++;
+        // Check if the move before this was also a pass (same player)
+        // We keep undoing until we get back to the knight move state
+      }
+
+      // Undo each pass move
+      let state = gameState;
+      for (let i = 0; i < undoCount; i++) {
+        state = await api.undoMove(state.game_id);
+      }
+
+      setGameState(state);
+      setSelectedSquare(null);
+      setMoveHistory(prev => prev.slice(0, -undoCount));
+      setRawMoves(prev => prev.slice(0, -undoCount));
+      passChainStartRef.current = 0;
+
+      // Restore last move highlight
+      const newRawMoves = rawMoves.slice(0, -undoCount);
+      const lastNonEndTurn = [...newRawMoves].reverse().find(m => m !== END_TURN_MOVE);
+      if (lastNonEndTurn !== undefined) {
+        const { src, dst } = decodeMove(lastNonEndTurn);
+        setLastMove({ from: src, to: dst });
+      } else {
+        setLastMove(null);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Cancel pass failed');
+    } finally {
+      setIsLoading(false);
+    }
+  }, [gameState, isPassing, rawMoves]);
 
   // Handle square click
   const handleSquareClick = useCallback((square: number) => {
     logger.info('[useGame] handleSquareClick:', { square, selectedSquare, gameId: gameState?.game_id, moveInProgress: moveInProgress.current });
     if (!gameState || gameState.status !== 'playing' || aiThinking || isLoading) return;
+
+    // Return to live view if viewing history
+    if (isViewingHistory) {
+      setViewPly(null);
+      return;
+    }
 
     // Use ref for synchronous check to avoid closure staleness race condition
     if (moveInProgress.current) {
@@ -361,7 +468,7 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
     }
 
     // If AI's turn in vs AI mode, ignore clicks
-    if (vsAI && gameState.current_player === 1) return;
+    if (vsAI && gameState.current_player === aiPlayer) return;
 
     const { board, legal_moves, current_player } = gameState;
 
@@ -372,6 +479,44 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
       const mask = BigInt(1) << BigInt(sq);
       return ((pieces | ball) & mask) !== BigInt(0);
     };
+
+    // During a pass chain, lock interaction to valid receivers only
+    if (isPassing && selectedSquare !== null) {
+      const moveEncoded = encodeMove(selectedSquare, square);
+      if (legal_moves.includes(moveEncoded)) {
+        // Valid pass destination - execute it
+        moveInProgress.current = true;
+        setIsLoading(true);
+        setError(null);
+
+        api.makeMove(gameState.game_id, moveEncoded)
+          .then(async (newState) => {
+            setGameState(newState);
+            const wasPass = newState.current_player === current_player;
+            recordMove(moveEncoded, current_player, wasPass);
+
+            if (wasPass) {
+              setSelectedSquare(square);
+            } else {
+              setSelectedSquare(null);
+              passChainStartRef.current = 0;
+              if (vsAI && newState.status === 'playing' && newState.current_player === aiPlayer) {
+                await handleAIMove(newState.game_id);
+              }
+            }
+          })
+          .catch((err) => {
+            logger.error('[useGame] Pass move failed:', err);
+            setError(err instanceof Error ? err.message : 'Move failed');
+          })
+          .finally(() => {
+            moveInProgress.current = false;
+            setIsLoading(false);
+          });
+      }
+      // During pass, ignore all other clicks (no deselect, no selecting other pieces)
+      return;
+    }
 
     // If a piece is selected, check if this is a valid move destination
     if (selectedSquare !== null) {
@@ -400,10 +545,14 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
             if (wasPass) {
               // Keep selection on the new ball position for chaining passes
               setSelectedSquare(square);
+              if (passChainStartRef.current === 0) {
+                passChainStartRef.current = rawMoves.length;
+              }
             } else {
               setSelectedSquare(null);
+              passChainStartRef.current = 0;
               // If vs AI and it's now AI's turn
-              if (vsAI && newState.status === 'playing' && newState.current_player === 1) {
+              if (vsAI && newState.status === 'playing' && newState.current_player === aiPlayer) {
                 await handleAIMove(newState.game_id);
               }
             }
@@ -434,11 +583,14 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
     if (selectedSquare !== null) {
       setSelectedSquare(null);
     }
-  }, [gameState, selectedSquare, vsAI, aiThinking, isLoading, handleAIMove]);
+  }, [gameState, selectedSquare, vsAI, aiPlayer, aiThinking, isLoading, isPassing, isViewingHistory, handleAIMove, rawMoves, recordMove]);
 
   // Undo last move
   const undoMove = useCallback(async () => {
     if (!gameState) return;
+
+    // Return to live view if viewing history
+    setViewPly(null);
 
     setIsLoading(true);
     setError(null);
@@ -448,14 +600,14 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
       let state = await api.undoMove(gameState.game_id);
       setMoveHistory(prev => prev.slice(0, -1)); // Remove last move
       setRawMoves(prev => prev.slice(0, -1)); // Remove from raw moves too
-      if (vsAI && state.current_player === 1) {
+      if (vsAI && state.current_player === aiPlayer) {
         state = await api.undoMove(gameState.game_id);
         setMoveHistory(prev => prev.slice(0, -1)); // Remove AI's move too
         setRawMoves(prev => prev.slice(0, -1));
       }
       setGameState(state);
       // Update lastMove to previous move or null
-      const newHistory = moveHistory.slice(0, vsAI && state.current_player === 0 ? -2 : -1);
+      const newHistory = moveHistory.slice(0, vsAI && state.current_player === humanPlayer ? -2 : -1);
       if (newHistory.length === 0) {
         setLastMove(null);
       } else {
@@ -468,12 +620,16 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
     } finally {
       setIsLoading(false);
     }
-  }, [gameState, vsAI, moveHistory]);
+  }, [gameState, vsAI, aiPlayer, humanPlayer, moveHistory]);
 
   // Handle drag-and-drop move
   const handleDragMove = useCallback((from: number, to: number) => {
     if (!gameState || gameState.status !== 'playing' || aiThinking || isLoading) return;
-    if (vsAI && gameState.current_player === 1) return;
+    if (isViewingHistory) {
+      setViewPly(null);
+      return;
+    }
+    if (vsAI && gameState.current_player === aiPlayer) return;
 
     const moveEncoded = encodeMove(from, to);
     if (!gameState.legal_moves.includes(moveEncoded)) return;
@@ -493,7 +649,7 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
 
         if (wasPass) {
           setSelectedSquare(to);
-        } else if (vsAI && newState.status === 'playing' && newState.current_player === 1) {
+        } else if (vsAI && newState.status === 'playing' && newState.current_player === aiPlayer) {
           await handleAIMove(newState.game_id);
         }
       })
@@ -505,7 +661,7 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
         moveInProgress.current = false;
         setIsLoading(false);
       });
-  }, [gameState, vsAI, aiThinking, isLoading, handleAIMove, recordMove]);
+  }, [gameState, vsAI, aiPlayer, aiThinking, isLoading, isViewingHistory, handleAIMove, recordMove]);
 
   // Resign from the game
   const resign = useCallback(async () => {
@@ -513,9 +669,10 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
 
     setIsLoading(true);
     setError(null);
+    setViewPly(null);
 
     try {
-      const newState = await api.resignGame(gameState.game_id, 0);  // Player 0 (human) resigns
+      const newState = await api.resignGame(gameState.game_id, humanPlayer === -1 ? 0 : humanPlayer);
       setGameState(newState);
       setSelectedSquare(null);
       playLoseSound();
@@ -524,27 +681,91 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
     } finally {
       setIsLoading(false);
     }
-  }, [gameState]);
+  }, [gameState, humanPlayer]);
+
+  // History navigation (view-only)
+  const goToMove = useCallback((ply: number) => {
+    const clamped = Math.max(0, Math.min(totalPlies, ply));
+    if (clamped === totalPlies) {
+      setViewPly(null); // Back to live
+    } else {
+      setViewPly(clamped);
+    }
+  }, [totalPlies]);
+
+  const goForward = useCallback(() => {
+    if (viewPly === null) return; // Already at live
+    goToMove(viewPly + 1);
+  }, [viewPly, goToMove]);
+
+  const goBack = useCallback(() => {
+    const current = viewPly ?? totalPlies;
+    goToMove(current - 1);
+  }, [viewPly, totalPlies, goToMove]);
+
+  const goToStart = useCallback(() => {
+    goToMove(0);
+  }, [goToMove]);
+
+  const goToEnd = useCallback(() => {
+    setViewPly(null);
+  }, []);
+
+  // Compute what to display when viewing history
+  const displayState = useMemo(() => {
+    if (viewPly === null || !gameState) return null;
+    return replayToPosition(rawMoves, viewPly);
+  }, [viewPly, rawMoves, gameState]);
+
+  const displayLastMove = useMemo(() => {
+    if (viewPly === null) return lastMove;
+    return getLastMoveAtPosition(rawMoves, viewPly);
+  }, [viewPly, rawMoves, lastMove]);
+
+  // Build the effective game state for rendering
+  const effectiveGameState = useMemo(() => {
+    if (!gameState) return null;
+    if (!displayState) return gameState;
+    // Override visual state with history position
+    return {
+      ...gameState,
+      board: displayState.board,
+      current_player: displayState.currentPlayer as Player,
+      touched_mask: displayState.touchedMask,
+      has_passed: displayState.hasPassed,
+      ply: displayState.ply,
+      legal_moves: [], // No moves while viewing history
+    };
+  }, [gameState, displayState]);
 
   return {
-    gameState,
-    selectedSquare,
+    gameState: effectiveGameState,
+    selectedSquare: isViewingHistory ? null : selectedSquare,
     isLoading,
     error,
     aiThinking,
     aiModelLoading: aiWorker.isLoading,
     canEndTurn,
     mustPass,
-    lastMove,
+    isPassing,
+    lastMove: displayLastMove,
     moveHistory,
     rawMoves,
     evaluation,
     aiProgress,
+    viewPly,
+    isViewingHistory,
     startNewGame,
     handleSquareClick,
     handleDragMove,
     endTurn,
     undoMove,
     resign,
+    cancelPass,
+    goToMove,
+    goForward,
+    goBack,
+    goToStart,
+    goToEnd,
   };
 }

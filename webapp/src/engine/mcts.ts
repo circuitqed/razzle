@@ -29,7 +29,7 @@ export interface MCTSConfig {
 }
 
 export const DEFAULT_CONFIG: MCTSConfig = {
-  numSimulations: 800,
+  numSimulations: 256,
   cPuct: 1.5,
   temperature: 0,
   earlyTermination: true,

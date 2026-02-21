@@ -179,6 +179,7 @@ JWT_SECRET = os.environ.get("JWT_SECRET", secrets.token_hex(32))
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRY_HOURS = 24
 AUTH_COOKIE_NAME = "razzle_auth"
+ANON_COOKIE_NAME = "razzle_anon"
 
 
 class TrainingIterationData(BaseModel):
@@ -853,6 +854,37 @@ async def require_auth(
     if not user:
         raise HTTPException(status_code=401, detail="Not authenticated")
     return user
+
+
+async def get_user_or_anon(
+    request: Request,
+    response: Response,
+    auth_cookie: Optional[str] = Cookie(None, alias=AUTH_COOKIE_NAME),
+    anon_cookie: Optional[str] = Cookie(None, alias=ANON_COOKIE_NAME),
+) -> dict:
+    """Get authenticated user, or create/retrieve anonymous session."""
+    # Try real auth first
+    user = await get_current_user(request, auth_cookie)
+    if user:
+        return user
+
+    # Fall back to anonymous session
+    anon_id = anon_cookie
+    if not anon_id:
+        anon_id = secrets.token_hex(16)
+        response.set_cookie(
+            ANON_COOKIE_NAME, anon_id,
+            max_age=86400 * 30,  # 30 days
+            httponly=True,
+            samesite="lax",
+        )
+
+    return {
+        "user_id": f"anon_{anon_id}",
+        "username": "anonymous",
+        "display_name": "Anonymous",
+        "is_anonymous": True,
+    }
 
 
 # --- Auth Endpoints ---
@@ -2169,12 +2201,13 @@ class MyOnlineGamesResponse(BaseModel):
 @app.post("/games/online", response_model=CreateOnlineGameResponse)
 async def create_online_game(
     request: CreateOnlineGameRequest,
-    user: dict = Depends(require_auth)
+    user: dict = Depends(get_user_or_anon)
 ):
     """
     Create a new online game and get a shareable join code.
 
-    Requires authentication. The host chooses their color (0=blue, 1=red).
+    The host chooses their color (0=blue, 1=red).
+    Anonymous users are supported.
     """
     if request.host_color not in (0, 1):
         raise HTTPException(status_code=400, detail="host_color must be 0 (blue) or 1 (red)")
@@ -2208,12 +2241,12 @@ async def create_online_game(
 @app.post("/games/online/join", response_model=JoinOnlineGameResponse)
 async def join_online_game(
     request: JoinOnlineGameRequest,
-    user: dict = Depends(require_auth)
+    user: dict = Depends(get_user_or_anon)
 ):
     """
     Join an existing online game using a join code.
 
-    Requires authentication. Returns game info and opponent details.
+    Returns game info and opponent details. Anonymous users are supported.
     """
     result = persistence.join_online_game(
         join_code=request.join_code,
@@ -2280,12 +2313,12 @@ async def join_online_game(
 @app.get("/games/online/{game_id}", response_model=OnlineGameStatusResponse)
 async def get_online_game_status(
     game_id: str,
-    user: dict = Depends(require_auth)
+    user: dict = Depends(get_user_or_anon)
 ):
     """
     Get the current status of an online game.
 
-    Requires authentication. User must be a participant in the game.
+    User must be a participant in the game.
     """
     result = persistence.get_online_game_status(game_id, user["user_id"])
 
@@ -2333,7 +2366,7 @@ async def get_online_game_status(
 @app.post("/games/online/{game_id}/leave", response_model=LeaveOnlineGameResponse)
 async def leave_online_game(
     game_id: str,
-    user: dict = Depends(require_auth)
+    user: dict = Depends(get_user_or_anon)
 ):
     """
     Leave/abandon an online game. This forfeits the game.
@@ -2369,7 +2402,7 @@ async def leave_online_game(
 
 @app.get("/games/online/mine", response_model=MyOnlineGamesResponse)
 async def get_my_online_games(
-    user: dict = Depends(require_auth)
+    user: dict = Depends(get_user_or_anon)
 ):
     """
     List all online games for the current user.
@@ -3158,11 +3191,17 @@ async def handle_player_reconnect(game: Game, user_id: str):
 
 
 def extract_user_from_websocket(websocket: WebSocket) -> Optional[str]:
-    """Extract user_id from WebSocket cookies (JWT auth)."""
+    """Extract user_id from WebSocket cookies (JWT auth or anonymous session)."""
     cookies = websocket.cookies
     token = cookies.get(AUTH_COOKIE_NAME)
     if token:
-        return decode_jwt_token(token)
+        user_id = decode_jwt_token(token)
+        if user_id:
+            return user_id
+    # Fall back to anonymous cookie
+    anon_id = cookies.get(ANON_COOKIE_NAME)
+    if anon_id:
+        return f"anon_{anon_id}"
     return None
 
 

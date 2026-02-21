@@ -25,11 +25,14 @@ interface BoardProps {
   touchedMask: string | number; // Bitboard of ineligible pieces (string for JS precision)
   mustPass?: boolean; // Forced pass situation
   lastMove?: LastMove | null; // Last move for highlighting
+  animate?: boolean; // Whether to animate piece movement (default true)
 }
 
 const SQUARE_SIZE = 50;
 const BOARD_WIDTH = BOARD_COLS * SQUARE_SIZE;
 const BOARD_HEIGHT = BOARD_ROWS * SQUARE_SIZE;
+const LABEL_PAD_LEFT = 14; // Space for rank labels (1-8) outside the board
+const LABEL_PAD_BOTTOM = 14; // Space for file labels (a-g) outside the board
 const ANIMATION_DURATION = 350; // ms
 
 // Helper to get visual position for a square
@@ -65,6 +68,7 @@ export default function Board({
   touchedMask,
   mustPass = false,
   lastMove = null,
+  animate = true,
 }: BoardProps) {
   // Drag state - drag only activates after moving past threshold
   const [pendingDragSquare, setPendingDragSquare] = useState<number | null>(null);
@@ -74,6 +78,19 @@ export default function Board({
   const svgRef = useRef<SVGSVGElement>(null);
 
   const DRAG_THRESHOLD = 8; // Pixels moved before drag activates
+
+  // Convert client coordinates to SVG coordinates (accounts for viewBox offset and scale)
+  const clientToSvg = (clientX: number, clientY: number): { x: number; y: number } | null => {
+    const svg = svgRef.current;
+    if (!svg) return null;
+    const rect = svg.getBoundingClientRect();
+    const viewBoxW = BOARD_WIDTH + LABEL_PAD_LEFT;
+    const viewBoxH = BOARD_HEIGHT + LABEL_PAD_BOTTOM;
+    return {
+      x: (clientX - rect.left) / rect.width * viewBoxW - LABEL_PAD_LEFT,
+      y: (clientY - rect.top) / rect.height * viewBoxH,
+    };
+  };
 
   // Handle pointer down - just record start position, don't interfere with clicks
   const handlePiecePointerDown = (square: number, e: React.PointerEvent) => {
@@ -101,24 +118,25 @@ export default function Board({
     if (!svg) return;
 
     const rect = svg.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
+    const clientRelX = e.clientX - rect.left;
+    const clientRelY = e.clientY - rect.top;
 
-    // If already dragging, update position
+    // If already dragging, update position in SVG coords
     if (draggingSquare !== null) {
-      setDragPosition({ x, y });
+      const svgPos = clientToSvg(e.clientX, e.clientY);
+      if (svgPos) setDragPosition(svgPos);
       return;
     }
 
-    // Check if we should start dragging
+    // Check if we should start dragging (threshold in CSS pixels)
     if (pendingDragSquare !== null && dragStartRef.current) {
-      const dx = x - dragStartRef.current.x;
-      const dy = y - dragStartRef.current.y;
+      const dx = clientRelX - dragStartRef.current.x;
+      const dy = clientRelY - dragStartRef.current.y;
       if (Math.sqrt(dx * dx + dy * dy) > DRAG_THRESHOLD) {
-        // Start dragging - capture pointer now
         (e.target as Element).setPointerCapture(dragStartRef.current.pointerId);
         setDraggingSquare(pendingDragSquare);
-        setDragPosition({ x, y });
+        const svgPos = clientToSvg(e.clientX, e.clientY);
+        if (svgPos) setDragPosition(svgPos);
         setPendingDragSquare(null);
       }
     }
@@ -133,23 +151,21 @@ export default function Board({
     // If not actively dragging, do nothing (let click events handle it)
     if (draggingSquare === null) return;
 
-    const svg = svgRef.current;
-    if (svg && onDragMove) {
-      const rect = svg.getBoundingClientRect();
-      const x = e.clientX - rect.left;
-      const y = e.clientY - rect.top;
+    if (onDragMove) {
+      const svgPos = clientToSvg(e.clientX, e.clientY);
+      if (svgPos) {
+        const visualCol = Math.floor(svgPos.x / SQUARE_SIZE);
+        const visualRow = BOARD_ROWS - 1 - Math.floor(svgPos.y / SQUARE_SIZE);
+        const col = flipped ? BOARD_COLS - 1 - visualCol : visualCol;
+        const row = flipped ? BOARD_ROWS - 1 - visualRow : visualRow;
 
-      const visualCol = Math.floor(x / SQUARE_SIZE);
-      const visualRow = BOARD_ROWS - 1 - Math.floor(y / SQUARE_SIZE);
-      const col = flipped ? BOARD_COLS - 1 - visualCol : visualCol;
-      const row = flipped ? BOARD_ROWS - 1 - visualRow : visualRow;
+        if (row >= 0 && row < BOARD_ROWS && col >= 0 && col < BOARD_COLS) {
+          const targetSquare = row * BOARD_COLS + col;
+          const destinations = getLegalDestinationsForSquare(draggingSquare);
 
-      if (row >= 0 && row < BOARD_ROWS && col >= 0 && col < BOARD_COLS) {
-        const targetSquare = row * BOARD_COLS + col;
-        const destinations = getLegalDestinationsForSquare(draggingSquare);
-
-        if (destinations.has(targetSquare)) {
-          onDragMove(draggingSquare, targetSquare);
+          if (destinations.has(targetSquare)) {
+            onDragMove(draggingSquare, targetSquare);
+          }
         }
       }
     }
@@ -168,8 +184,8 @@ export default function Board({
     const prevMove = prevLastMoveRef.current;
     prevLastMoveRef.current = lastMove;
 
-    // If lastMove changed and there's a new move, animate it
-    if (lastMove && (!prevMove || prevMove.from !== lastMove.from || prevMove.to !== lastMove.to)) {
+    // If lastMove changed and there's a new move, animate it (skip during history navigation)
+    if (animate && lastMove && (!prevMove || prevMove.from !== lastMove.from || prevMove.to !== lastMove.to)) {
       // Determine what piece moved and if it has a ball
       const fromSquare = lastMove.from;
       const toSquare = lastMove.to;
@@ -374,13 +390,13 @@ export default function Board({
   }
 
   return (
-    <div className="inline-block w-full max-w-[350px] sm:max-w-none sm:w-auto">
+    <div className="inline-block w-full max-w-[400px] sm:max-w-none sm:w-auto">
       <svg
         ref={svgRef}
         width="100%"
         height="auto"
-        viewBox={`0 0 ${BOARD_WIDTH} ${BOARD_HEIGHT}`}
-        className="border-2 border-gray-700 rounded w-full sm:w-[350px]"
+        viewBox={`${-LABEL_PAD_LEFT} 0 ${BOARD_WIDTH + LABEL_PAD_LEFT} ${BOARD_HEIGHT + LABEL_PAD_BOTTOM}`}
+        className="w-full sm:w-[400px]"
         preserveAspectRatio="xMidYMid meet"
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
@@ -438,7 +454,7 @@ export default function Board({
           );
         })()}
 
-        {/* File labels (a-g) */}
+        {/* File labels (a-g) — below the board */}
         {Array.from({ length: BOARD_COLS }, (_, col) => {
           const visualCol = flipped ? BOARD_COLS - 1 - col : col;
           const label = String.fromCharCode('a'.charCodeAt(0) + col);
@@ -446,27 +462,28 @@ export default function Board({
             <text
               key={`file-${col}`}
               x={visualCol * SQUARE_SIZE + SQUARE_SIZE / 2}
-              y={BOARD_HEIGHT - 4}
+              y={BOARD_HEIGHT + LABEL_PAD_BOTTOM - 3}
               textAnchor="middle"
               fontSize="10"
-              fill="#374151"
+              fill="#9ca3af"
             >
               {label}
             </text>
           );
         })}
 
-        {/* Rank labels (1-8) */}
+        {/* Rank labels (1-8) — left of the board */}
         {Array.from({ length: BOARD_ROWS }, (_, row) => {
           const visualRow = flipped ? BOARD_ROWS - 1 - row : row;
           const label = row + 1;
           return (
             <text
               key={`rank-${row}`}
-              x={4}
+              x={-3}
               y={(BOARD_ROWS - 1 - visualRow) * SQUARE_SIZE + SQUARE_SIZE / 2 + 4}
+              textAnchor="end"
               fontSize="10"
-              fill="#374151"
+              fill="#9ca3af"
             >
               {label}
             </text>

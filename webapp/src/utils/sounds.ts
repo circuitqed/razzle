@@ -2,7 +2,15 @@
 // No external audio files needed - generates sounds programmatically
 
 let audioContext: AudioContext | null = null;
-let soundEnabled = true;
+// Load preference from localStorage, default to OFF
+let soundEnabled = (() => {
+  try {
+    const stored = localStorage.getItem('razzle_sound');
+    return stored === 'true';
+  } catch {
+    return false;
+  }
+})();
 
 function getAudioContext(): AudioContext {
   if (!audioContext) {
@@ -13,6 +21,7 @@ function getAudioContext(): AudioContext {
 
 export function setSoundEnabled(enabled: boolean) {
   soundEnabled = enabled;
+  try { localStorage.setItem('razzle_sound', String(enabled)); } catch { /* ignore */ }
 }
 
 export function isSoundEnabled(): boolean {
