@@ -1,9 +1,9 @@
 import { Component, useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import type { ReactNode, ErrorInfo } from 'react';
 import { BrowserRouter, Routes, Route, useParams, useNavigate } from 'react-router-dom';
-import Board from './components/Board';
-import MoveHistory from './components/MoveHistory';
+import BugReportDialog from './components/BugReportDialog';
 import ConfirmDialog from './components/ConfirmDialog';
+import GameView from './components/GameView';
 import RulesModal from './components/RulesModal';
 import TrainingDashboard from './components/TrainingDashboard';
 import LoginModal from './components/LoginModal';
@@ -12,16 +12,13 @@ import UserMenu from './components/UserMenu';
 import GameBrowser from './components/GameBrowser';
 import ReplayViewer from './components/ReplayViewer';
 import AnalysisBoard from './components/AnalysisBoard';
-import OnlineLobby from './components/OnlineLobby';
 import WaitingForOpponent from './components/WaitingForOpponent';
 import OnlineGame from './components/OnlineGame';
-import EvaluationMeter from './components/EvaluationMeter';
 import NewGameDialog from './components/NewGameDialog';
 import type { NewGameSettings } from './components/NewGameDialog';
 import { useGame } from './hooks/useGame';
 import { setSoundEnabled, isSoundEnabled } from './utils/sounds';
 import { listModels, type ModelInfo } from './api/engine';
-import { formatMovesForDisplay } from './utils/replay';
 import * as onlineApi from './api/online';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 
@@ -40,6 +37,7 @@ function AppContent() {
   const [soundOn, setSoundOn] = useState(isSoundEnabled());
   const [showResignConfirm, setShowResignConfirm] = useState(false);
   const [showRules, setShowRules] = useState(false);
+  const [showBugReport, setShowBugReport] = useState(false);
   const [showNewGameDialog, setShowNewGameDialog] = useState(false);
 
   // Available models from server
@@ -60,7 +58,6 @@ function AppContent() {
   const [showTrainingDashboard, setShowTrainingDashboard] = useState(false);
 
   // Online multiplayer
-  const [showOnlineLobby, setShowOnlineLobby] = useState(false);
   const [waitingGame, setWaitingGame] = useState<{
     gameId: string;
     joinCode: string;
@@ -235,11 +232,6 @@ function AppContent() {
     return { text, colorClass, isThinking: aiThinking };
   }, [gameState, settings.mode, playerColor, opponentName, aiThinking]);
 
-  // Compact move history for inline display
-  const formattedTurns = useMemo(() => {
-    return formatMovesForDisplay(rawMoves);
-  }, [rawMoves]);
-
   // Keyboard shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -317,12 +309,12 @@ function AppContent() {
 
   // Online multiplayer handlers
   const handleGameCreated = (gameId: string, joinCode: string, hostColor: number) => {
-    setShowOnlineLobby(false);
+    setShowNewGameDialog(false);
     setWaitingGame({ gameId, joinCode, hostColor });
   };
 
   const handleGameJoined = (gameId: string, _yourColor: number) => {
-    setShowOnlineLobby(false);
+    setShowNewGameDialog(false);
     setWaitingGame(null);
     navigate(`/online/${gameId}`);
   };
@@ -358,36 +350,54 @@ function AppContent() {
       <header className="flex items-center justify-between px-4 py-2 shrink-0">
         <div className="w-20" /> {/* Spacer for balance */}
         <h1 className="text-xl sm:text-2xl font-bold">Razzle Dazzle</h1>
-        <UserMenu
-          onOpenLogin={() => setShowLoginModal(true)}
-          onOpenRegister={() => setShowRegisterModal(true)}
-          onOpenBrowser={() => setShowGameBrowser(true)}
-        />
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setShowBugReport(true)}
+            className="p-1.5 text-gray-400 hover:text-white transition-colors"
+            title="Report a bug"
+          >
+{'\u{1F41B}'}
+          </button>
+          <UserMenu
+            onOpenLogin={() => setShowLoginModal(true)}
+            onOpenRegister={() => setShowRegisterModal(true)}
+            onOpenBrowser={() => setShowGameBrowser(true)}
+          />
+        </div>
       </header>
 
       <main className="flex-1 flex flex-col items-center p-2 sm:p-4 pb-4">
-
-        {error && (
-          <div className="mb-2 px-4 py-1.5 bg-red-600 text-white rounded text-sm">
-            {error}
-          </div>
-        )}
-
-        {isLoading && !gameState && (
-          <div className="text-gray-400">Loading...</div>
-        )}
-
-        {gameState && (
-          <>
-            {/* Status line: turn indicator / game over / AI thinking */}
-            <div className="mb-2 text-center h-7 flex items-center justify-center gap-2">
-              {gameState.status === 'finished' && gameState.winner !== null && (
+        <GameView
+          gameState={gameState}
+          selectedSquare={selectedSquare}
+          isLoading={isLoading}
+          error={error}
+          canEndTurn={canEndTurn}
+          mustPass={mustPass}
+          isPassing={isPassing}
+          lastMove={lastMove}
+          rawMoves={rawMoves}
+          viewPly={viewPly}
+          isViewingHistory={isViewingHistory}
+          handleSquareClick={handleSquareClick}
+          handleDragMove={handleDragMove}
+          endTurn={endTurn}
+          goForward={goForward}
+          goBack={goBack}
+          goToStart={goToStart}
+          goToEnd={goToEnd}
+          flipped={shouldFlipBoard}
+          topName={topName}
+          bottomName={bottomName}
+          cancelPass={cancelPass}
+          evaluation={settings.mode === 'ai' ? evaluation : undefined}
+          aiThinking={aiThinking}
+          statusLine={
+            <>
+              {gameState?.status === 'finished' && gameState.winner !== null && (
                 <span className="text-xl font-bold text-yellow-400">{getWinnerText()}</span>
               )}
-              {gameState.status === 'finished' && gameState.winner === null && (
-                <span className="text-xl font-bold text-gray-400">Draw!</span>
-              )}
-              {turnIndicator && gameState.status === 'playing' && (
+              {turnIndicator && gameState?.status === 'playing' && (
                 <>
                   <span className={`inline-block px-3 py-0.5 rounded text-white text-sm font-medium ${turnIndicator.colorClass}`}>
                     {turnIndicator.text}
@@ -403,182 +413,23 @@ function AppContent() {
                   )}
                 </>
               )}
-              {isViewingHistory && (
-                <span className="text-gray-400 text-xs ml-2 sm:hidden">
-                  (move {viewPly}/{rawMoves.length})
-                </span>
-              )}
-            </div>
-
-            {/* Opponent name above board */}
-            <div className="text-xs text-gray-500 mb-1">{topName}</div>
-
-            {/* Board + eval meter + move history (desktop) row */}
-            <div className="flex gap-2 items-start">
-              <Board
-                board={gameState.board}
-                currentPlayer={gameState.current_player}
-                legalMoves={gameState.legal_moves}
-                selectedSquare={selectedSquare}
-                onSquareClick={handleSquareClick}
-                onDragMove={handleDragMove}
-                touchedMask={gameState.touched_mask}
-                mustPass={mustPass}
-                flipped={shouldFlipBoard}
-                lastMove={lastMove}
-                animate={!isViewingHistory}
-              />
-              {/* Eval meter - AI mode only, right of board */}
-              {settings.mode === 'ai' && (
-                <EvaluationMeter value={evaluation} />
-              )}
-              {/* Desktop move history panel */}
-              <div className="hidden sm:block">
-                <MoveHistory moves={rawMoves} />
-              </div>
-            </div>
-
-            {/* Player name below board */}
-            <div className="text-xs text-gray-500 mt-1">{bottomName}</div>
-
-            {/* Desktop: navigation buttons below board */}
-            <div className="hidden sm:flex items-center gap-2 mt-2 justify-center">
-              <button
-                onClick={goToStart}
-                disabled={rawMoves.length === 0}
-                className="px-2 py-1 text-sm bg-gray-700 hover:bg-gray-600 disabled:bg-gray-800 disabled:text-gray-600 rounded transition-colors"
-                title="Go to start (Home)"
-              >
-                {'\u{25C0}\u{25C0}'}
-              </button>
-              <button
-                onClick={goBack}
-                disabled={rawMoves.length === 0 && viewPly === null}
-                className="px-2 py-1 text-sm bg-gray-700 hover:bg-gray-600 disabled:bg-gray-800 disabled:text-gray-600 rounded transition-colors"
-                title="Back (Left arrow)"
-              >
-                {'\u{25C0}'}
-              </button>
-              {isViewingHistory && (
-                <span className="text-gray-400 text-xs">
-                  move {viewPly}/{rawMoves.length}
-                </span>
-              )}
-              <button
-                onClick={goForward}
-                disabled={viewPly === null}
-                className="px-2 py-1 text-sm bg-gray-700 hover:bg-gray-600 disabled:bg-gray-800 disabled:text-gray-600 rounded transition-colors"
-                title="Forward (Right arrow)"
-              >
-                {'\u{25B6}'}
-              </button>
-              <button
-                onClick={goToEnd}
-                disabled={viewPly === null}
-                className="px-2 py-1 text-sm bg-gray-700 hover:bg-gray-600 disabled:bg-gray-800 disabled:text-gray-600 rounded transition-colors"
-                title="Go to end (End)"
-              >
-                {'\u{25B6}\u{25B6}'}
-              </button>
-            </div>
-
-            {/* Mobile: compact move history bar + navigation */}
-            <div className="mt-2 w-full max-w-[400px] sm:hidden">
-              <div className="flex items-center gap-1 justify-center">
-                <button
-                  onClick={goToStart}
-                  disabled={rawMoves.length === 0}
-                  className="px-2 py-1 text-sm bg-gray-700 hover:bg-gray-600 disabled:bg-gray-800 disabled:text-gray-600 rounded transition-colors"
-                  title="Go to start (Home)"
-                >
-                  {'\u{25C0}\u{25C0}'}
-                </button>
-                <button
-                  onClick={goBack}
-                  disabled={rawMoves.length === 0 && viewPly === null}
-                  className="px-2 py-1 text-sm bg-gray-700 hover:bg-gray-600 disabled:bg-gray-800 disabled:text-gray-600 rounded transition-colors"
-                  title="Back (Left arrow)"
-                >
-                  {'\u{25C0}'}
-                </button>
-
-                {/* Scrollable move history */}
-                <div className="flex-1 overflow-x-auto whitespace-nowrap bg-gray-800 rounded px-2 py-1 text-xs min-h-[28px] flex items-center gap-1 scrollbar-thin">
-                  {formattedTurns.length === 0 && (
-                    <span className="text-gray-600 italic">No moves</span>
-                  )}
-                  {formattedTurns.map((turn: { blue: string; red: string }, idx: number) => (
-                    <span key={idx} className="inline-flex items-center gap-0.5">
-                      <span className="text-gray-500">{idx + 1}.</span>
-                      {turn.blue && <span className="text-blue-400">{turn.blue}</span>}
-                      {turn.red && <span className="text-red-400">{turn.red}</span>}
-                    </span>
-                  ))}
-                </div>
-
-                <button
-                  onClick={goForward}
-                  disabled={viewPly === null}
-                  className="px-2 py-1 text-sm bg-gray-700 hover:bg-gray-600 disabled:bg-gray-800 disabled:text-gray-600 rounded transition-colors"
-                  title="Forward (Right arrow)"
-                >
-                  {'\u{25B6}'}
-                </button>
-                <button
-                  onClick={goToEnd}
-                  disabled={viewPly === null}
-                  className="px-2 py-1 text-sm bg-gray-700 hover:bg-gray-600 disabled:bg-gray-800 disabled:text-gray-600 rounded transition-colors"
-                  title="Go to end (End)"
-                >
-                  {'\u{25B6}\u{25B6}'}
-                </button>
-              </div>
-            </div>
-
-            {/* Action buttons */}
-            <div className="mt-3 flex flex-wrap justify-center gap-2">
-              {/* Complete Pass / Cancel Pass (during pass chain) */}
-              {isPassing && !isViewingHistory && gameState.status === 'playing' && (
-                <>
-                  <button
-                    onClick={endTurn}
-                    disabled={isLoading || aiThinking || !canEndTurn}
-                    className="px-3 py-2 sm:px-4 bg-green-600 hover:bg-green-700 disabled:bg-gray-600 rounded font-medium transition-colors animate-pulse text-sm sm:text-base"
-                  >
-                    Complete Pass
-                  </button>
-                  <button
-                    onClick={cancelPass}
-                    disabled={isLoading || aiThinking}
-                    className="px-3 py-2 sm:px-4 bg-gray-600 hover:bg-gray-700 rounded font-medium transition-colors text-sm sm:text-base"
-                  >
-                    Cancel Pass
-                  </button>
-                </>
-              )}
-
-              {/* End Turn (non-pass, e.g. forced pass scenario where canEndTurn is true but no pass chain yet) */}
-              {canEndTurn && !isPassing && !isViewingHistory && gameState.status === 'playing' && (
-                <button
-                  onClick={endTurn}
-                  disabled={isLoading || aiThinking}
-                  className="px-3 py-2 sm:px-4 bg-green-600 hover:bg-green-700 disabled:bg-gray-600 rounded font-medium transition-colors animate-pulse text-sm sm:text-base"
-                >
-                  End Turn
-                </button>
-              )}
-
+            </>
+          }
+          extraActions={
+            <>
               {/* New Game */}
-              <button
-                onClick={gameState.status === 'finished' ? handleQuickNewGame : handleNewGameClick}
-                disabled={isLoading}
-                className="px-3 py-2 sm:px-4 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 rounded font-medium transition-colors text-sm sm:text-base"
-              >
-                New Game
-              </button>
+              {gameState && (
+                <button
+                  onClick={gameState.status === 'finished' ? handleQuickNewGame : handleNewGameClick}
+                  disabled={isLoading}
+                  className="px-3 py-2 sm:px-4 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 rounded font-medium transition-colors text-sm sm:text-base"
+                >
+                  New Game
+                </button>
+              )}
 
               {/* Resign - only during active game */}
-              {gameState.ply > 0 && gameState.status === 'playing' && !isPassing && !isViewingHistory && (
+              {gameState && gameState.ply > 0 && gameState.status === 'playing' && !isPassing && !isViewingHistory && (
                 <button
                   onClick={() => setShowResignConfirm(true)}
                   disabled={isLoading}
@@ -589,7 +440,7 @@ function AppContent() {
               )}
 
               {/* Undo - not during pass */}
-              {settings.mode === 'ai' && !isPassing && !isViewingHistory && (
+              {gameState && settings.mode === 'ai' && !isPassing && !isViewingHistory && (
                 <button
                   onClick={undoMove}
                   disabled={isLoading || aiThinking || gameState.ply === 0}
@@ -625,9 +476,10 @@ function AppContent() {
               >
                 ?
               </button>
-            </div>
-          </>
-        )}
+
+            </>
+          }
+        />
 
         {/* Instructions - collapsed on mobile */}
         <div className="mt-4 text-xs text-gray-600 max-w-md text-center hidden sm:block">
@@ -643,10 +495,8 @@ function AppContent() {
         isOpen={showNewGameDialog}
         onClose={() => setShowNewGameDialog(false)}
         onStartGame={handleStartGame}
-        onPlayOnline={() => {
-          setShowNewGameDialog(false);
-          setShowOnlineLobby(true);
-        }}
+        onGameCreated={handleGameCreated}
+        onGameJoined={handleGameJoined}
         availableModels={availableModels}
         currentSettings={settings}
       />
@@ -667,6 +517,16 @@ function AppContent() {
 
       {/* Rules Modal */}
       <RulesModal isOpen={showRules} onClose={() => setShowRules(false)} />
+
+      {/* Bug Report Dialog */}
+      <BugReportDialog
+        isOpen={showBugReport}
+        onClose={() => setShowBugReport(false)}
+        gameState={gameState}
+        rawMoves={rawMoves}
+        gameMode={settings.mode}
+        aiModel={settings.model}
+      />
 
       {/* Auth Modals */}
       <LoginModal
@@ -714,14 +574,6 @@ function AppContent() {
           refreshInterval={10000}
         />
       )}
-
-      {/* Online Lobby */}
-      <OnlineLobby
-        isOpen={showOnlineLobby}
-        onClose={() => setShowOnlineLobby(false)}
-        onGameCreated={handleGameCreated}
-        onGameJoined={handleGameJoined}
-      />
 
       {/* Waiting for Opponent */}
       {waitingGame && (

@@ -258,9 +258,6 @@ async function handleSearch(msg: SearchMessage): Promise<void> {
     const state = deserializeState(msg.state);
     const config = { ...DEFAULT_CONFIG, ...msg.config };
 
-    const t0 = performance.now();
-    console.log('[ai.worker] Search starting, sims:', config.numSimulations);
-
     const result = await search(state, evaluator, config, abortFlag, (progress) => {
       self.postMessage({
         type: 'search_progress',
@@ -270,9 +267,6 @@ async function handleSearch(msg: SearchMessage): Promise<void> {
         value: progress.value,
       });
     });
-
-    const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
-    console.log(`[ai.worker] Search done: ${result.simsDone} sims in ${elapsed}s, move=${result.bestMove}, value=${result.value.toFixed(3)}`);
 
     // Extract scalars before dropping the tree reference.
     // The MCTS tree holds hundreds of EngineState objects with BigInt bitboards —

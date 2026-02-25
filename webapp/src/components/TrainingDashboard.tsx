@@ -67,8 +67,6 @@ export default function TrainingDashboard({ onClose, refreshInterval = 10000 }: 
         getArenaMatches().catch((e) => { console.error('Arena matches error:', e); return []; }),
         getLeaderboard(undefined, 100, 0).catch((e) => { console.error('Leaderboard error:', e); return []; }),
       ]);
-      console.log('Fetched data:', { ratingsData, matchesData, leaderboardData });
-
       setMetrics(metricsData);
       setDashboard(dashboardData);
       setArenaRatings(ratingsData);

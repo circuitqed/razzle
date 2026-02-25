@@ -49,12 +49,11 @@ export function getInitialState(): ReplayState {
  * This is a simplified version - doesn't validate legality.
  */
 export function applyMove(state: ReplayState, move: number): ReplayState {
-  // End turn move
+  // End turn move: switch player, do NOT reset touchedMask (persists across turns)
   if (move === -1) {
     return {
       ...state,
       currentPlayer: 1 - state.currentPlayer,
-      touchedMask: '0',
       hasPassed: false,
       ply: state.ply + 1,
       lastKnightDst: -1,
@@ -109,6 +108,8 @@ export function applyMove(state: ReplayState, move: number): ReplayState {
         newP2Ball = (newP2Ball & ~srcMask) | dstMask;
       }
     }
+    // Knight move: clear only source bit from touchedMask
+    newTouchedMask &= ~srcMask;
     // Knight move ends the turn (unless in forced pass situation handled by server)
     turnEnds = true;
     newLastKnightDst = dst;
@@ -122,7 +123,7 @@ export function applyMove(state: ReplayState, move: number): ReplayState {
       p2_ball: String(newP2Ball),
     },
     currentPlayer: turnEnds ? 1 - player : player,
-    touchedMask: turnEnds ? '0' : String(newTouchedMask),
+    touchedMask: String(newTouchedMask),  // touchedMask persists across turns
     hasPassed: turnEnds ? false : newHasPassed,
     ply: state.ply + 1,
     lastKnightDst: turnEnds ? newLastKnightDst : state.lastKnightDst,
@@ -181,6 +182,10 @@ export function getLastMoveAtPosition(moves: number[], ply: number): { from: num
 export interface FormattedTurn {
   blue: string;  // Blue player's move notation (e.g., "b1-c3" or "d1-c1-b1")
   red: string;   // Red player's move notation
+  /** Ply index of the last raw move in blue's action (for highlighting) */
+  bluePlyEnd?: number;
+  /** Ply index of the last raw move in red's action (for highlighting) */
+  redPlyEnd?: number;
 }
 
 /**
@@ -202,15 +207,19 @@ export function formatMovesForDisplay(moves: number[], upToPly?: number): Format
   let state = getInitialState();
   let passChain: string[] = [];  // Accumulates squares for pass chain notation
 
-  for (const move of movesToProcess) {
+  for (let plyIdx = 0; plyIdx < movesToProcess.length; plyIdx++) {
+    const move = movesToProcess[plyIdx];
+
     // End turn move - flush pass chain and switch player
     if (move === -1) {
       if (passChain.length > 0) {
         const chainStr = passChain.join('-');
         if (state.currentPlayer === 0) {
           currentTurn.blue = chainStr;
+          currentTurn.bluePlyEnd = plyIdx + 1; // include the END_TURN
         } else {
           currentTurn.red = chainStr;
+          currentTurn.redPlyEnd = plyIdx + 1;
         }
         passChain = [];
       }
@@ -263,8 +272,10 @@ export function formatMovesForDisplay(moves: number[], upToPly?: number): Format
       const moveStr = `${srcAlg}-${dstAlg}`;
       if (playerBefore === 0) {
         currentTurn.blue = moveStr;
+        currentTurn.bluePlyEnd = plyIdx + 1;
       } else {
         currentTurn.red = moveStr;
+        currentTurn.redPlyEnd = plyIdx + 1;
       }
 
       // Knight move ends turn - if red just moved, push the turn
@@ -280,8 +291,10 @@ export function formatMovesForDisplay(moves: number[], upToPly?: number): Format
     const chainStr = passChain.join('-');
     if (state.currentPlayer === 0) {
       currentTurn.blue = chainStr;
+      currentTurn.bluePlyEnd = movesToProcess.length;
     } else {
       currentTurn.red = chainStr;
+      currentTurn.redPlyEnd = movesToProcess.length;
     }
   }
 

@@ -1,6 +1,14 @@
 output/
+output_shaped/
+tournament_models/
+models_local/
+saved_models/
+plots/
 __pycache__
 *.pyc
+**/*.db
+**/*.db-wal
+**/*.db-shm
 .pytest_cache
 *.egg-info
 .git

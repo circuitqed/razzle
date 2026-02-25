@@ -10,7 +10,7 @@ import secrets
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import asdict
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -64,6 +64,7 @@ def init_db(db_path: Path = None) -> None:
             ("ALTER TABLE games ADD COLUMN player2_user_id TEXT", None),
             ("ALTER TABLE games ADD COLUMN ai_model_version TEXT", None),
             ("ALTER TABLE games ADD COLUMN bot_type TEXT DEFAULT 'mcts'", None),
+            ("ALTER TABLE games ADD COLUMN move_timestamps_json TEXT DEFAULT '[]'", None),
         ]
         for sql, _ in migrations:
             try:
@@ -259,6 +260,36 @@ def init_db(db_path: Path = None) -> None:
         except sqlite3.OperationalError:
             pass
 
+        # Time control columns for PvP chess clocks
+        time_control_migrations = [
+            "ALTER TABLE games ADD COLUMN time_control REAL",  # Total seconds per player (NULL = untimed)
+            "ALTER TABLE games ADD COLUMN time_remaining_json TEXT",  # JSON [p0_seconds, p1_seconds]
+            "ALTER TABLE games ADD COLUMN increment REAL DEFAULT 0.0",  # Seconds added per turn
+        ]
+        for sql in time_control_migrations:
+            try:
+                conn.execute(sql)
+            except sqlite3.OperationalError:
+                pass  # Column already exists
+
+        # Correspondence mode columns
+        correspondence_migrations = [
+            "ALTER TABLE games ADD COLUMN game_mode TEXT DEFAULT 'realtime'",  # 'realtime' or 'correspondence'
+            "ALTER TABLE games ADD COLUMN days_per_move REAL",  # Days allowed per turn
+            "ALTER TABLE games ADD COLUMN move_deadline TEXT",  # ISO UTC timestamp when current player's time expires
+        ]
+        for sql in correspondence_migrations:
+            try:
+                conn.execute(sql)
+            except sqlite3.OperationalError:
+                pass  # Column already exists
+
+        # Public lobby column
+        try:
+            conn.execute("ALTER TABLE games ADD COLUMN is_public INTEGER DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+
         # Migration: add new columns if they don't exist
         try:
             conn.execute("ALTER TABLE training_metrics ADD COLUMN value_mse REAL")
@@ -268,6 +299,22 @@ def init_db(db_path: Path = None) -> None:
             conn.execute("ALTER TABLE training_metrics ADD COLUMN value_sign_accuracy REAL")
         except sqlite3.OperationalError:
             pass  # Column already exists
+
+        # Bug reports
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS bug_reports (
+                id TEXT PRIMARY KEY,
+                game_id TEXT,
+                user_id TEXT,
+                description TEXT NOT NULL,
+                game_state_json TEXT,
+                moves_json TEXT,
+                game_mode TEXT,
+                ai_model TEXT,
+                client_info TEXT,
+                created_at TEXT NOT NULL
+            )
+        """)
 
         conn.commit()
 
@@ -373,24 +420,60 @@ def save_game(
         conn.commit()
 
 
+def save_bug_report(
+    description: str,
+    game_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+    game_state_json: Optional[str] = None,
+    moves_json: Optional[str] = None,
+    game_mode: Optional[str] = None,
+    ai_model: Optional[str] = None,
+    client_info: Optional[str] = None,
+    db_path: Path = None,
+) -> str:
+    """Save a bug report and return its ID."""
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+    import uuid
+    report_id = str(uuid.uuid4())
+    now = datetime.utcnow().isoformat() + 'Z'
+    with get_connection(db_path) as conn:
+        conn.execute("""
+            INSERT INTO bug_reports (id, game_id, user_id, description, game_state_json,
+                                     moves_json, game_mode, ai_model, client_info, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (report_id, game_id, user_id, description, game_state_json,
+              moves_json, game_mode, ai_model, client_info, now))
+        conn.commit()
+    return report_id
+
+
 def append_move(game_id: str, move: int, db_path: Path = None) -> None:
-    """Append a move to a game's move history."""
+    """Append a move to a game's move history, with timestamp."""
     if db_path is None:
         db_path = DEFAULT_DB_PATH
     now = datetime.utcnow().isoformat() + 'Z'
 
     with get_connection(db_path) as conn:
-        # Get current moves
-        row = conn.execute("SELECT moves_json FROM games WHERE game_id = ?", (game_id,)).fetchone()
+        # Get current moves and timestamps
+        row = conn.execute(
+            "SELECT moves_json, move_timestamps_json FROM games WHERE game_id = ?",
+            (game_id,)
+        ).fetchone()
         if row is None:
             return
 
         moves = json.loads(row["moves_json"]) if row["moves_json"] else []
         moves.append(int(move))  # Convert numpy int64 to Python int
 
+        # Append timestamp (handle missing column gracefully)
+        timestamps_json = row["move_timestamps_json"] if "move_timestamps_json" in row.keys() else "[]"
+        timestamps = json.loads(timestamps_json) if timestamps_json else []
+        timestamps.append(now)
+
         conn.execute(
-            "UPDATE games SET moves_json = ?, updated_at = ? WHERE game_id = ?",
-            (json.dumps(moves), now, game_id)
+            "UPDATE games SET moves_json = ?, move_timestamps_json = ?, updated_at = ? WHERE game_id = ?",
+            (json.dumps(moves), json.dumps(timestamps), now, game_id)
         )
         conn.commit()
 
@@ -454,6 +537,19 @@ def pop_move(game_id: str, db_path: Path = None) -> Optional[int]:
         return removed_move
 
 
+def save_time_remaining(game_id: str, time_remaining: list[float], db_path: Path = None) -> None:
+    """Persist time remaining for both players."""
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+    now = datetime.utcnow().isoformat() + 'Z'
+    with get_connection(db_path) as conn:
+        conn.execute(
+            "UPDATE games SET time_remaining_json = ?, updated_at = ? WHERE game_id = ?",
+            (json.dumps(time_remaining), now, game_id)
+        )
+        conn.commit()
+
+
 def load_game(game_id: str, db_path: Path = None) -> Optional[dict]:
     """
     Load a game from the database.
@@ -474,6 +570,13 @@ def load_game(game_id: str, db_path: Path = None) -> Optional[dict]:
         # Handle missing columns (old databases)
         moves_json = row["moves_json"] if "moves_json" in row.keys() else "[]"
         bot_type = row["bot_type"] if "bot_type" in row.keys() else "mcts"
+        time_control = row["time_control"] if "time_control" in row.keys() else None
+        time_remaining_json = row["time_remaining_json"] if "time_remaining_json" in row.keys() else None
+        increment = row["increment"] if "increment" in row.keys() else 0.0
+        game_mode = row["game_mode"] if "game_mode" in row.keys() else "realtime"
+        days_per_move = row["days_per_move"] if "days_per_move" in row.keys() else None
+        move_deadline = row["move_deadline"] if "move_deadline" in row.keys() else None
+        move_timestamps_json = row["move_timestamps_json"] if "move_timestamps_json" in row.keys() else "[]"
 
         return {
             "game_id": row["game_id"],
@@ -482,7 +585,14 @@ def load_game(game_id: str, db_path: Path = None) -> Optional[dict]:
             "ai_simulations": row["ai_simulations"],
             "state": state_from_json(row["state_json"]),
             "moves": json.loads(moves_json) if moves_json else [],
+            "move_timestamps": json.loads(move_timestamps_json) if move_timestamps_json else [],
             "bot_type": bot_type or "mcts",  # Default for null values
+            "time_control": time_control,
+            "time_remaining": json.loads(time_remaining_json) if time_remaining_json else None,
+            "increment": increment or 0.0,
+            "game_mode": game_mode or "realtime",
+            "days_per_move": days_per_move,
+            "move_deadline": move_deadline,
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
         }
@@ -536,7 +646,6 @@ def cleanup_old_games(max_age_days: int = 7, empty_game_max_age_hours: int = 1, 
     """
     if db_path is None:
         db_path = DEFAULT_DB_PATH
-    from datetime import timedelta
 
     old_cutoff = (datetime.utcnow() - timedelta(days=max_age_days)).isoformat() + 'Z'
     empty_cutoff = (datetime.utcnow() - timedelta(hours=empty_game_max_age_hours)).isoformat() + 'Z'
@@ -556,6 +665,26 @@ def cleanup_old_games(max_age_days: int = 7, empty_game_max_age_hours: int = 1, 
 
         conn.commit()
         return old_deleted + empty_deleted
+
+
+def cleanup_stale_waiting_games(max_age_minutes: int = 10, db_path: Path = None) -> int:
+    """
+    Delete online games that have been waiting for opponents too long.
+
+    Returns number of games deleted.
+    """
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+
+    cutoff = (datetime.utcnow() - timedelta(minutes=max_age_minutes)).isoformat() + 'Z'
+
+    with get_connection(db_path) as conn:
+        cursor = conn.execute(
+            "DELETE FROM games WHERE online_status = 'waiting' AND created_at < ?",
+            (cutoff,)
+        )
+        conn.commit()
+        return cursor.rowcount
 
 
 # --- Password Hashing ---
@@ -1761,6 +1890,11 @@ def generate_join_code(length: int = 6, db_path: Path = None) -> str:
 def create_online_game(
     host_user_id: str,
     host_color: int = 0,
+    time_control: Optional[float] = None,
+    increment: float = 0.0,
+    game_mode: str = "realtime",
+    days_per_move: Optional[float] = None,
+    is_public: bool = False,
     db_path: Path = None
 ) -> dict:
     """
@@ -1769,6 +1903,11 @@ def create_online_game(
     Args:
         host_user_id: User ID of the host
         host_color: 0 for blue (player 1), 1 for red (player 2)
+        time_control: Total seconds per player (None = untimed)
+        increment: Seconds added per turn after first turn
+        game_mode: 'realtime' or 'correspondence'
+        days_per_move: Days allowed per turn (correspondence only)
+        is_public: Whether the game appears in the public lobby
 
     Returns:
         Dict with game_id, join_code, host_color, status
@@ -1787,16 +1926,21 @@ def create_online_game(
     player1_user_id = host_user_id if host_color == 0 else None
     player2_user_id = host_user_id if host_color == 1 else None
 
+    # Initial time remaining
+    time_remaining_json = json.dumps([time_control, time_control]) if time_control else None
+
     with get_connection(db_path) as conn:
         conn.execute("""
             INSERT INTO games (
                 game_id, player1_type, player2_type, ai_simulations,
                 state_json, moves_json, player1_user_id, player2_user_id,
-                join_code, online_status, created_at, updated_at
+                join_code, online_status, time_control, time_remaining_json,
+                increment, game_mode, days_per_move, is_public, created_at, updated_at
             )
-            VALUES (?, 'human', 'human', 0, ?, '[]', ?, ?, ?, 'waiting', ?, ?)
+            VALUES (?, 'human', 'human', 0, ?, '[]', ?, ?, ?, 'waiting', ?, ?, ?, ?, ?, ?, ?, ?)
         """, (game_id, state_json, player1_user_id, player2_user_id,
-              join_code, now, now))
+              join_code, time_control, time_remaining_json, increment,
+              game_mode, days_per_move, 1 if is_public else 0, now, now))
         conn.commit()
 
     return {
@@ -1804,6 +1948,119 @@ def create_online_game(
         "join_code": join_code,
         "host_color": host_color,
         "status": "waiting",
+    }
+
+
+def get_public_lobby_games(
+    game_mode: Optional[str] = None,
+    db_path: Path = None
+) -> list[dict]:
+    """
+    Get public games waiting for opponents.
+
+    Args:
+        game_mode: Optional filter - 'realtime' or 'correspondence'
+
+    Returns:
+        List of dicts with game info for the lobby display.
+    """
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+
+    with get_connection(db_path) as conn:
+        query = """
+            SELECT g.game_id, g.join_code, g.game_mode, g.time_control,
+                   g.increment, g.days_per_move, g.created_at,
+                   g.player1_user_id, g.player2_user_id,
+                   COALESCE(u1.display_name, u1.username) as p1_name,
+                   COALESCE(u2.display_name, u2.username) as p2_name
+            FROM games g
+            LEFT JOIN users u1 ON g.player1_user_id = u1.user_id
+            LEFT JOIN users u2 ON g.player2_user_id = u2.user_id
+            WHERE g.is_public = 1 AND g.online_status = 'waiting'
+              AND g.created_at > ?
+        """
+        # Exclude stale waiting games (realtime: 10 min, correspondence: 7 days)
+        stale_cutoff = (datetime.utcnow() - timedelta(minutes=10)).isoformat() + 'Z'
+        params: list = [stale_cutoff]
+        if game_mode:
+            query += " AND g.game_mode = ?"
+            params.append(game_mode)
+        query += " ORDER BY g.created_at ASC"
+
+        rows = conn.execute(query, params).fetchall()
+
+    results = []
+    for row in rows:
+        # Determine host display name from whichever player slot is filled
+        host_name = row["p1_name"] or row["p2_name"]
+        results.append({
+            "game_id": row["game_id"],
+            "join_code": row["join_code"],
+            "host_display_name": host_name,
+            "game_mode": row["game_mode"] or "realtime",
+            "time_control": row["time_control"],
+            "increment": int(row["increment"] or 0),
+            "days_per_move": row["days_per_move"],
+            "created_at": row["created_at"],
+        })
+    return results
+
+
+def quick_match(
+    game_mode: str = "realtime",
+    exclude_user_id: Optional[str] = None,
+    db_path: Path = None
+) -> Optional[dict]:
+    """
+    Find the oldest public waiting game matching the given mode.
+
+    Args:
+        game_mode: 'realtime' or 'correspondence'
+        exclude_user_id: User ID to exclude (don't match own games)
+
+    Returns:
+        Dict with game info, or None if no match found.
+    """
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+
+    with get_connection(db_path) as conn:
+        query = """
+            SELECT g.game_id, g.join_code, g.game_mode, g.time_control,
+                   g.increment, g.days_per_move, g.created_at,
+                   g.player1_user_id, g.player2_user_id,
+                   COALESCE(u1.display_name, u1.username) as p1_name,
+                   COALESCE(u2.display_name, u2.username) as p2_name
+            FROM games g
+            LEFT JOIN users u1 ON g.player1_user_id = u1.user_id
+            LEFT JOIN users u2 ON g.player2_user_id = u2.user_id
+            WHERE g.is_public = 1 AND g.online_status = 'waiting'
+              AND g.game_mode = ?
+              AND g.created_at > ?
+        """
+        # Exclude stale waiting games (older than 10 minutes)
+        stale_cutoff = (datetime.utcnow() - timedelta(minutes=10)).isoformat() + 'Z'
+        params: list = [game_mode, stale_cutoff]
+        if exclude_user_id:
+            query += " AND COALESCE(g.player1_user_id, '') != ? AND COALESCE(g.player2_user_id, '') != ?"
+            params.extend([exclude_user_id, exclude_user_id])
+        query += " ORDER BY g.created_at ASC LIMIT 1"
+        row = conn.execute(query, params).fetchone()
+
+    if not row:
+        return None
+
+    host_name = row["p1_name"] or row["p2_name"]
+    return {
+        "game_id": row["game_id"],
+        "join_code": row["join_code"],
+        "host_display_name": host_name,
+        "game_mode": row["game_mode"] or "realtime",
+        "time_control": row["time_control"],
+        "increment": int(row["increment"] or 0),
+        "days_per_move": row["days_per_move"],
+        "created_at": row["created_at"],
     }
 
 
@@ -1878,7 +2135,6 @@ def join_online_game(
                 opponent = {
                     "user_id": host_user_id,
                     "display_name": "Anonymous",
-                    "elo_rating": 1000.0,
                 }
             else:
                 opponent_row = conn.execute("""
@@ -1956,6 +2212,8 @@ def get_online_game_status(
         row = conn.execute("""
             SELECT g.game_id, g.player1_user_id, g.player2_user_id,
                    g.join_code, g.online_status, g.state_json, g.winner,
+                   g.time_control, g.increment,
+                   g.game_mode, g.days_per_move, g.move_deadline,
                    u1.display_name as p1_name, u2.display_name as p2_name,
                    p1.elo_rating as p1_elo, p2.elo_rating as p2_elo
             FROM games g
@@ -1984,15 +2242,22 @@ def get_online_game_status(
             opponent = {
                 "user_id": opp_id,
                 "display_name": row["p2_name"] or ("Anonymous" if opp_id.startswith("anon_") else opp_id),
-                "elo_rating": row["p2_elo"] or 1000.0,
+                **({"elo_rating": row["p2_elo"]} if row["p2_elo"] and not opp_id.startswith("anon_") else {}),
             }
         elif your_color == 1 and row["player1_user_id"]:
             opp_id = row["player1_user_id"]
             opponent = {
                 "user_id": opp_id,
                 "display_name": row["p1_name"] or ("Anonymous" if opp_id.startswith("anon_") else opp_id),
-                "elo_rating": row["p1_elo"] or 1000.0,
+                **({"elo_rating": row["p1_elo"]} if row["p1_elo"] and not opp_id.startswith("anon_") else {}),
             }
+
+        # Handle missing columns (old databases)
+        tc = row["time_control"] if "time_control" in row.keys() else None
+        inc = row["increment"] if "increment" in row.keys() else 0.0
+        gm = row["game_mode"] if "game_mode" in row.keys() else "realtime"
+        dpm = row["days_per_move"] if "days_per_move" in row.keys() else None
+        md = row["move_deadline"] if "move_deadline" in row.keys() else None
 
         return {
             "game_id": row["game_id"],
@@ -2003,6 +2268,11 @@ def get_online_game_status(
             "is_your_turn": is_your_turn,
             "winner": row["winner"],
             "state": state,
+            "time_control": tc,
+            "increment": inc or 0.0,
+            "game_mode": gm or "realtime",
+            "days_per_move": dpm,
+            "move_deadline": md,
         }
 
 
@@ -2084,6 +2354,7 @@ def get_user_online_games(
             SELECT g.game_id, g.player1_user_id, g.player2_user_id,
                    g.join_code, g.online_status, g.state_json, g.winner,
                    g.created_at, g.updated_at,
+                   g.game_mode, g.move_deadline,
                    u1.display_name as p1_name, u2.display_name as p2_name
             FROM games g
             LEFT JOIN users u1 ON g.player1_user_id = u1.user_id
@@ -2100,6 +2371,8 @@ def get_user_online_games(
             your_color = 0 if user_id == row["player1_user_id"] else 1
             state = state_from_json(row["state_json"])
 
+            game_mode = row["game_mode"] if "game_mode" in row.keys() else "realtime"
+
             game_info = {
                 "game_id": row["game_id"],
                 "join_code": row["join_code"],
@@ -2109,6 +2382,8 @@ def get_user_online_games(
                 "ply": state.ply,
                 "created_at": row["created_at"],
                 "updated_at": row["updated_at"],
+                "game_mode": game_mode or "realtime",
+                "move_deadline": row["move_deadline"] if "move_deadline" in row.keys() else None,
             }
 
             # Add opponent info if present
@@ -2159,6 +2434,63 @@ def update_online_game_status(
             """, (status, now, game_id))
         conn.commit()
         return cursor.rowcount > 0
+
+
+def set_move_deadline(game_id: str, deadline: Optional[str], db_path: Path = None) -> bool:
+    """Update the move_deadline for a correspondence game.
+
+    Args:
+        game_id: The game ID
+        deadline: ISO UTC timestamp string, or None to clear
+
+    Returns True if updated successfully.
+    """
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+
+    now = datetime.utcnow().isoformat() + 'Z'
+
+    with get_connection(db_path) as conn:
+        cursor = conn.execute("""
+            UPDATE games
+            SET move_deadline = ?, updated_at = ?
+            WHERE game_id = ?
+        """, (deadline, now, game_id))
+        conn.commit()
+        return cursor.rowcount > 0
+
+
+def get_expired_correspondence_games(db_path: Path = None) -> list[dict]:
+    """Get correspondence games where the move deadline has passed.
+
+    Returns list of dicts with game_id, current player info, etc.
+    """
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+
+    now = datetime.utcnow().isoformat() + 'Z'
+
+    with get_connection(db_path) as conn:
+        rows = conn.execute("""
+            SELECT game_id, player1_user_id, player2_user_id, state_json, move_deadline
+            FROM games
+            WHERE game_mode = 'correspondence'
+              AND online_status = 'playing'
+              AND move_deadline IS NOT NULL
+              AND move_deadline < ?
+        """, (now,)).fetchall()
+
+        results = []
+        for row in rows:
+            state = state_from_json(row["state_json"])
+            results.append({
+                "game_id": row["game_id"],
+                "player1_user_id": row["player1_user_id"],
+                "player2_user_id": row["player2_user_id"],
+                "current_player": state.current_player,
+                "move_deadline": row["move_deadline"],
+            })
+        return results
 
 
 # --- Player Management ---

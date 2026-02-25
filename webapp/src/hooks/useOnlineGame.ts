@@ -1,20 +1,23 @@
 /**
  * Hook for managing online multiplayer game state via WebSocket.
+ * Delegates board interaction (selection, click/drag, derived state, history)
+ * to the shared useBoardInteraction hook.
+ *
+ * Sub-moves are buffered client-side by useBoardInteraction.
+ * Only complete turns are sent to the server via commitTurn.
  */
 
 import { useState, useCallback, useEffect, useRef, useMemo } from 'react';
-import type { GameState, Player } from '../types';
-import { encodeMove, decodeMove, TOTAL_SQUARES } from '../types';
+import type { GameState } from '../types';
+import { decodeMove } from '../types';
 import * as onlineApi from '../api/online';
 import { logger } from '../utils/logger';
 import {
-  playMoveSound,
-  playPassSound,
-  playEndTurnSound,
   playWinSound,
   playLoseSound,
   playSelectSound,
 } from '../utils/sounds';
+import { useBoardInteraction } from './useBoardInteraction';
 
 const END_TURN_MOVE = -1;
 const PING_INTERVAL = 30000; // 30 seconds
@@ -27,6 +30,8 @@ interface LastMove {
 
 export type ConnectionStatus = 'connecting' | 'connected' | 'reconnecting' | 'disconnected';
 
+export type RematchState = 'none' | 'sent' | 'received';
+
 export interface UseOnlineGameReturn {
   gameState: GameState | null;
   myColor: 0 | 1 | null;
@@ -34,20 +39,38 @@ export interface UseOnlineGameReturn {
   opponent: onlineApi.OnlineOpponentInfo | null;
   opponentConnected: boolean;
   connectionStatus: ConnectionStatus;
+  onlineStatus: string;
   selectedSquare: number | null;
   isLoading: boolean;
   error: string | null;
   canEndTurn: boolean;
   mustPass: boolean;
+  isPassing: boolean;
   lastMove: LastMove | null;
   rawMoves: number[];
   disconnectWarning: { gracePeriod: number; startTime: number } | null;
-  makeMove: (move: number) => void;
   handleSquareClick: (square: number) => void;
   handleDragMove: (from: number, to: number) => void;
   endTurn: () => void;
+  cancelPass: () => void;
   leaveGame: () => Promise<void>;
   reconnect: () => void;
+  // History navigation
+  viewPly: number | null;
+  isViewingHistory: boolean;
+  effectiveGameState: GameState | null;
+  displayLastMove: LastMove | null;
+  goToMove: (ply: number) => void;
+  goForward: () => void;
+  goBack: () => void;
+  goToStart: () => void;
+  goToEnd: () => void;
+  // Rematch
+  rematchState: RematchState;
+  rematchGameId: string | null;
+  requestRematch: () => void;
+  acceptRematch: () => void;
+  declineRematch: () => void;
 }
 
 interface UseOnlineGameOptions {
@@ -67,7 +90,6 @@ export function useOnlineGame(options: UseOnlineGameOptions): UseOnlineGameRetur
   const [onlineStatus, setOnlineStatus] = useState<string>('unknown');
 
   // UI state
-  const [selectedSquare, setSelectedSquare] = useState<number | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [lastMove, setLastMove] = useState<LastMove | null>(null);
@@ -77,11 +99,24 @@ export function useOnlineGame(options: UseOnlineGameOptions): UseOnlineGameRetur
     startTime: number;
   } | null>(null);
 
+  // Rematch state
+  const [rematchState, setRematchState] = useState<RematchState>('none');
+  const [rematchGameId, setRematchGameId] = useState<string | null>(null);
+
+  // Reset rematch state when gameId changes (e.g. after navigating to a rematch game)
+  useEffect(() => {
+    setRematchState('none');
+    setRematchGameId(null);
+  }, [gameId]);
+
   // Connection state
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('connecting');
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectAttemptRef = useRef(0);
   const pingIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Generation counter: incremented on each cleanup so stale WS handlers are ignored
+  const connectionGenRef = useRef(0);
+  const commitInProgressRef = useRef(false);
 
   // Refs for values used in callbacks to avoid re-creating connect function
   const myColorRef = useRef<0 | 1 | null>(null);
@@ -112,41 +147,13 @@ export function useOnlineGame(options: UseOnlineGameOptions): UseOnlineGameRetur
     return gameState.current_player === myColor;
   }, [gameState, myColor]);
 
-  const canEndTurn = useMemo(() => {
-    if (!gameState || !isMyTurn) return false;
-    return gameState.legal_moves.includes(END_TURN_MOVE);
-  }, [gameState, isMyTurn]);
-
-  const mustPass = useMemo(() => {
-    if (!gameState || !isMyTurn || gameState.has_passed) return false;
-
-    const ballBitboard =
-      gameState.current_player === 0 ? gameState.board.p1_ball : gameState.board.p2_ball;
-
-    let ballSquare = -1;
-    for (let i = 0; i < TOTAL_SQUARES; i++) {
-      if ((BigInt(ballBitboard) & (BigInt(1) << BigInt(i))) !== BigInt(0)) {
-        ballSquare = i;
-        break;
-      }
-    }
-
-    if (ballSquare === -1) return false;
-
-    const realMoves = gameState.legal_moves.filter((m) => m !== END_TURN_MOVE);
-    if (realMoves.length === 0) return false;
-
-    return realMoves.every((move) => {
-      const { src } = decodeMove(move);
-      return src === ballSquare;
-    });
-  }, [gameState, isMyTurn]);
-
   // Clean up on unmount
   useEffect(() => {
     return () => {
+      connectionGenRef.current++;
       if (wsRef.current) {
         wsRef.current.close();
+        wsRef.current = null;
       }
       if (pingIntervalRef.current) {
         clearInterval(pingIntervalRef.current);
@@ -160,12 +167,17 @@ export function useOnlineGame(options: UseOnlineGameOptions): UseOnlineGameRetur
       return;
     }
 
+    // Capture generation at connect-time; all handlers check this to ignore stale connections
+    const gen = connectionGenRef.current;
+    const isStale = () => gen !== connectionGenRef.current;
+
     setConnectionStatus('connecting');
-    logger.info('[useOnlineGame] Connecting to game:', gameId);
+    logger.info(`[useOnlineGame] Connecting to game: ${gameId} gen: ${gen}`);
 
     const ws = onlineApi.connectOnlineGameWebSocket(gameId, {
       onOpen: () => {
-        logger.info('[useOnlineGame] Connected');
+        if (isStale()) return;
+        logger.info('[useOnlineGame] Connected gen:', gen);
         setConnectionStatus('connected');
         setError(null);
         reconnectAttemptRef.current = 0;
@@ -182,8 +194,10 @@ export function useOnlineGame(options: UseOnlineGameOptions): UseOnlineGameRetur
       },
 
       onState: (data) => {
-        logger.info('[useOnlineGame] Received state:', data);
+        if (isStale()) return;
+        logger.info('[useOnlineGame] Received state gen:', gen);
         setGameState(data);
+        setError(null);
         if (data.your_color !== undefined) {
           setMyColor(data.your_color as 0 | 1);
           myColorRef.current = data.your_color as 0 | 1;
@@ -195,10 +209,25 @@ export function useOnlineGame(options: UseOnlineGameOptions): UseOnlineGameRetur
           setOnlineStatus(data.online_status);
           onlineStatusRef.current = data.online_status;
         }
+        // Sync rawMoves and lastMove from server state
+        if (data.moves) {
+          setRawMoves(data.moves);
+          let derivedLastMove: LastMove | null = null;
+          for (let i = data.moves.length - 1; i >= 0; i--) {
+            if (data.moves[i] !== END_TURN_MOVE) {
+              const { src, dst } = decodeMove(data.moves[i]);
+              derivedLastMove = { from: src, to: dst };
+              break;
+            }
+          }
+          setLastMove(derivedLastMove);
+        }
+        commitInProgressRef.current = false;
         setIsLoading(false);
       },
 
       onPlayerJoined: (data) => {
+        if (isStale()) return;
         logger.info('[useOnlineGame] Player joined:', data);
         setOpponentConnected(true);
         setOnlineStatus('playing');
@@ -207,14 +236,14 @@ export function useOnlineGame(options: UseOnlineGameOptions): UseOnlineGameRetur
           onOpponentJoinedRef.current({
             user_id: data.user_id,
             display_name: data.display_name,
-            elo_rating: 1000, // Will be updated from game status
+            elo_rating: 1000,
           });
         }
-        // Play a sound to notify
         playSelectSound();
       },
 
       onOpponentDisconnected: (data) => {
+        if (isStale()) return;
         logger.info('[useOnlineGame] Opponent disconnected:', data);
         setOpponentConnected(false);
         setDisconnectWarning({
@@ -224,15 +253,18 @@ export function useOnlineGame(options: UseOnlineGameOptions): UseOnlineGameRetur
       },
 
       onOpponentReconnected: (data) => {
+        if (isStale()) return;
         logger.info('[useOnlineGame] Opponent reconnected:', data);
         setOpponentConnected(true);
         setDisconnectWarning(null);
       },
 
       onGameOver: (data) => {
+        if (isStale()) return;
         logger.info('[useOnlineGame] Game over:', data);
         setOnlineStatus('finished');
         onlineStatusRef.current = 'finished';
+        setGameState(prev => prev ? { ...prev, status: 'finished' as const, winner: data.winner as 0 | 1 | null } : prev);
         if (data.winner === myColorRef.current) {
           playWinSound();
         } else if (data.winner !== null) {
@@ -242,10 +274,12 @@ export function useOnlineGame(options: UseOnlineGameOptions): UseOnlineGameRetur
       },
 
       onGameAbandoned: (data) => {
+        if (isStale()) return;
         logger.info('[useOnlineGame] Game abandoned:', data);
         setOnlineStatus('abandoned');
         onlineStatusRef.current = 'abandoned';
         setDisconnectWarning(null);
+        setGameState(prev => prev ? { ...prev, status: 'finished' as const, winner: data.winner as 0 | 1 | null } : prev);
         if (data.winner === myColorRef.current) {
           playWinSound();
         } else if (data.winner !== null) {
@@ -254,20 +288,56 @@ export function useOnlineGame(options: UseOnlineGameOptions): UseOnlineGameRetur
         onGameEndRef.current?.(data.winner, data.reason || 'abandoned');
       },
 
+      onRematchOffered: (data) => {
+        if (isStale()) return;
+        logger.info('[useOnlineGame] Rematch offered:', data);
+        if (data.from_color !== myColorRef.current) {
+          setRematchState('received');
+        }
+      },
+
+      onRematchCreated: (data) => {
+        if (isStale()) return;
+        logger.info('[useOnlineGame] Rematch created:', data);
+        setRematchGameId(data.new_game_id);
+      },
+
+      onRematchDeclined: () => {
+        if (isStale()) return;
+        logger.info('[useOnlineGame] Rematch declined');
+        setRematchState('none');
+      },
+
       onError: (data) => {
+        if (isStale()) return;
         logger.error('[useOnlineGame] WebSocket error:', data);
-        setError(data.message);
+        if (!commitInProgressRef.current) {
+          setError(data.message);
+        }
+        commitInProgressRef.current = false;
         setIsLoading(false);
       },
 
-      onClose: () => {
-        logger.info('[useOnlineGame] Connection closed');
+      onClose: (code?: number) => {
         if (pingIntervalRef.current) {
           clearInterval(pingIntervalRef.current);
           pingIntervalRef.current = null;
         }
 
-        // Only try to reconnect if game is still active
+        // If generation has advanced, this is a stale connection — don't reconnect
+        if (isStale()) {
+          logger.info(`[useOnlineGame] Stale connection closed (gen: ${gen} current: ${connectionGenRef.current})`);
+          return;
+        }
+
+        // If server closed us because a newer connection superseded, don't reconnect
+        if (code === 4008) {
+          logger.info('[useOnlineGame] Connection superseded by newer connection');
+          return;
+        }
+
+        logger.info(`[useOnlineGame] Connection closed gen: ${gen} code: ${code}`);
+
         const status = onlineStatusRef.current;
         if (status === 'playing' || status === 'waiting') {
           const attempt = reconnectAttemptRef.current;
@@ -288,18 +358,18 @@ export function useOnlineGame(options: UseOnlineGameOptions): UseOnlineGameRetur
         }
       },
 
-      onPong: () => {
-        // Keep-alive acknowledged
-      },
+      onPong: () => {},
     });
 
     wsRef.current = ws;
-  }, [gameId]); // Only reconnect if gameId changes
+  }, [gameId]);
 
   // Initial connection
   useEffect(() => {
     connect();
     return () => {
+      // Bump generation so any handlers from this connection become stale
+      connectionGenRef.current++;
       if (wsRef.current) {
         wsRef.current.close();
         wsRef.current = null;
@@ -315,7 +385,6 @@ export function useOnlineGame(options: UseOnlineGameOptions): UseOnlineGameRetur
         setMyColor(status.your_color as 0 | 1);
         setOpponent(status.opponent);
         setOnlineStatus(status.status);
-        // Don't set game state here - WebSocket will send it
       } catch (err) {
         logger.error('[useOnlineGame] Failed to load game status:', err);
         if (err instanceof onlineApi.OnlineAPIError) {
@@ -326,127 +395,47 @@ export function useOnlineGame(options: UseOnlineGameOptions): UseOnlineGameRetur
     loadGameStatus();
   }, [gameId]);
 
-  // Make a move
-  const makeMove = useCallback(
-    (move: number) => {
+  // Commit a complete turn: send all sub-moves via WebSocket.
+  // The server processes them in order and broadcasts the final state.
+  const commitTurn = useCallback(
+    (moves: number[]) => {
       if (!wsRef.current || connectionStatus !== 'connected') {
         setError('Not connected');
         return;
       }
-      if (!isMyTurn) {
-        setError('Not your turn');
+      // Guard against double-sends (e.g. from duplicate WS connections)
+      if (commitInProgressRef.current) {
+        logger.info('[useOnlineGame] Ignoring duplicate commitTurn');
         return;
       }
+      commitInProgressRef.current = true;
 
-      logger.info('[useOnlineGame] Sending move:', move);
+      logger.info('[useOnlineGame] Committing turn:', moves);
       setIsLoading(true);
-      onlineApi.sendOnlineMove(wsRef.current, move);
 
-      // Record move locally (will be confirmed by server state update)
-      if (move === END_TURN_MOVE) {
-        setRawMoves((prev) => [...prev, move]);
-        playEndTurnSound();
-      } else {
-        const { src, dst } = decodeMove(move);
-        setLastMove({ from: src, to: dst });
-        setRawMoves((prev) => [...prev, move]);
+      // Send all moves as WebSocket messages
+      for (const move of moves) {
+        onlineApi.sendOnlineMove(wsRef.current, move);
       }
+      // State will be updated by onState handler when server processes all moves
     },
-    [connectionStatus, isMyTurn]
+    [connectionStatus]
   );
 
-  // Handle square click
-  const handleSquareClick = useCallback(
-    (square: number) => {
-      if (!gameState || gameState.status !== 'playing' || isLoading) return;
-      if (!isMyTurn) return;
-
-      const { board, legal_moves, current_player } = gameState;
-
-      // Check if clicking on own piece or ball
-      const isOwnPiece = (player: Player, sq: number) => {
-        const pieces = BigInt(player === 0 ? board.p1_pieces : board.p2_pieces);
-        const ball = BigInt(player === 0 ? board.p1_ball : board.p2_ball);
-        const mask = BigInt(1) << BigInt(sq);
-        return ((pieces | ball) & mask) !== BigInt(0);
-      };
-
-      // If a piece is selected, check if this is a valid move destination
-      if (selectedSquare !== null) {
-        const moveEncoded = encodeMove(selectedSquare, square);
-        if (legal_moves.includes(moveEncoded)) {
-          // Check if this is a pass
-          const ballBitboard =
-            current_player === 0 ? board.p1_ball : board.p2_ball;
-          const isBallSquare =
-            (BigInt(ballBitboard) & (BigInt(1) << BigInt(selectedSquare))) !== BigInt(0);
-
-          makeMove(moveEncoded);
-
-          if (isBallSquare) {
-            // Keep selection on new position for pass chains
-            setSelectedSquare(square);
-            playPassSound();
-          } else {
-            setSelectedSquare(null);
-            playMoveSound();
-          }
-          return;
-        }
-      }
-
-      // Check if clicking on own piece to select/deselect
-      if (isOwnPiece(current_player, square)) {
-        const newSelection = selectedSquare === square ? null : square;
-        setSelectedSquare(newSelection);
-        if (newSelection !== null) {
-          playSelectSound();
-        }
-        return;
-      }
-
-      // Clicking elsewhere - deselect
-      if (selectedSquare !== null) {
-        setSelectedSquare(null);
-      }
-    },
-    [gameState, selectedSquare, isMyTurn, isLoading, makeMove]
-  );
-
-  // Handle drag-and-drop move
-  const handleDragMove = useCallback(
-    (from: number, to: number) => {
-      if (!gameState || gameState.status !== 'playing' || isLoading) return;
-      if (!isMyTurn) return;
-
-      const moveEncoded = encodeMove(from, to);
-      if (!gameState.legal_moves.includes(moveEncoded)) return;
-
-      const { board, current_player } = gameState;
-      const ballBitboard =
-        current_player === 0 ? board.p1_ball : board.p2_ball;
-      const isBallSquare =
-        (BigInt(ballBitboard) & (BigInt(1) << BigInt(from))) !== BigInt(0);
-
-      makeMove(moveEncoded);
-
-      if (isBallSquare) {
-        setSelectedSquare(to);
-        playPassSound();
-      } else {
-        setSelectedSquare(null);
-        playMoveSound();
-      }
-    },
-    [gameState, isMyTurn, isLoading, makeMove]
-  );
-
-  // End turn
-  const endTurn = useCallback(() => {
-    if (!canEndTurn) return;
-    makeMove(END_TURN_MOVE);
-    setSelectedSquare(null);
-  }, [canEndTurn, makeMove]);
+  // Board interaction hook
+  const {
+    selectedSquare, handleSquareClick, handleDragMove,
+    endTurn, cancelPass, canEndTurn, isPassing, mustPass,
+    viewPly, isViewingHistory, effectiveGameState, displayLastMove,
+    goToMove, goForward, goBack, goToStart, goToEnd,
+  } = useBoardInteraction({
+    gameState,
+    rawMoves,
+    lastMove,
+    isInteractionEnabled: isMyTurn,
+    isLoading,
+    commitTurn,
+  });
 
   // Leave/abandon game
   const leaveGame = useCallback(async () => {
@@ -461,32 +450,69 @@ export function useOnlineGame(options: UseOnlineGameOptions): UseOnlineGameRetur
   // Manual reconnect
   const reconnect = useCallback(() => {
     reconnectAttemptRef.current = 0;
+    // Bump generation so the old connection's onClose won't trigger auto-reconnect
+    connectionGenRef.current++;
     if (wsRef.current) {
       wsRef.current.close();
+      wsRef.current = null;
     }
     connect();
   }, [connect]);
 
+  // Rematch actions
+  const requestRematch = useCallback(() => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+    onlineApi.sendRematchRequest(wsRef.current);
+    setRematchState('sent');
+  }, []);
+
+  const acceptRematch = useCallback(() => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+    onlineApi.sendRematchAccept(wsRef.current);
+  }, []);
+
+  const declineRematch = useCallback(() => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+    onlineApi.sendRematchDecline(wsRef.current);
+    setRematchState('none');
+  }, []);
+
   return {
-    gameState,
+    gameState: effectiveGameState,
     myColor,
     isMyTurn,
     opponent,
     opponentConnected,
     connectionStatus,
+    onlineStatus,
     selectedSquare,
     isLoading,
     error,
     canEndTurn,
     mustPass,
-    lastMove,
+    isPassing,
+    lastMove: displayLastMove,
     rawMoves,
     disconnectWarning,
-    makeMove,
     handleSquareClick,
     handleDragMove,
     endTurn,
+    cancelPass,
     leaveGame,
     reconnect,
+    viewPly,
+    isViewingHistory,
+    effectiveGameState,
+    displayLastMove,
+    goToMove,
+    goForward,
+    goBack,
+    goToStart,
+    goToEnd,
+    rematchState,
+    rematchGameId,
+    requestRematch,
+    acceptRematch,
+    declineRematch,
   };
 }

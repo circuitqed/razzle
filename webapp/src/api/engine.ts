@@ -32,6 +32,8 @@ export async function createGame(options?: {
   player1_type?: 'human' | 'ai';
   player2_type?: 'human' | 'ai';
   ai_simulations?: number;
+  time_control?: number;
+  increment?: number;
 }): Promise<{ game_id: string }> {
   return request('/games', {
     method: 'POST',
@@ -175,6 +177,22 @@ export async function getOnnxModelInfo(): Promise<OnnxModelInfo> {
 export async function getOnnxModelInfoByName(modelName: string): Promise<OnnxModelInfo> {
   const info = await request<OnnxModelInfo>(`/models/onnx/by-name/${encodeURIComponent(modelName)}`);
   return { ...info, url: `${API_BASE}${info.url}` };
+}
+
+// Submit a bug report
+export async function submitBugReport(report: {
+  description: string;
+  game_id?: string | null;
+  game_state?: object | null;
+  moves?: number[];
+  game_mode?: string;
+  ai_model?: string | null;
+  client_info?: string;
+}): Promise<{ id: string }> {
+  return request('/feedback', {
+    method: 'POST',
+    body: JSON.stringify(report),
+  });
 }
 
 export { EngineAPIError };

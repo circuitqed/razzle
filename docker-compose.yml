@@ -6,12 +6,15 @@ services:
       context: ./engine
       dockerfile: Dockerfile
     container_name: razzle-engine
-    ports:
-      - "8000:8000"
+    expose:
+      - "8000"
     volumes:
       - ./engine/output/models:/app/models
     environment:
       - PYTHONUNBUFFERED=1
+      - JWT_SECRET=${JWT_SECRET:-change-me-in-production}
+      - TRAINING_API_KEY=${TRAINING_API_KEY:-}
+      - ALLOWED_ORIGINS=https://razzledazzle.lazybrains.com,http://localhost:5173,http://localhost:7492
     restart: unless-stopped
 
   webapp:

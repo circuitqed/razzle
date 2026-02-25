@@ -419,7 +419,5 @@ export function createModelFromOnnx(buffer: ArrayBuffer): PureTSModel {
     policyHidden,
   };
 
-  console.log('[inference] Model config inferred:', config);
-
   return new PureTSModel(config, tensorMap);
 }

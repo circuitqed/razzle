@@ -36,7 +36,7 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 export interface OnlineOpponentInfo {
   user_id: string;
   display_name: string | null;
-  elo_rating: number;
+  elo_rating?: number;
 }
 
 export interface CreateOnlineGameResponse {
@@ -79,6 +79,8 @@ export interface OnlineGameSummary {
   opponent_name?: string;
   created_at: string;
   updated_at: string;
+  game_mode?: string;
+  move_deadline?: string | null;
 }
 
 export interface MyOnlineGamesResponse {
@@ -86,16 +88,83 @@ export interface MyOnlineGamesResponse {
   waiting: OnlineGameSummary[];
 }
 
+export interface PublicGameSummary {
+  game_id: string;
+  join_code: string;
+  host_display_name: string | null;
+  game_mode: string;
+  time_control: number | null;
+  increment: number;
+  days_per_move: number | null;
+  created_at: string;
+}
+
+export interface QuickMatchResponse {
+  action: 'joined' | 'created';
+  game_id: string;
+  your_color: number;
+  join_code: string | null;
+}
+
 // --- API Functions ---
 
 /**
  * Create a new online game and get a shareable join code.
  * @param hostColor 0 for blue (player 1), 1 for red (player 2)
+ * @param timeControl Total seconds per player (null = untimed)
+ * @param increment Seconds added per turn (default 0)
+ * @param gameMode 'realtime' or 'correspondence'
+ * @param daysPerMove Days per move (correspondence only)
+ * @param isPublic Whether the game appears in the public lobby
  */
-export async function createOnlineGame(hostColor: number = 0): Promise<CreateOnlineGameResponse> {
+export async function createOnlineGame(
+  hostColor: number = 0,
+  timeControl: number | null = null,
+  increment: number = 0,
+  gameMode: string = 'realtime',
+  daysPerMove: number | null = null,
+  isPublic: boolean = false,
+): Promise<CreateOnlineGameResponse> {
   return request('/games/online', {
     method: 'POST',
-    body: JSON.stringify({ host_color: hostColor }),
+    body: JSON.stringify({
+      host_color: hostColor,
+      time_control: timeControl,
+      increment,
+      game_mode: gameMode,
+      days_per_move: daysPerMove,
+      is_public: isPublic,
+    }),
+  });
+}
+
+/**
+ * Get public games waiting for opponents.
+ */
+export async function getPublicLobby(gameMode?: string): Promise<{ games: PublicGameSummary[] }> {
+  const params = gameMode ? `?game_mode=${gameMode}` : '';
+  return request(`/games/online/lobby${params}`);
+}
+
+/**
+ * Quick match: join the first available public game, or create a new one.
+ */
+export async function quickMatch(
+  gameMode: string = 'realtime',
+  hostColor: number = 0,
+  timeControl: number | null = null,
+  increment: number = 0,
+  daysPerMove: number | null = null,
+): Promise<QuickMatchResponse> {
+  return request('/games/online/quickmatch', {
+    method: 'POST',
+    body: JSON.stringify({
+      game_mode: gameMode,
+      host_color: hostColor,
+      time_control: timeControl,
+      increment,
+      days_per_move: daysPerMove,
+    }),
   });
 }
 
@@ -141,8 +210,11 @@ export interface OnlineWebSocketHandlers {
   onOpponentReconnected?: (data: { user_id: string; color: number }) => void;
   onGameOver?: (data: { winner: number | null; reason: string }) => void;
   onGameAbandoned?: (data: { abandoning_user_id: string; winner: number | null; reason?: string }) => void;
+  onRematchOffered?: (data: { from_color: number }) => void;
+  onRematchCreated?: (data: { new_game_id: string }) => void;
+  onRematchDeclined?: () => void;
   onError?: (data: { message: string; code: string }) => void;
-  onClose?: () => void;
+  onClose?: (code?: number, reason?: string) => void;
   onOpen?: () => void;
   onPong?: () => void;
 }
@@ -185,6 +257,15 @@ export function connectOnlineGameWebSocket(
       case 'game_abandoned':
         handlers.onGameAbandoned?.(message.data);
         break;
+      case 'rematch_offered':
+        handlers.onRematchOffered?.(message.data);
+        break;
+      case 'rematch_created':
+        handlers.onRematchCreated?.(message.data);
+        break;
+      case 'rematch_declined':
+        handlers.onRematchDeclined?.();
+        break;
       case 'error':
         handlers.onError?.(message.data);
         break;
@@ -194,8 +275,8 @@ export function connectOnlineGameWebSocket(
     }
   };
 
-  ws.onclose = () => {
-    handlers.onClose?.();
+  ws.onclose = (event) => {
+    handlers.onClose?.(event.code, event.reason);
   };
 
   return ws;
@@ -213,6 +294,25 @@ export function sendOnlineMove(ws: WebSocket, move: number): void {
  */
 export function sendPing(ws: WebSocket): void {
   ws.send(JSON.stringify({ type: 'ping' }));
+}
+
+export function sendRematchRequest(ws: WebSocket): void {
+  ws.send(JSON.stringify({ type: 'rematch_request' }));
+}
+
+export function sendRematchAccept(ws: WebSocket): void {
+  ws.send(JSON.stringify({ type: 'rematch_accept' }));
+}
+
+export function sendRematchDecline(ws: WebSocket): void {
+  ws.send(JSON.stringify({ type: 'rematch_decline' }));
+}
+
+/**
+ * Send a resign message in an online game.
+ */
+export function sendResign(ws: WebSocket): void {
+  ws.send(JSON.stringify({ type: 'resign' }));
 }
 
 export { OnlineAPIError };

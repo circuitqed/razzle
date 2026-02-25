@@ -20,7 +20,7 @@ from typing import Optional
 from contextlib import asynccontextmanager
 
 import jwt
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Request, Response, Depends, Cookie, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Request, Response, Depends, Cookie, Header, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -59,6 +59,7 @@ class CreateGameRequest(BaseModel):
     ai_simulations: int = 1024
     bot_type: str = Field(default=DEFAULT_BOT_TYPE, description="AI bot type: 'neural', 'mcts', or 'random'")
     time_control: Optional[float] = Field(default=None, description="Total time per player in seconds. If set, enables dynamic time management.")
+    increment: float = Field(default=0.0, description="Time increment per turn in seconds.")
 
 
 class CreateGameResponse(BaseModel):
@@ -89,7 +90,12 @@ class GameStateResponse(BaseModel):
     has_passed: bool  # Whether a pass has been made this turn
     last_knight_dst: int = -1  # Destination of opponent's last knight move (-1 if none)
     time_control: Optional[float] = None  # Total time per player in seconds
+    increment: float = 0.0  # Time increment per turn in seconds
     time_remaining: Optional[list[float]] = None  # Remaining time [p1, p2] if time controlled
+    game_mode: str = "realtime"  # 'realtime' or 'correspondence'
+    days_per_move: Optional[float] = None  # Days per move (correspondence only)
+    move_deadline: Optional[str] = None  # ISO UTC timestamp when current player's time expires
+    moves: list[int] = []  # Full move history
 
 
 class MakeMoveRequest(BaseModel):
@@ -180,6 +186,12 @@ JWT_ALGORITHM = "HS256"
 JWT_EXPIRY_HOURS = 24
 AUTH_COOKIE_NAME = "razzle_auth"
 ANON_COOKIE_NAME = "razzle_anon"
+
+# API key for training/arena worker endpoints (set in docker-compose or env)
+TRAINING_API_KEY = os.environ.get("TRAINING_API_KEY", "")
+
+# Allowed origins for CORS (comma-separated, or "*" for dev)
+ALLOWED_ORIGINS = os.environ.get("ALLOWED_ORIGINS", "http://localhost:5173,http://localhost:7492").split(",")
 
 
 class TrainingIterationData(BaseModel):
@@ -393,6 +405,46 @@ class LatestMetricsResponse(BaseModel):
     metrics: Optional[TrainingMetricsData] = None
 
 
+# --- Player Clock ---
+
+class PlayerClock:
+    """Chess-clock style timer for a single player."""
+
+    def __init__(self, total_seconds: float, increment: float = 0.0):
+        self.remaining: float = total_seconds
+        self.increment: float = increment
+        self.turn_start: Optional[float] = None  # time.monotonic() when turn started
+        self.first_turn_done: bool = False  # First turn is free (no time deducted)
+
+    def start_turn(self) -> None:
+        """Start this player's clock."""
+        if self.turn_start is None:
+            self.turn_start = time.monotonic()
+
+    def stop_turn(self) -> None:
+        """Stop this player's clock, deducting elapsed time and adding increment."""
+        if self.turn_start is not None:
+            if self.first_turn_done:
+                elapsed = time.monotonic() - self.turn_start
+                self.remaining = max(0.0, self.remaining - elapsed)
+                self.remaining += self.increment
+            else:
+                # First turn is free — no time deducted, no increment added
+                self.first_turn_done = True
+            self.turn_start = None
+
+    def get_remaining(self) -> float:
+        """Get live remaining time (accounts for currently running clock)."""
+        if self.turn_start is not None and self.first_turn_done:
+            elapsed = time.monotonic() - self.turn_start
+            return max(0.0, self.remaining - elapsed)
+        return self.remaining
+
+    def is_expired(self) -> bool:
+        """Check if this player's time has run out."""
+        return self.get_remaining() <= 0.0
+
+
 # --- Game Storage ---
 
 class Game:
@@ -406,15 +458,23 @@ class Game:
         ai_simulations: int = 1024,
         bot_type: str = DEFAULT_BOT_TYPE,
         time_control: Optional[float] = None,
+        increment: float = 0.0,
         online_status: str = "local",
-        join_code: Optional[str] = None
+        join_code: Optional[str] = None,
+        game_mode: str = "realtime",
+        days_per_move: Optional[float] = None,
     ):
         self.game_id = game_id
         self.state = GameState.new_game()
+        self.last_activity = time.time()
         self.player_types = [player1_type, player2_type]
         self.ai_simulations = ai_simulations
         self.bot_type = bot_type
         self.time_control = time_control
+        self.increment = increment
+        self.game_mode = game_mode
+        self.days_per_move = days_per_move
+        self.move_deadline: Optional[str] = None
         self.websockets: list[WebSocket] = []
 
         # Player IDs for ELO tracking (set when game starts)
@@ -431,10 +491,12 @@ class Game:
         self.player_websockets: dict[str, WebSocket] = {}  # user_id -> WebSocket
         self.player_connected: list[bool] = [False, False]  # Connection status per player
         self.disconnect_timers: dict[str, asyncio.Task] = {}  # user_id -> disconnect grace timer
+        self.rematch_pending_from: Optional[str] = None  # user_id of player who requested rematch
+        self.abort_timer: Optional[asyncio.Task] = None  # Timer to abort if no first move
 
-        # Create time managers if time control is enabled
+        # Create time managers if time control is enabled (for AI time management)
         self.time_managers: list[Optional[TimeManager]] = [None, None]
-        if time_control is not None:
+        if time_control is not None and player2_type == "ai":
             for i in range(2):
                 self.time_managers[i] = create_time_manager(
                     total_time=time_control,
@@ -442,6 +504,22 @@ class Game:
                     max_sims=ai_simulations,
                     default_sims=ai_simulations
                 )
+
+        # In-memory move history (kept in sync with persistence)
+        self.moves: list[int] = []
+
+        # Player clocks for PvP time controls (both players human, realtime only)
+        self.player_clocks: list[Optional[PlayerClock]] = [None, None]
+        self.clock_task: Optional[asyncio.Task] = None
+        if time_control is not None and player1_type == "human" and player2_type == "human" and game_mode != "correspondence":
+            self.player_clocks = [
+                PlayerClock(time_control, increment),
+                PlayerClock(time_control, increment),
+            ]
+
+    def is_correspondence(self) -> bool:
+        """Check if this is a correspondence game."""
+        return self.game_mode == "correspondence"
 
     def is_online_game(self) -> bool:
         """Check if this is an online multiplayer game."""
@@ -484,10 +562,18 @@ class Game:
         # Get time remaining if time controlled
         time_remaining = None
         if self.time_control is not None:
-            time_remaining = [
-                self.time_managers[0].remaining_time if self.time_managers[0] else 0.0,
-                self.time_managers[1].remaining_time if self.time_managers[1] else 0.0,
-            ]
+            if self.player_clocks[0] is not None:
+                # PvP clocks (live countdown)
+                time_remaining = [
+                    self.player_clocks[0].get_remaining(),
+                    self.player_clocks[1].get_remaining(),
+                ]
+            elif self.time_managers[0] is not None:
+                # AI time managers
+                time_remaining = [
+                    self.time_managers[0].remaining_time,
+                    self.time_managers[1].remaining_time,
+                ]
 
         return GameStateResponse(
             game_id=self.game_id,
@@ -506,7 +592,12 @@ class Game:
             has_passed=self.state.has_passed,
             last_knight_dst=self.state.last_knight_dst,
             time_control=self.time_control,
-            time_remaining=time_remaining
+            increment=self.increment,
+            time_remaining=time_remaining,
+            game_mode=self.game_mode,
+            days_per_move=self.days_per_move,
+            move_deadline=self.move_deadline,
+            moves=self.moves,
         )
 
     def check_and_update_elo(self) -> Optional[tuple[float, float]]:
@@ -586,6 +677,47 @@ def setup_game_players(
     elif game.player_types[1] == "human":
         # Human vs human - would need second user to join
         pass
+
+
+async def clock_watchdog(game: Game):
+    """Background task that checks for clock expiry every 500ms."""
+    try:
+        while not game.is_game_over():
+            await asyncio.sleep(0.5)
+            current = game.state.current_player
+            clock = game.player_clocks[current]
+            if clock and clock.is_expired():
+                # Time out - forfeit
+                game.resigned_by = current
+                if game.is_online_game():
+                    game.online_status = "finished"
+                    persistence.update_online_game_status(game.game_id, "finished", 1 - current)
+                # Persist time remaining
+                persistence.save_time_remaining(game.game_id, [
+                    game.player_clocks[0].get_remaining() if game.player_clocks[0] else 0.0,
+                    game.player_clocks[1].get_remaining() if game.player_clocks[1] else 0.0,
+                ])
+                game.check_and_update_elo()
+                response = game.to_response()
+                await broadcast_state(game, response)
+                await broadcast_online_event(game, "game_over", {
+                    "winner": 1 - current,
+                    "reason": "timeout"
+                })
+                logging.info(f"Game {game.game_id}: Player {current} timed out")
+                break
+    except asyncio.CancelledError:
+        pass
+    except Exception as e:
+        logging.error(f"Clock watchdog error for game {game.game_id}: {e}")
+
+
+def start_player_clocks(game: Game):
+    """Start player 0's clock and launch the watchdog task."""
+    if game.player_clocks[0] is not None:
+        game.player_clocks[0].start_turn()
+        if game.clock_task is None or game.clock_task.done():
+            game.clock_task = asyncio.create_task(clock_watchdog(game))
 
 
 # Global game storage (in production, use Redis or database)
@@ -771,9 +903,14 @@ async def lifespan(app: FastAPI):
             player1_type=game_data["player1_type"],
             player2_type=game_data["player2_type"],
             ai_simulations=game_data["ai_simulations"],
-            bot_type=game_data.get("bot_type", DEFAULT_BOT_TYPE)  # Default for old games
+            bot_type=game_data.get("bot_type", DEFAULT_BOT_TYPE),  # Default for old games
+            time_control=game_data.get("time_control"),
+            increment=game_data.get("increment", 0.0),
+            game_mode=game_data.get("game_mode", "realtime"),
+            days_per_move=game_data.get("days_per_move"),
         )
         game.state = game_data["state"]
+        game.move_deadline = game_data.get("move_deadline")
         games[game.game_id] = game
         logging.info(f"Loaded game {game.game_id} from database")
 
@@ -782,9 +919,71 @@ async def lifespan(app: FastAPI):
     # Pre-load evaluator
     get_evaluator()
 
+    # Start periodic cleanup of stale in-memory games
+    async def cleanup_stale_games():
+        """Remove finished or abandoned games from memory every 30 minutes.
+        Also clean up stale waiting games from DB (older than 10 min)."""
+        while True:
+            await asyncio.sleep(1800)
+            now = time.time()
+            stale = [
+                gid for gid, g in games.items()
+                if (g.state.status != "playing" and now - g.last_activity > 3600)
+                or (now - g.last_activity > 86400)  # 24h idle
+            ]
+            for gid in stale:
+                del games[gid]
+            if stale:
+                logging.info(f"Cleaned up {len(stale)} stale games, {len(games)} active")
+
+            # Clean up stale waiting games from DB
+            cleaned = persistence.cleanup_stale_waiting_games(max_age_minutes=10)
+            if cleaned > 0:
+                logging.info(f"Cleaned up {cleaned} stale waiting games from DB")
+
+    cleanup_task = asyncio.create_task(cleanup_stale_games())
+
+    # Correspondence timeout sweep — forfeit games past their move deadline
+    async def correspondence_sweep():
+        """Check for expired correspondence games every 60 minutes."""
+        while True:
+            await asyncio.sleep(3600)  # 60 minutes
+            try:
+                expired = persistence.get_expired_correspondence_games()
+                for eg in expired:
+                    game_id = eg["game_id"]
+                    current = eg["current_player"]
+                    winner = 1 - current  # Opponent of timed-out player wins
+
+                    # Update DB
+                    persistence.update_online_game_status(game_id, "finished", winner)
+                    persistence.set_move_deadline(game_id, None)
+
+                    # Update in-memory game if present
+                    if game_id in games:
+                        game = games[game_id]
+                        game.resigned_by = current
+                        game.online_status = "finished"
+                        game.move_deadline = None
+                        game.check_and_update_elo()
+                        await broadcast_online_event(game, "game_over", {
+                            "winner": winner,
+                            "reason": "correspondence_timeout"
+                        })
+
+                    logging.info(f"Correspondence game {game_id}: Player {current} timed out (deadline passed)")
+
+                if expired:
+                    logging.info(f"Correspondence sweep: forfeited {len(expired)} expired games")
+            except Exception as e:
+                logging.error(f"Correspondence sweep error: {e}")
+
+    sweep_task = asyncio.create_task(correspondence_sweep())
+
     yield
 
-    # Shutdown: nothing to do (games are persisted on each change)
+    cleanup_task.cancel()
+    sweep_task.cancel()
     games.clear()
 
 
@@ -798,7 +997,7 @@ app = FastAPI(
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -856,6 +1055,16 @@ async def require_auth(
     return user
 
 
+async def require_training_key(
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+) -> None:
+    """Require a valid training API key for worker endpoints."""
+    if not TRAINING_API_KEY:
+        raise HTTPException(status_code=503, detail="Training API not configured")
+    if x_api_key != TRAINING_API_KEY:
+        raise HTTPException(status_code=403, detail="Invalid API key")
+
+
 async def get_user_or_anon(
     request: Request,
     response: Response,
@@ -876,6 +1085,7 @@ async def get_user_or_anon(
             ANON_COOKIE_NAME, anon_id,
             max_age=86400 * 30,  # 30 days
             httponly=True,
+            secure=True,
             samesite="lax",
         )
 
@@ -887,11 +1097,49 @@ async def get_user_or_anon(
     }
 
 
+# --- Rate Limiting ---
+
+class RateLimiter:
+    """Simple in-memory rate limiter by IP address."""
+
+    def __init__(self, max_requests: int, window_seconds: int):
+        self.max_requests = max_requests
+        self.window = window_seconds
+        self._hits: dict[str, list[float]] = {}
+
+    def check(self, key: str) -> bool:
+        """Return True if request is allowed, False if rate-limited."""
+        now = time.time()
+        hits = self._hits.get(key, [])
+        # Prune old entries
+        hits = [t for t in hits if now - t < self.window]
+        if len(hits) >= self.max_requests:
+            self._hits[key] = hits
+            return False
+        hits.append(now)
+        self._hits[key] = hits
+        return True
+
+
+auth_limiter = RateLimiter(max_requests=10, window_seconds=60)
+game_create_limiter = RateLimiter(max_requests=20, window_seconds=60)
+
+
+def get_client_ip(request: Request) -> str:
+    """Get client IP, respecting X-Forwarded-For from nginx/Cloudflare."""
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
 # --- Auth Endpoints ---
 
 @app.post("/auth/register", response_model=AuthResponse)
-async def register(request: RegisterRequest, response: Response):
+async def register(request: RegisterRequest, response: Response, req: Request = None):
     """Register a new user account."""
+    if req and not auth_limiter.check(get_client_ip(req)):
+        raise HTTPException(status_code=429, detail="Too many requests. Try again later.")
     user = persistence.create_user(
         username=request.username,
         password=request.password,
@@ -907,7 +1155,7 @@ async def register(request: RegisterRequest, response: Response):
         key=AUTH_COOKIE_NAME,
         value=token,
         httponly=True,
-        secure=False,  # Set to True in production with HTTPS
+        secure=True,
         samesite="lax",
         max_age=JWT_EXPIRY_HOURS * 3600,
     )
@@ -919,8 +1167,10 @@ async def register(request: RegisterRequest, response: Response):
 
 
 @app.post("/auth/login", response_model=AuthResponse)
-async def login(request: LoginRequest, response: Response):
+async def login(request: LoginRequest, response: Response, req: Request = None):
     """Login with username and password."""
+    if req and not auth_limiter.check(get_client_ip(req)):
+        raise HTTPException(status_code=429, detail="Too many requests. Try again later.")
     user = persistence.authenticate_user(
         username=request.username,
         password=request.password,
@@ -935,7 +1185,7 @@ async def login(request: LoginRequest, response: Response):
         key=AUTH_COOKIE_NAME,
         value=token,
         httponly=True,
-        secure=False,  # Set to True in production with HTTPS
+        secure=True,
         samesite="lax",
         max_age=JWT_EXPIRY_HOURS * 3600,
     )
@@ -1293,7 +1543,7 @@ TRAINING_STATE_DIR.mkdir(parents=True, exist_ok=True)
 
 
 @app.post("/training/games", response_model=SubmitGameResponse)
-async def submit_training_game(request: SubmitGameRequest):
+async def submit_training_game(request: SubmitGameRequest, _=Depends(require_training_key)):
     """Submit a completed training game from a self-play worker."""
     # Convert visit_counts keys from string to int (JSON doesn't support int keys)
     visit_counts = [
@@ -1430,6 +1680,7 @@ async def upload_training_model(
     final_value_loss: Optional[float] = Form(None),
     compressed: Optional[str] = Form(None),
     file: UploadFile = File(...),
+    _=Depends(require_training_key),
 ):
     """Upload a new training model checkpoint."""
     # Validate filename
@@ -1547,7 +1798,7 @@ class ClearTrainingResponse(BaseModel):
 
 
 @app.delete("/training/clear")
-async def clear_training_data():
+async def clear_training_data(_=Depends(require_training_key)):
     """Clear all training games, models, and metrics to start fresh."""
     result = persistence.clear_training_data()
     return ClearTrainingResponse(**result)
@@ -1556,7 +1807,7 @@ async def clear_training_data():
 # --- Training Metrics API Endpoints ---
 
 @app.post("/training/metrics", response_model=SubmitMetricsResponse)
-async def submit_training_metrics(request: SubmitMetricsRequest):
+async def submit_training_metrics(request: SubmitMetricsRequest, _=Depends(require_training_key)):
     """
     Submit training metrics from the trainer.
 
@@ -1613,6 +1864,7 @@ async def upload_trainer_state(
     total_games_trained: int = Form(0),
     compressed: Optional[str] = Form(None),
     file: UploadFile = File(...),
+    _=Depends(require_training_key),
 ):
     """Upload trainer state (optimizer state, replay buffer, etc.)."""
     content = await file.read()
@@ -1690,7 +1942,7 @@ class ResetTrainingResponse(BaseModel):
 
 
 @app.post("/training/reset", response_model=ResetTrainingResponse)
-async def reset_training():
+async def reset_training(_=Depends(require_training_key)):
     """
     Reset all training data (games, models, metrics, trainer state).
 
@@ -1725,6 +1977,39 @@ async def receive_logs(request: LogRequest):
     return {"received": len(request.entries)}
 
 
+class BugReportRequest(BaseModel):
+    description: str
+    game_id: Optional[str] = None
+    game_state: Optional[dict] = None
+    moves: Optional[list[int]] = None
+    game_mode: Optional[str] = None
+    ai_model: Optional[str] = None
+    client_info: Optional[str] = None
+
+
+@app.post("/feedback")
+async def submit_bug_report(
+    report: BugReportRequest,
+    request: Request,
+    auth_cookie: Optional[str] = Cookie(None, alias=AUTH_COOKIE_NAME),
+):
+    """Submit a bug report with optional game context."""
+    import json as _json
+    user = await get_current_user(request, auth_cookie)
+    user_id = user["user_id"] if user else None
+    report_id = persistence.save_bug_report(
+        description=report.description,
+        game_id=report.game_id,
+        user_id=user_id,
+        game_state_json=_json.dumps(report.game_state) if report.game_state else None,
+        moves_json=_json.dumps(report.moves) if report.moves else None,
+        game_mode=report.game_mode,
+        ai_model=report.ai_model,
+        client_info=report.client_info,
+    )
+    return {"id": report_id}
+
+
 @app.post("/games", response_model=CreateGameResponse)
 async def create_game(
     request: CreateGameRequest = None,
@@ -1732,6 +2017,8 @@ async def create_game(
     auth_cookie: Optional[str] = Cookie(None, alias=AUTH_COOKIE_NAME)
 ):
     """Create a new game."""
+    if auth_request and not game_create_limiter.check(get_client_ip(auth_request)):
+        raise HTTPException(status_code=429, detail="Too many games created. Try again later.")
     if request is None:
         request = CreateGameRequest()
 
@@ -1754,7 +2041,8 @@ async def create_game(
         player2_type=request.player2_type,
         ai_simulations=request.ai_simulations,
         bot_type=bot_type,
-        time_control=request.time_control
+        time_control=request.time_control,
+        increment=request.increment,
     )
     games[game_id] = game
 
@@ -1789,6 +2077,10 @@ async def create_game(
             player2_player_id=game.player_ids[1]
         )
 
+    # Start player clocks for local PvP (both players already present)
+    if request.player1_type == "human" and request.player2_type == "human":
+        start_player_clocks(game)
+
     return CreateGameResponse(game_id=game_id)
 
 
@@ -1821,12 +2113,32 @@ async def make_move(
     if request.move not in legal_moves:
         raise HTTPException(status_code=400, detail="Invalid move")
 
+    # Check player clock before move
+    current = game.state.current_player
+    if game.player_clocks[current] and game.player_clocks[current].is_expired():
+        raise HTTPException(status_code=409, detail="Time expired")
+
     # Associate user with game if logged in (for users who log in mid-game)
     user = await get_current_user(auth_request, auth_cookie) if auth_request else None
     if user:
         persistence.associate_user_with_game(game_id, user["user_id"])
 
+    old_player = game.state.current_player
     game.state.apply_move(request.move)
+    new_player = game.state.current_player
+    game.moves.append(request.move)
+    game.last_activity = time.time()
+
+    # Switch player clocks if turn changed
+    if old_player != new_player and game.player_clocks[old_player]:
+        game.player_clocks[old_player].stop_turn()
+        if not game.is_game_over() and game.player_clocks[new_player]:
+            game.player_clocks[new_player].start_turn()
+        # Persist time remaining
+        persistence.save_time_remaining(game.game_id, [
+            game.player_clocks[0].get_remaining() if game.player_clocks[0] else 0.0,
+            game.player_clocks[1].get_remaining() if game.player_clocks[1] else 0.0,
+        ])
 
     # Persist state and record move
     persistence.save_game(game_id, game.state)
@@ -1986,6 +2298,7 @@ async def get_ai_move(
 
     # Apply the move
     game.state.apply_move(move)
+    game.moves.append(int(move))
 
     # Persist state and record move
     persistence.save_game(game_id, game.state)
@@ -2065,6 +2378,8 @@ async def undo_move(game_id: str):
         raise HTTPException(status_code=400, detail="Nothing to undo")
 
     game.state.undo_move()
+    if game.moves:
+        game.moves.pop()
 
     # Persist state and remove move from history
     persistence.save_game(game_id, game.state)
@@ -2118,6 +2433,13 @@ async def resign_game(
     # Mark resignation
     game.resigned_by = resigning_player
 
+    # Stop clocks
+    for clock in game.player_clocks:
+        if clock:
+            clock.stop_turn()
+    if game.clock_task and not game.clock_task.done():
+        game.clock_task.cancel()
+
     # Update ELO ratings
     game.check_and_update_elo()
 
@@ -2139,12 +2461,17 @@ async def resign_game(
 
 class CreateOnlineGameRequest(BaseModel):
     host_color: int = Field(0, description="0 for blue (player 1), 1 for red (player 2)")
+    time_control: Optional[float] = Field(default=None, description="Total time per player in seconds. None = untimed.")
+    increment: float = Field(default=0.0, description="Seconds added per turn after first turn.")
+    game_mode: str = Field(default="realtime", description="Game mode: 'realtime' or 'correspondence'")
+    days_per_move: Optional[float] = Field(default=None, description="Days per move (correspondence only)")
+    is_public: bool = Field(default=False, description="Whether the game appears in the public lobby")
 
 
 class OnlineOpponentInfo(BaseModel):
     user_id: str
     display_name: Optional[str]
-    elo_rating: float = 1000.0
+    elo_rating: Optional[float] = None
 
 
 class CreateOnlineGameResponse(BaseModel):
@@ -2191,11 +2518,43 @@ class OnlineGameSummary(BaseModel):
     opponent_name: Optional[str] = None
     created_at: str
     updated_at: str
+    game_mode: str = "realtime"
+    move_deadline: Optional[str] = None
 
 
 class MyOnlineGamesResponse(BaseModel):
     active: list[OnlineGameSummary]
     waiting: list[OnlineGameSummary]
+
+
+class PublicGameSummary(BaseModel):
+    game_id: str
+    join_code: str
+    host_display_name: Optional[str]
+    game_mode: str
+    time_control: Optional[float]
+    increment: int
+    days_per_move: Optional[float]
+    created_at: str
+
+
+class PublicLobbyResponse(BaseModel):
+    games: list[PublicGameSummary]
+
+
+class QuickMatchRequest(BaseModel):
+    game_mode: str = Field(default="realtime")
+    host_color: int = Field(default=0)
+    time_control: Optional[float] = None
+    increment: float = 0.0
+    days_per_move: Optional[float] = None
+
+
+class QuickMatchResponse(BaseModel):
+    action: str  # 'joined' or 'created'
+    game_id: str
+    your_color: int
+    join_code: Optional[str] = None
 
 
 @app.post("/games/online", response_model=CreateOnlineGameResponse)
@@ -2215,6 +2574,11 @@ async def create_online_game(
     result = persistence.create_online_game(
         host_user_id=user["user_id"],
         host_color=request.host_color,
+        time_control=request.time_control,
+        increment=request.increment,
+        game_mode=request.game_mode,
+        days_per_move=request.days_per_move,
+        is_public=request.is_public,
     )
 
     # Also create an in-memory Game object for WebSocket support
@@ -2224,8 +2588,12 @@ async def create_online_game(
         player2_type="human",
         ai_simulations=0,
         bot_type="mcts",
+        time_control=request.time_control,
+        increment=request.increment,
         online_status="waiting",
-        join_code=result["join_code"]
+        join_code=result["join_code"],
+        game_mode=request.game_mode,
+        days_per_move=request.days_per_move,
     )
     # Set host's user ID in the appropriate slot
     if request.host_color == 0:
@@ -2236,6 +2604,127 @@ async def create_online_game(
     games[result["game_id"]] = game
 
     return CreateOnlineGameResponse(**result)
+
+
+@app.get("/games/online/lobby", response_model=PublicLobbyResponse)
+async def get_public_lobby(game_mode: Optional[str] = None):
+    """Get public games waiting for opponents."""
+    lobby_games = persistence.get_public_lobby_games(game_mode=game_mode)
+    return PublicLobbyResponse(
+        games=[PublicGameSummary(**g) for g in lobby_games]
+    )
+
+
+@app.post("/games/online/quickmatch", response_model=QuickMatchResponse)
+async def quick_match(
+    request: QuickMatchRequest,
+    user: dict = Depends(get_user_or_anon)
+):
+    """
+    Quick match: join the first available public game, or create a new one.
+    """
+    # Try to find an existing public game (exclude own games)
+    match = persistence.quick_match(game_mode=request.game_mode, exclude_user_id=user["user_id"])
+
+    if match:
+        # Join the existing game
+        result = persistence.join_online_game(
+            join_code=match["join_code"],
+            guest_user_id=user["user_id"],
+        )
+        if result and "error" not in result:
+            # Load or create in-memory game object
+            game_id = result["game_id"]
+            if game_id not in games:
+                game_data = persistence.load_game(game_id)
+                if game_data:
+                    game = Game(
+                        game_id=game_id,
+                        player1_type="human",
+                        player2_type="human",
+                        ai_simulations=0,
+                        bot_type="mcts",
+                        time_control=game_data.get("time_control"),
+                        increment=game_data.get("increment", 0.0),
+                        online_status="playing",
+                        join_code=match["join_code"],
+                        game_mode=game_data.get("game_mode", "realtime"),
+                        days_per_move=game_data.get("days_per_move"),
+                    )
+                    game.state = game_data["state"]
+                    game.move_deadline = game_data.get("move_deadline")
+                    games[game_id] = game
+
+            # Update in-memory game
+            if game_id in games:
+                g = games[game_id]
+                g.online_status = "playing"
+                g.player_user_ids[result["your_color"]] = user["user_id"]
+                if result.get("opponent"):
+                    host_color = 1 - result["your_color"]
+                    g.player_user_ids[host_color] = result["opponent"]["user_id"]
+
+                if g.is_correspondence():
+                    deadline = (datetime.utcnow() + timedelta(days=g.days_per_move)).isoformat() + 'Z'
+                    g.move_deadline = deadline
+                    persistence.set_move_deadline(g.game_id, deadline)
+                else:
+                    start_player_clocks(g)
+
+                # Start abort timer (game aborted if no first move within 30s)
+                start_abort_timer(g)
+
+                # Notify host via WebSocket that someone joined
+                await broadcast_online_event(g, "player_joined", {
+                    "user_id": user["user_id"],
+                    "display_name": user.get("display_name") or user.get("username"),
+                    "color": result["your_color"],
+                })
+
+            return QuickMatchResponse(
+                action="joined",
+                game_id=result["game_id"],
+                your_color=result["your_color"],
+            )
+
+    # No match found - create a new public game
+    create_result = persistence.create_online_game(
+        host_user_id=user["user_id"],
+        host_color=request.host_color,
+        time_control=request.time_control,
+        increment=request.increment,
+        game_mode=request.game_mode,
+        days_per_move=request.days_per_move,
+        is_public=True,
+    )
+
+    # Create in-memory Game object
+    game = Game(
+        game_id=create_result["game_id"],
+        player1_type="human",
+        player2_type="human",
+        ai_simulations=0,
+        bot_type="mcts",
+        time_control=request.time_control,
+        increment=request.increment,
+        online_status="waiting",
+        join_code=create_result["join_code"],
+        game_mode=request.game_mode,
+        days_per_move=request.days_per_move,
+    )
+    if request.host_color == 0:
+        game.player_user_ids[0] = user["user_id"]
+    else:
+        game.player_user_ids[1] = user["user_id"]
+
+    games[create_result["game_id"]] = game
+
+    return QuickMatchResponse(
+        action="created",
+        game_id=create_result["game_id"],
+        your_color=request.host_color,
+        join_code=create_result["join_code"],
+    )
 
 
 @app.post("/games/online/join", response_model=JoinOnlineGameResponse)
@@ -2268,16 +2757,23 @@ async def join_online_game(
     if game_id not in games:
         game_data = persistence.load_game(game_id)
         if game_data:
+            tc = game_data.get("time_control")
+            inc = game_data.get("increment", 0.0)
             game = Game(
                 game_id=game_id,
                 player1_type="human",
                 player2_type="human",
                 ai_simulations=0,
                 bot_type="mcts",
+                time_control=tc,
+                increment=inc,
                 online_status="playing",
-                join_code=request.join_code.upper().strip()
+                join_code=request.join_code.upper().strip(),
+                game_mode=game_data.get("game_mode", "realtime"),
+                days_per_move=game_data.get("days_per_move"),
             )
             game.state = game_data["state"]
+            game.move_deadline = game_data.get("move_deadline")
             games[game_id] = game
 
     # Update the in-memory Game object with user IDs
@@ -2290,6 +2786,18 @@ async def join_online_game(
         if result.get("opponent"):
             host_color = 1 - result["your_color"]
             game.player_user_ids[host_color] = result["opponent"]["user_id"]
+
+        if game.is_correspondence():
+            # Set initial move deadline for correspondence games
+            deadline = (datetime.utcnow() + timedelta(days=game.days_per_move)).isoformat() + 'Z'
+            game.move_deadline = deadline
+            persistence.set_move_deadline(game.game_id, deadline)
+        else:
+            # Start player clocks now that both players are in (realtime only)
+            start_player_clocks(game)
+
+        # Start abort timer (game aborted if no first move within 30s)
+        start_abort_timer(game)
 
         # Notify host via WebSocket
         await broadcast_online_event(game, "player_joined", {
@@ -2335,14 +2843,21 @@ async def get_online_game_status(
 
     # Load into memory if needed
     if game_id not in games:
+        tc = result.get("time_control")
+        inc = result.get("increment", 0.0)
         game = Game(
             game_id=game_id,
             player1_type="human",
             player2_type="human",
             ai_simulations=0,
-            bot_type="mcts"
+            bot_type="mcts",
+            time_control=tc,
+            increment=inc,
+            game_mode=result.get("game_mode", "realtime"),
+            days_per_move=result.get("days_per_move"),
         )
         game.state = state
+        game.move_deadline = result.get("move_deadline")
         games[game_id] = game
     else:
         game = games[game_id]
@@ -2386,13 +2901,42 @@ async def leave_online_game(
             raise HTTPException(status_code=409, detail=f"Cannot abandon game (status: {result.get('status')})")
         raise HTTPException(status_code=400, detail=result["error"])
 
-    # Notify opponent via WebSocket
+    # Notify opponent via WebSocket and stop clocks
     if game_id in games:
         game = games[game_id]
-        await broadcast_online_event(game, "game_abandoned", {
-            "abandoning_user_id": user["user_id"],
-            "winner": result.get("winner"),
-        })
+        # Cancel abort timer if running
+        if game.abort_timer:
+            game.abort_timer.cancel()
+            game.abort_timer = None
+        # Cancel any disconnect timers
+        for uid, timer in list(game.disconnect_timers.items()):
+            timer.cancel()
+        game.disconnect_timers.clear()
+        for clock in game.player_clocks:
+            if clock:
+                clock.stop_turn()
+        if game.clock_task and not game.clock_task.done():
+            game.clock_task.cancel()
+        if result.get("status") == "cancelled":
+            # Waiting game cancelled — remove from memory
+            del games[game_id]
+        else:
+            # Mark game as abandoned BEFORE broadcast so disconnect handler
+            # (triggered when the leaving player's WS closes) won't show
+            # a countdown timer to the opponent
+            game.online_status = "abandoned"
+            player_color = game.get_player_color(user["user_id"])
+            if player_color is not None:
+                game.resigned_by = player_color
+            await broadcast_online_event(game, "game_abandoned", {
+                "abandoning_user_id": user["user_id"],
+                "winner": result.get("winner"),
+                "reason": "left",
+            })
+
+            # Broadcast updated state so opponent's board reflects game is finished
+            response = game.to_response()
+            await broadcast_state(game, response)
 
     return LeaveOnlineGameResponse(
         status=result["status"],
@@ -2860,7 +3404,7 @@ async def get_arena_matches(
 
 
 @app.post("/arena/matches", response_model=ArenaSubmitMatchResponse)
-async def submit_arena_match(request: ArenaSubmitMatchRequest):
+async def submit_arena_match(request: ArenaSubmitMatchRequest, _=Depends(require_training_key)):
     """Submit an arena match result."""
     match_id = persistence.save_arena_match(
         model1_version=request.model1_version,
@@ -2898,7 +3442,7 @@ async def get_arena_ratings(
 
 
 @app.post("/arena/ratings", response_model=ArenaSubmitRatingResponse)
-async def submit_arena_rating(request: ArenaSubmitRatingRequest):
+async def submit_arena_rating(request: ArenaSubmitRatingRequest, _=Depends(require_training_key)):
     """Submit or update an arena ELO rating."""
     rating_id = persistence.save_arena_rating(
         model_version=request.model_version,
@@ -2912,7 +3456,7 @@ async def submit_arena_rating(request: ArenaSubmitRatingRequest):
 
 
 @app.post("/arena/compute")
-async def compute_arena_ratings(request: ArenaComputeRequest = None):
+async def compute_arena_ratings(request: ArenaComputeRequest = None, _=Depends(require_training_key)):
     """
     Recompute all ELO ratings from match history.
 
@@ -2965,7 +3509,7 @@ async def compute_arena_ratings(request: ArenaComputeRequest = None):
 
 
 @app.delete("/arena/clear", response_model=ArenaClearResponse)
-async def clear_arena_data():
+async def clear_arena_data(_=Depends(require_training_key)):
     """Clear all arena matches and ratings."""
     result = persistence.clear_arena_data()
     return ArenaClearResponse(**result)
@@ -3135,12 +3679,49 @@ async def send_error(ws: WebSocket, message: str, code: str):
 # Grace period for disconnect before auto-forfeit (in seconds)
 DISCONNECT_GRACE_PERIOD = 120  # 2 minutes
 
+# Time allowed for first move before game is aborted (in seconds)
+FIRST_MOVE_TIMEOUT = 30
+
+
+def start_abort_timer(game: Game):
+    """Start a timer that aborts the game if no move is made within FIRST_MOVE_TIMEOUT."""
+    async def _abort_timer():
+        await asyncio.sleep(FIRST_MOVE_TIMEOUT)
+        # Only abort if game is still at ply 0 and actively playing
+        if game.state.ply == 0 and game.online_status == "playing":
+            game.online_status = "abandoned"
+            persistence.update_online_game_status(game.game_id, "abandoned", winner=None)
+            # Stop clocks if running
+            for clock in game.player_clocks:
+                if clock:
+                    clock.stop_turn()
+            if game.clock_task:
+                game.clock_task.cancel()
+                game.clock_task = None
+            await broadcast_online_event(game, "game_abandoned", {
+                "reason": "no_first_move",
+                "abandoning_user_id": None,
+                "winner": None,
+            })
+
+    if game.abort_timer:
+        game.abort_timer.cancel()
+    game.abort_timer = asyncio.create_task(_abort_timer())
+
 
 async def handle_player_disconnect(game: Game, user_id: str):
-    """Handle player disconnect with grace period."""
+    """Handle player disconnect with grace period.
+
+    Only starts the grace period if the game is still actively playing.
+    If the game is already over (abandoned, finished), this is a no-op.
+    """
     player_color = game.get_player_color(user_id)
     if player_color is not None:
         game.player_connected[player_color] = False
+
+        # Don't start grace period or notify if game is already over
+        if game.online_status not in ("playing",):
+            return
 
         # Notify opponent
         await broadcast_online_event(game, "opponent_disconnected", {
@@ -3213,6 +3794,7 @@ async def websocket_endpoint(websocket: WebSocket, game_id: str):
     For local games (AI/PvP), authentication is optional.
     """
     if game_id not in games:
+        await websocket.accept()
         await websocket.close(code=4004, reason="Game not found")
         return
 
@@ -3235,6 +3817,17 @@ async def websocket_endpoint(websocket: WebSocket, game_id: str):
             await send_error(websocket, "You are not a participant in this game", "NOT_AUTHORIZED")
             await websocket.close(code=4003, reason="Not authorized")
             return
+
+        # Close any previous WS from the same user (prevents duplicate connections
+        # from React strict mode double-mount or stale reconnects)
+        old_ws = game.player_websockets.get(user_id)
+        if old_ws and old_ws != websocket:
+            try:
+                if old_ws in game.websockets:
+                    game.websockets.remove(old_ws)
+                await old_ws.close(code=4008, reason="Superseded by new connection")
+            except Exception:
+                pass  # Already closed
 
         # Register connection
         game.player_websockets[user_id] = websocket
@@ -3280,12 +3873,61 @@ async def websocket_endpoint(websocket: WebSocket, game_id: str):
 
                 legal_moves = get_legal_moves(game.state)
                 if move not in legal_moves:
+                    logging.warning(
+                        f"INVALID_MOVE: game={game_id} user={user_id} move={move} "
+                        f"legal_moves={legal_moves} current_player={game.state.current_player} "
+                        f"has_passed={game.state.has_passed} ply={game.state.ply} "
+                        f"touched_mask={game.state.touched_mask} "
+                        f"balls={game.state.balls} pieces={game.state.pieces}"
+                    )
                     await send_error(websocket, "Invalid move", "INVALID_MOVE")
                     continue
 
+                # Check player clock before move
+                current = game.state.current_player
+                if game.player_clocks[current] and game.player_clocks[current].is_expired():
+                    await send_error(websocket, "Time expired", "TIME_EXPIRED")
+                    continue
+
+                # Check correspondence deadline before move
+                if game.is_correspondence() and game.move_deadline:
+                    now_utc = datetime.utcnow().isoformat() + 'Z'
+                    if now_utc > game.move_deadline:
+                        await send_error(websocket, "Move deadline expired", "TIME_EXPIRED")
+                        continue
+
+                old_player = game.state.current_player
                 game.state.apply_move(move)
+                new_player = game.state.current_player
+                game.moves.append(move)  # Track in memory
                 persistence.save_game(game_id, game.state)  # Persist state
                 persistence.append_move(game_id, move)  # Record move
+
+                # Cancel abort timer on first move
+                if game.abort_timer:
+                    game.abort_timer.cancel()
+                    game.abort_timer = None
+
+                # Switch player clocks if turn changed
+                if old_player != new_player and game.player_clocks[old_player]:
+                    game.player_clocks[old_player].stop_turn()
+                    if not game.is_game_over() and game.player_clocks[new_player]:
+                        game.player_clocks[new_player].start_turn()
+                    # Persist time remaining
+                    persistence.save_time_remaining(game.game_id, [
+                        game.player_clocks[0].get_remaining() if game.player_clocks[0] else 0.0,
+                        game.player_clocks[1].get_remaining() if game.player_clocks[1] else 0.0,
+                    ])
+
+                # Update correspondence deadline on turn change
+                if old_player != new_player and game.is_correspondence() and game.days_per_move:
+                    if not game.is_game_over():
+                        deadline = (datetime.utcnow() + timedelta(days=game.days_per_move)).isoformat() + 'Z'
+                        game.move_deadline = deadline
+                        persistence.set_move_deadline(game.game_id, deadline)
+                    else:
+                        game.move_deadline = None
+                        persistence.set_move_deadline(game.game_id, None)
 
                 # Check for game over and update ELO
                 game.check_and_update_elo()
@@ -3334,6 +3976,7 @@ async def websocket_endpoint(websocket: WebSocket, game_id: str):
                 move = mcts.select_move(root)
 
                 game.state.apply_move(move)
+                game.moves.append(int(move))
                 persistence.save_game(game_id, game.state)  # Persist state
                 persistence.append_move(game_id, move)  # Record move
 
@@ -3363,10 +4006,144 @@ async def websocket_endpoint(websocket: WebSocket, game_id: str):
                     continue
 
                 game.state.undo_move()
+                if game.moves:
+                    game.moves.pop()
                 persistence.save_game(game_id, game.state)  # Persist state
                 persistence.pop_move(game_id)  # Remove move from history
                 response = game.to_response()
                 await broadcast_state(game, response)
+
+            elif msg_type == "resign":
+                if not game.is_online_game() or not user_id:
+                    await send_error(websocket, "Resign only available for online games", "NOT_ALLOWED")
+                    continue
+                if game.is_game_over():
+                    await send_error(websocket, "Game already finished", "GAME_FINISHED")
+                    continue
+                player_color = game.get_player_color(user_id)
+                if player_color is None:
+                    await send_error(websocket, "You are not a participant", "NOT_ALLOWED")
+                    continue
+
+                # Mark resignation
+                game.resigned_by = player_color
+
+                # Stop clocks
+                for clock in game.player_clocks:
+                    if clock:
+                        clock.stop_turn()
+                if game.clock_task and not game.clock_task.done():
+                    game.clock_task.cancel()
+
+                # Update ELO ratings
+                game.check_and_update_elo()
+
+                # Persist the resignation
+                winner = game.get_winner()
+                persistence.update_game_result(
+                    game_id,
+                    winner=winner,
+                    player1_player_id=game.player_ids[0],
+                    player2_player_id=game.player_ids[1]
+                )
+
+                # Broadcast game over with resignation reason
+                await broadcast_online_event(game, "game_over", {
+                    "winner": winner,
+                    "reason": "resignation",
+                })
+
+                # Also broadcast updated state so boards reflect game is finished
+                response = game.to_response()
+                await broadcast_state(game, response)
+
+            elif msg_type == "rematch_request":
+                if not game.is_online_game() or not user_id:
+                    await send_error(websocket, "Rematch only available for online games", "NOT_ALLOWED")
+                    continue
+                if not game.is_game_over():
+                    await send_error(websocket, "Game is not finished", "GAME_NOT_FINISHED")
+                    continue
+                if game.rematch_pending_from:
+                    await send_error(websocket, "Rematch already pending", "ALREADY_PENDING")
+                    continue
+
+                game.rematch_pending_from = user_id
+                player_color = game.get_player_color(user_id)
+                await broadcast_online_event(game, "rematch_offered", {
+                    "from_color": player_color,
+                })
+
+            elif msg_type == "rematch_accept":
+                if not game.is_online_game() or not user_id:
+                    await send_error(websocket, "Not an online game", "NOT_ALLOWED")
+                    continue
+                if not game.rematch_pending_from:
+                    await send_error(websocket, "No rematch pending", "NO_PENDING")
+                    continue
+                if game.rematch_pending_from == user_id:
+                    await send_error(websocket, "Cannot accept your own rematch", "INVALID_REQUEST")
+                    continue
+
+                # Create new game with swapped colors
+                old_p1 = game.player_user_ids[0]
+                old_p2 = game.player_user_ids[1]
+                # Swap: old blue becomes red, old red becomes blue
+                new_result = persistence.create_online_game(
+                    host_user_id=old_p2 or old_p1,  # new host
+                    host_color=0,
+                    time_control=game.time_control,
+                    increment=game.increment,
+                    game_mode=game.game_mode,
+                    days_per_move=game.days_per_move,
+                )
+                new_game_id = new_result["game_id"]
+
+                # Create in-memory game
+                new_game = Game(
+                    game_id=new_game_id,
+                    player1_type="human",
+                    player2_type="human",
+                    ai_simulations=0,
+                    bot_type="mcts",
+                    time_control=game.time_control,
+                    increment=game.increment,
+                    online_status="playing",
+                    join_code=new_result["join_code"],
+                    game_mode=game.game_mode,
+                    days_per_move=game.days_per_move,
+                )
+                # Swap colors: old P1 (blue) -> new P2 (red), old P2 (red) -> new P1 (blue)
+                new_game.player_user_ids[0] = old_p2
+                new_game.player_user_ids[1] = old_p1
+                games[new_game_id] = new_game
+
+                # Update persistence for the guest join
+                persistence.join_online_game(
+                    join_code=new_result["join_code"],
+                    guest_user_id=old_p1 or old_p2,
+                )
+
+                if new_game.is_correspondence():
+                    # Set initial move deadline for correspondence rematch
+                    deadline = (datetime.utcnow() + timedelta(days=new_game.days_per_move)).isoformat() + 'Z'
+                    new_game.move_deadline = deadline
+                    persistence.set_move_deadline(new_game_id, deadline)
+                else:
+                    # Start clocks for realtime rematch
+                    start_player_clocks(new_game)
+
+                # Notify both players
+                await broadcast_online_event(game, "rematch_created", {
+                    "new_game_id": new_game_id,
+                })
+
+            elif msg_type == "rematch_decline":
+                if not game.is_online_game() or not user_id:
+                    await send_error(websocket, "Not an online game", "NOT_ALLOWED")
+                    continue
+                game.rematch_pending_from = None
+                await broadcast_online_event(game, "rematch_declined", {})
 
             elif msg_type == "ping":
                 # Keep-alive ping

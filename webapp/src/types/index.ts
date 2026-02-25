@@ -30,6 +30,16 @@ export interface GameState {
   has_passed: boolean;
   // Destination of opponent's last knight move (-1 if none) for forced pass rule
   last_knight_dst?: number;
+  // Time control fields (PvP games only)
+  time_control?: number | null;
+  increment?: number;
+  time_remaining?: [number, number] | null;
+  // Correspondence mode fields
+  game_mode?: string;        // 'realtime' | 'correspondence'
+  days_per_move?: number | null;
+  move_deadline?: string | null;  // ISO UTC timestamp
+  // Full move history
+  moves?: number[];
 }
 
 // AI move response

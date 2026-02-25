@@ -55,9 +55,8 @@ export default function WaitingForOpponent({
     if (navigator.share) {
       try {
         await navigator.share({ title: 'Razzle Dazzle', text, url });
-      } catch (err) {
+      } catch {
         // User cancelled or share failed
-        console.log('Share cancelled');
       }
     } else {
       handleCopyLink();

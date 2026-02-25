@@ -238,6 +238,10 @@ export default function Board({
     return () => {
       if (animationRef.current) {
         cancelAnimationFrame(animationRef.current);
+        animationRef.current = null;
+        // Clear stale animation state so a partially-complete animation
+        // doesn't leave a phantom piece on the board.
+        setAnimatingPiece(null);
       }
     };
   }, [lastMove, board]);
