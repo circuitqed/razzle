@@ -171,8 +171,11 @@ class MoveGenerator:
         """
         moves = []
 
-        # Check if we must pass (opponent adjacent to ball)
-        forced_pass = MoveGenerator.must_pass(state)
+        # Check if we must pass (opponent adjacent to ball).
+        # Only applies at the START of a turn (before any pass has been made).
+        # Once the player has started passing (has_passed=True), they can
+        # always end their turn — the forced-pass rule doesn't trap them.
+        forced_pass = not state.has_passed and MoveGenerator.must_pass(state)
         pass_moves = list(MoveGenerator.get_pass_moves(state))
 
         if forced_pass and pass_moves:

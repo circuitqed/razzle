@@ -25,6 +25,7 @@ interface BoardProps {
   touchedMask: string | number; // Bitboard of ineligible pieces (string for JS precision)
   mustPass?: boolean; // Forced pass situation
   lastMove?: LastMove | null; // Last move for highlighting
+  lastTurnMoves?: LastMove[]; // All moves in last opponent turn (for multi-pass animation)
   animate?: boolean; // Whether to animate piece movement (default true)
 }
 
@@ -33,7 +34,7 @@ const BOARD_WIDTH = BOARD_COLS * SQUARE_SIZE;
 const BOARD_HEIGHT = BOARD_ROWS * SQUARE_SIZE;
 const LABEL_PAD_LEFT = 14; // Space for rank labels (1-8) outside the board
 const LABEL_PAD_BOTTOM = 14; // Space for file labels (a-g) outside the board
-const ANIMATION_DURATION = 350; // ms
+const ANIMATION_DURATION = 350; // ms - all piece/ball animations
 
 // Helper to get visual position for a square
 function getSquarePosition(square: number, flipped: boolean) {
@@ -49,11 +50,13 @@ function getSquarePosition(square: number, flipped: boolean) {
 
 interface AnimatingPiece {
   fromSquare: number;
-  toSquare: number;
+  toSquare: number; // Final destination (used for ball hiding at dest)
   player: Player;
   hasBall: boolean;
   isBallOnly: boolean; // True if this is a pass (only ball moves, piece stays)
   progress: number;
+  fromOverride?: { x: number; y: number } | null; // SVG position override (for drag-drop)
+  waypoints?: { x: number; y: number }[]; // Multi-pass path (all positions from start to end)
 }
 
 export default function Board({
@@ -68,6 +71,7 @@ export default function Board({
   touchedMask,
   mustPass = false,
   lastMove = null,
+  lastTurnMoves,
   animate = true,
 }: BoardProps) {
   // Drag state - drag only activates after moving past threshold
@@ -78,6 +82,13 @@ export default function Board({
   const svgRef = useRef<SVGSVGElement>(null);
 
   const DRAG_THRESHOLD = 8; // Pixels moved before drag activates
+
+  // Track SVG position of the last drag-drop so the animation starts from there
+  const lastDragDropRef = useRef<{ from: number; to: number; x: number; y: number } | null>(null);
+
+  // Suppress click events immediately after a drag-drop completes
+  // (pointerup fires before click, so drag can complete and then click fires on the original square)
+  const dragJustCompletedRef = useRef(false);
 
   // Convert client coordinates to SVG coordinates (accounts for viewBox offset and scale)
   const clientToSvg = (clientX: number, clientY: number): { x: number; y: number } | null => {
@@ -151,6 +162,9 @@ export default function Board({
     // If not actively dragging, do nothing (let click events handle it)
     if (draggingSquare === null) return;
 
+    // Mark that a drag just completed to suppress the subsequent click event
+    dragJustCompletedRef.current = true;
+
     if (onDragMove) {
       const svgPos = clientToSvg(e.clientX, e.clientY);
       if (svgPos) {
@@ -164,6 +178,13 @@ export default function Board({
           const destinations = getLegalDestinationsForSquare(draggingSquare);
 
           if (destinations.has(targetSquare)) {
+            // Save drop position so the animation starts from here, not the original square
+            lastDragDropRef.current = {
+              from: draggingSquare,
+              to: targetSquare,
+              x: svgPos.x - SQUARE_SIZE / 2,
+              y: svgPos.y - SQUARE_SIZE / 2,
+            };
             onDragMove(draggingSquare, targetSquare);
           }
         }
@@ -177,26 +198,75 @@ export default function Board({
   // Animation state
   const [animatingPiece, setAnimatingPiece] = useState<AnimatingPiece | null>(null);
   const prevLastMoveRef = useRef<LastMove | null>(null);
+  const prevLastTurnMovesRef = useRef<LastMove[] | undefined>(undefined);
   const animationRef = useRef<number | null>(null);
 
-  // Trigger animation when lastMove changes
+  // Trigger animation when lastMove or lastTurnMoves changes
   useEffect(() => {
     const prevMove = prevLastMoveRef.current;
     prevLastMoveRef.current = lastMove;
+    const prevTurnMoves = prevLastTurnMovesRef.current;
+    prevLastTurnMovesRef.current = lastTurnMoves;
 
-    // If lastMove changed and there's a new move, animate it (skip during history navigation)
-    if (animate && lastMove && (!prevMove || prevMove.from !== lastMove.from || prevMove.to !== lastMove.to)) {
-      // Determine what piece moved and if it has a ball
+    if (!animate) return;
+
+    // --- Multi-pass animation (ball travels through waypoints) ---
+    const turnMovesChanged = lastTurnMoves && lastTurnMoves.length > 1 &&
+      (!prevTurnMoves || prevTurnMoves.length !== lastTurnMoves.length ||
+       prevTurnMoves.some((m, i) => m.from !== lastTurnMoves[i].from || m.to !== lastTurnMoves[i].to));
+
+    if (turnMovesChanged && lastTurnMoves.length > 1) {
+      const firstFrom = lastTurnMoves[0].from;
+      const finalTo = lastTurnMoves[lastTurnMoves.length - 1].to;
+
+      // Determine player from board state at final destination
+      const hasP1AtDest = hasPiece(board.p1_pieces, finalTo) || hasPiece(board.p1_ball, finalTo);
+      const player: Player = hasP1AtDest ? 0 : 1;
+
+      // Build waypoints: start position + each destination
+      const waypoints = [
+        getSquarePosition(firstFrom, flipped),
+        ...lastTurnMoves.map(m => getSquarePosition(m.to, flipped)),
+      ];
+
+      const numSegments = lastTurnMoves.length;
+      const totalDuration = ANIMATION_DURATION * numSegments;
+      const startTime = performance.now();
+
+      const animateFn = (currentTime: number) => {
+        const progress = Math.min((currentTime - startTime) / totalDuration, 1);
+
+        setAnimatingPiece({
+          fromSquare: firstFrom,
+          toSquare: finalTo,
+          player,
+          hasBall: true,
+          isBallOnly: true,
+          progress,
+          waypoints,
+        });
+
+        if (progress < 1) {
+          animationRef.current = requestAnimationFrame(animateFn);
+        } else {
+          setAnimatingPiece(null);
+        }
+      };
+
+      if (animationRef.current) cancelAnimationFrame(animationRef.current);
+      animationRef.current = requestAnimationFrame(animateFn);
+      return;
+    }
+
+    // --- Single-move animation (existing behavior) ---
+    if (lastMove && (!prevMove || prevMove.from !== lastMove.from || prevMove.to !== lastMove.to)) {
       const fromSquare = lastMove.from;
       const toSquare = lastMove.to;
 
-      // Check if this was a piece move or ball pass by looking at current board state
-      // (the move already happened, so we check the destination)
       const hasP1AtDest = hasPiece(board.p1_pieces, toSquare) || hasPiece(board.p1_ball, toSquare);
       const hasP1Ball = hasPiece(board.p1_ball, toSquare);
       const hasP2Ball = hasPiece(board.p2_ball, toSquare);
 
-      // Check if there's still a piece at the source (means it was a pass, not a knight move)
       const hasP1PieceAtSource = hasPiece(board.p1_pieces, fromSquare);
       const hasP2PieceAtSource = hasPiece(board.p2_pieces, fromSquare);
       const isBallOnly = hasP1PieceAtSource || hasP2PieceAtSource;
@@ -204,12 +274,21 @@ export default function Board({
       const player: Player = hasP1AtDest ? 0 : 1;
       const hasBall = hasP1Ball || hasP2Ball;
 
-      // Start animation
+      let animFromOverride: { x: number; y: number } | null = null;
+      if (
+        lastDragDropRef.current &&
+        lastDragDropRef.current.from === fromSquare &&
+        lastDragDropRef.current.to === toSquare
+      ) {
+        animFromOverride = { x: lastDragDropRef.current.x, y: lastDragDropRef.current.y };
+        lastDragDropRef.current = null;
+      }
+
+      const duration = ANIMATION_DURATION;
       const startTime = performance.now();
 
-      const animate = (currentTime: number) => {
-        const elapsed = currentTime - startTime;
-        const progress = Math.min(elapsed / ANIMATION_DURATION, 1);
+      const animateFn = (currentTime: number) => {
+        const progress = Math.min((currentTime - startTime) / duration, 1);
 
         setAnimatingPiece({
           fromSquare,
@@ -218,33 +297,28 @@ export default function Board({
           hasBall,
           isBallOnly,
           progress,
+          fromOverride: animFromOverride,
         });
 
         if (progress < 1) {
-          animationRef.current = requestAnimationFrame(animate);
+          animationRef.current = requestAnimationFrame(animateFn);
         } else {
           setAnimatingPiece(null);
         }
       };
 
-      // Cancel any existing animation
-      if (animationRef.current) {
-        cancelAnimationFrame(animationRef.current);
-      }
-
-      animationRef.current = requestAnimationFrame(animate);
+      if (animationRef.current) cancelAnimationFrame(animationRef.current);
+      animationRef.current = requestAnimationFrame(animateFn);
     }
 
     return () => {
       if (animationRef.current) {
         cancelAnimationFrame(animationRef.current);
         animationRef.current = null;
-        // Clear stale animation state so a partially-complete animation
-        // doesn't leave a phantom piece on the board.
         setAnimatingPiece(null);
       }
     };
-  }, [lastMove, board]);
+  }, [lastMove, lastTurnMoves, board]);
 
   // Get destinations for the selected piece (knight moves and passes)
   const legalDestinations = useMemo(() => {
@@ -333,7 +407,14 @@ export default function Board({
     return (
       <g
         key={square}
-        onClick={() => onSquareClick(square)}
+        onClick={() => {
+          // Suppress click events that fire immediately after a drag completes
+          if (dragJustCompletedRef.current) {
+            dragJustCompletedRef.current = false;
+            return;
+          }
+          onSquareClick(square);
+        }}
         onDoubleClick={() => onSquareDoubleClick?.(square)}
       >
         {/* Square background */}
@@ -377,7 +458,6 @@ export default function Board({
               isSelected={isSelected}
               isIneligible={isIneligible}
               mustPass={mustPass && (hasP1Ball || hasP2Ball) && (hasP1Piece ? 0 : 1) === currentPlayer}
-              onClick={canMove || isSelected ? () => onSquareClick(square) : undefined}
             />
           </g>
         )}
@@ -426,12 +506,34 @@ export default function Board({
 
         {/* Animating piece/ball overlay */}
         {animatingPiece && animatingPiece.progress < 1 && (() => {
-          const fromPos = getSquarePosition(animatingPiece.fromSquare, flipped);
-          const toPos = getSquarePosition(animatingPiece.toSquare, flipped);
-          // Ease-out interpolation
-          const t = 1 - Math.pow(1 - animatingPiece.progress, 3);
-          const x = fromPos.x + (toPos.x - fromPos.x) * t;
-          const y = fromPos.y + (toPos.y - fromPos.y) * t;
+          let x: number, y: number;
+
+          try {
+            if (animatingPiece.waypoints && animatingPiece.waypoints.length > 1) {
+              // Multi-pass: interpolate along waypoint path
+              const pts = animatingPiece.waypoints;
+              const numSeg = pts.length - 1;
+              const scaled = animatingPiece.progress * numSeg;
+              const seg = Math.min(Math.floor(scaled), numSeg - 1);
+              if (seg < 0 || !pts[seg] || !pts[seg + 1]) {
+                return null; // Defensive: bail if waypoints are invalid
+              }
+              const segT = scaled - seg;
+              const t = 1 - Math.pow(1 - segT, 3); // ease-out per segment
+              x = pts[seg].x + (pts[seg + 1].x - pts[seg].x) * t;
+              y = pts[seg].y + (pts[seg + 1].y - pts[seg].y) * t;
+            } else {
+              // Single move: from -> to
+              const fromPos = animatingPiece.fromOverride ?? getSquarePosition(animatingPiece.fromSquare, flipped);
+              const toPos = getSquarePosition(animatingPiece.toSquare, flipped);
+              const t = 1 - Math.pow(1 - animatingPiece.progress, 3);
+              x = fromPos.x + (toPos.x - fromPos.x) * t;
+              y = fromPos.y + (toPos.y - fromPos.y) * t;
+            }
+          } catch (err) {
+            console.error('[Board] Animation rendering error:', err, animatingPiece);
+            return null; // Skip animation frame rather than crash
+          }
 
           if (animatingPiece.isBallOnly) {
             // Pass animation - only the ball moves

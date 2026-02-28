@@ -41,6 +41,7 @@ import random as py_random
 
 from . import persistence
 
+logger = logging.getLogger(__name__)
 
 # --- Bot Types ---
 # Available AI bot types:
@@ -100,6 +101,16 @@ class GameStateResponse(BaseModel):
 
 class MakeMoveRequest(BaseModel):
     move: int
+
+
+class MakeTurnRequest(BaseModel):
+    moves: list[int]
+
+
+class TurnError(Exception):
+    def __init__(self, message: str, code: str = "INVALID_TURN"):
+        self.message = message
+        self.code = code
 
 
 class AIMoveRequest(BaseModel):
@@ -677,6 +688,115 @@ def setup_game_players(
     elif game.player_types[1] == "human":
         # Human vs human - would need second user to join
         pass
+
+
+async def process_turn(game: Game, game_id: str, moves: list[int], user_id: str = None) -> GameStateResponse:
+    """
+    Process a complete turn atomically.
+    Validates all sub-moves, applies them, switches clocks once, and persists.
+    Raises TurnError on validation failure (state is rolled back).
+    """
+    if not moves:
+        raise TurnError("No moves provided", "EMPTY_TURN")
+
+    if game.state.is_terminal():
+        raise TurnError("Game already finished", "GAME_FINISHED")
+
+    # For online games, check if it's this player's turn
+    if game.is_online_game() and user_id:
+        if not game.can_user_move(user_id):
+            raise TurnError("Not your turn", "NOT_YOUR_TURN")
+
+    # Check player clock before processing
+    current = game.state.current_player
+    if game.player_clocks[current] and game.player_clocks[current].is_expired():
+        raise TurnError("Time expired", "TIME_EXPIRED")
+
+    # Check correspondence deadline
+    if game.is_correspondence() and game.move_deadline:
+        now_utc = datetime.utcnow().isoformat() + 'Z'
+        if now_utc > game.move_deadline:
+            raise TurnError("Move deadline expired", "TIME_EXPIRED")
+
+    # Snapshot for rollback
+    old_player = game.state.current_player
+    state_snapshot = game.state.copy()
+    moves_snapshot = list(game.moves)
+
+    applied_moves = []
+    try:
+        for move in moves:
+            legal_moves = get_legal_moves(game.state)
+            if move not in legal_moves:
+                raise TurnError(f"Invalid move: {move}", "INVALID_MOVE")
+            game.state.apply_move(move)
+            applied_moves.append(move)
+            if game.state.is_terminal():
+                break
+
+        # Verify turn completeness: player must have changed OR game must be terminal
+        if game.state.current_player == old_player and not game.state.is_terminal():
+            raise TurnError("Incomplete turn: player did not change", "INCOMPLETE_TURN")
+
+    except TurnError:
+        # Rollback
+        game.state = state_snapshot
+        game.moves = moves_snapshot
+        raise
+
+    # Turn is valid — commit
+    game.moves.extend(applied_moves)
+    game.last_activity = time.time()
+
+    # Switch clocks once for the whole turn
+    new_player = game.state.current_player
+    if old_player != new_player and game.player_clocks[old_player]:
+        game.player_clocks[old_player].stop_turn()
+        if not game.is_game_over() and game.player_clocks[new_player]:
+            game.player_clocks[new_player].start_turn()
+        persistence.save_time_remaining(game.game_id, [
+            game.player_clocks[0].get_remaining() if game.player_clocks[0] else 0.0,
+            game.player_clocks[1].get_remaining() if game.player_clocks[1] else 0.0,
+        ])
+
+    # Update correspondence deadline on turn change
+    if old_player != new_player and game.is_correspondence() and game.days_per_move:
+        if not game.is_game_over():
+            deadline = (datetime.utcnow() + timedelta(days=game.days_per_move)).isoformat() + 'Z'
+            game.move_deadline = deadline
+            persistence.set_move_deadline(game.game_id, deadline)
+        else:
+            game.move_deadline = None
+            persistence.set_move_deadline(game.game_id, None)
+
+    # Cancel abort timer on first move
+    if game.abort_timer:
+        game.abort_timer.cancel()
+        game.abort_timer = None
+
+    # Single DB write
+    persistence.save_game(game_id, game.state)
+    persistence.append_moves(game_id, applied_moves)
+
+    # ELO + online status
+    game.check_and_update_elo()
+    if game.is_online_game() and game.state.is_terminal():
+        game.online_status = "finished"
+        persistence.update_online_game_status(game.game_id, "finished", game.state.get_winner())
+
+    # Broadcast
+    response = game.to_response()
+    await broadcast_state(game, response)
+
+    if game.state.is_terminal():
+        winner = game.state.get_winner()
+        reason = "ball_reached_goal" if winner is not None else "draw"
+        await broadcast_online_event(game, "game_over", {
+            "winner": winner,
+            "reason": reason
+        })
+
+    return response
 
 
 async def clock_watchdog(game: Game):
@@ -2111,6 +2231,15 @@ async def make_move(
 
     legal_moves = get_legal_moves(game.state)
     if request.move not in legal_moves:
+        logger.warning(
+            "INVALID_MOVE (REST) game=%s move=%s legal_moves=%s "
+            "current_player=%s has_passed=%s ply=%s "
+            "touched_mask=%s balls=%s pieces=%s moves=%s",
+            game_id, request.move, legal_moves,
+            game.state.current_player, game.state.has_passed, game.state.ply,
+            game.state.touched_mask, game.state.balls, game.state.pieces,
+            game.moves,
+        )
         raise HTTPException(status_code=400, detail="Invalid move")
 
     # Check player clock before move
@@ -2152,6 +2281,31 @@ async def make_move(
     await broadcast_state(game, response)
 
     return response
+
+
+@app.post("/games/{game_id}/turn", response_model=GameStateResponse)
+async def make_turn(
+    game_id: str,
+    request: MakeTurnRequest,
+    auth_request: Request = None,
+    auth_cookie: Optional[str] = Cookie(None, alias=AUTH_COOKIE_NAME)
+):
+    """Submit a complete turn (one or more sub-moves) atomically."""
+    if game_id not in games:
+        raise HTTPException(status_code=404, detail="Game not found")
+
+    game = games[game_id]
+
+    # Associate user with game if logged in
+    user = await get_current_user(auth_request, auth_cookie) if auth_request else None
+    if user:
+        persistence.associate_user_with_game(game_id, user["user_id"])
+
+    try:
+        return await process_turn(game, game_id, request.moves, user_id=user["user_id"] if user else None)
+    except TurnError as e:
+        status = 409 if e.code in ("GAME_FINISHED", "TIME_EXPIRED") else 400
+        raise HTTPException(status_code=status, detail=e.message)
 
 
 @app.post("/games/{game_id}/ai", response_model=AIMoveResponse)
@@ -3948,6 +4102,17 @@ async def websocket_endpoint(websocket: WebSocket, game_id: str):
                         "winner": winner,
                         "reason": reason
                     })
+
+            elif msg_type == "turn":
+                turn_moves = data.get("data", {}).get("moves")
+                if not turn_moves or not isinstance(turn_moves, list):
+                    await send_error(websocket, "Moves list not specified", "INVALID_REQUEST")
+                    continue
+
+                try:
+                    await process_turn(game, game_id, turn_moves, user_id=user_id)
+                except TurnError as e:
+                    await send_error(websocket, e.message, e.code)
 
             elif msg_type == "ai_move":
                 # AI moves not allowed in online games

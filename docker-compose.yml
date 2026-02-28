@@ -10,6 +10,7 @@ services:
       - "8000"
     volumes:
       - ./engine/output/models:/app/models
+      - engine-data:/app/server/data
     environment:
       - PYTHONUNBUFFERED=1
       - JWT_SECRET=${JWT_SECRET:-change-me-in-production}
@@ -27,4 +28,7 @@ services:
     depends_on:
       - engine
     restart: unless-stopped
+
+volumes:
+  engine-data:
 

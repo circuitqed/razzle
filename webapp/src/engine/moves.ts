@@ -122,7 +122,10 @@ export function mustPass(state: EngineState): boolean {
 
 /** Get all legal moves for the current player. */
 export function getLegalMoves(state: EngineState): number[] {
-  const forcedPass = mustPass(state);
+  // Forced pass only applies at the START of a turn (before any pass).
+  // Once the player has started passing (hasPassed=true), they can
+  // always end their turn — the forced-pass rule doesn't trap them.
+  const forcedPass = !state.hasPassed && mustPass(state);
   const passMoves = getPassMoves(state);
 
   if (forcedPass && passMoves.length > 0) {

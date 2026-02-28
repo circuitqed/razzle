@@ -57,6 +57,7 @@ export default function OnlineGame({ gameId, onGameEnd }: OnlineGameProps) {
     mustPass,
     isPassing,
     rawMoves,
+    lastTurnAnimMoves,
     disconnectWarning,
     handleSquareClick,
     handleDragMove,
@@ -304,6 +305,7 @@ export default function OnlineGame({ gameId, onGameEnd }: OnlineGameProps) {
           mustPass={mustPass}
           isPassing={isPassing}
           lastMove={displayLastMove}
+          lastTurnMoves={lastTurnAnimMoves}
           rawMoves={rawMoves}
           viewPly={viewPly}
           isViewingHistory={isViewingHistory}

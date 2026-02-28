@@ -290,6 +290,13 @@ export function sendOnlineMove(ws: WebSocket, move: number): void {
 }
 
 /**
+ * Send a complete turn (list of sub-moves) in an online game.
+ */
+export function sendOnlineTurn(ws: WebSocket, moves: number[]): void {
+  ws.send(JSON.stringify({ type: 'turn', data: { moves } }));
+}
+
+/**
  * Send a ping to keep the connection alive.
  */
 export function sendPing(ws: WebSocket): void {

@@ -22,15 +22,30 @@ import { listModels, type ModelInfo } from './api/engine';
 import * as onlineApi from './api/online';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 
+const GAME_STORAGE_KEY = 'razzle_current_game';
+
+function readSavedGame(): { gameId: string; settings: NewGameSettings; playerColor: number } | null {
+  try {
+    const json = localStorage.getItem(GAME_STORAGE_KEY);
+    if (json) return JSON.parse(json);
+  } catch { /* ignore corrupt data */ }
+  return null;
+}
+
 function AppContent() {
+  // Restore saved game state if available
+  const savedGame = useMemo(() => readSavedGame(), []);
+
   // Game settings (persisted across new games)
-  const [settings, setSettings] = useState<NewGameSettings>({
-    mode: 'ai',
-    model: undefined,
-    simulations: 256,
-    colorChoice: 'random',
-  });
-  const [playerColor, setPlayerColor] = useState(0); // Actual color for current game
+  const [settings, setSettings] = useState<NewGameSettings>(
+    savedGame?.settings ?? {
+      mode: 'ai',
+      model: undefined,
+      simulations: 256,
+      colorChoice: 'random',
+    }
+  );
+  const [playerColor, setPlayerColor] = useState(savedGame?.playerColor ?? 0);
   const [gameGeneration, setGameGeneration] = useState(0); // Bumped to force new game
 
   const [flipBoard, setFlipBoard] = useState(false);
@@ -84,11 +99,13 @@ function AppContent() {
     mustPass,
     isPassing,
     lastMove,
+    lastTurnAnimMoves,
     rawMoves,
     evaluation,
     viewPly,
     isViewingHistory,
     startNewGame,
+    resumeGame,
     handleSquareClick,
     handleDragMove,
     endTurn,
@@ -116,11 +133,34 @@ function AppContent() {
     }
   }, []);
 
-  // Auto-start game on mount
+  // On mount: resume saved game or start new
   useEffect(() => {
-    startNewGame();
+    if (savedGame) {
+      resumeGame(savedGame.gameId).then(success => {
+        if (!success) {
+          localStorage.removeItem(GAME_STORAGE_KEY);
+          startNewGame();
+        }
+      });
+    } else {
+      startNewGame();
+    }
     fetchModels();
   }, []);
+
+  // Persist active game to localStorage so it survives refresh
+  useEffect(() => {
+    if (!gameState) return;
+    if (gameState.status === 'playing' && gameState.ply > 0) {
+      localStorage.setItem(GAME_STORAGE_KEY, JSON.stringify({
+        gameId: gameState.game_id,
+        settings,
+        playerColor,
+      }));
+    } else if (gameState.status === 'finished') {
+      localStorage.removeItem(GAME_STORAGE_KEY);
+    }
+  }, [gameState?.game_id, gameState?.status, gameState?.ply, settings, playerColor]);
 
   // Resolve color choice for new games
   const resolveColor = useCallback((choice: NewGameSettings['colorChoice']) => {
@@ -130,6 +170,7 @@ function AppContent() {
 
   // Handle new game from dialog
   const handleStartGame = useCallback((newSettings: NewGameSettings) => {
+    localStorage.removeItem(GAME_STORAGE_KEY);
     setSettings(newSettings);
     setShowNewGameDialog(false);
     const color = newSettings.mode === 'ai' ? resolveColor(newSettings.colorChoice) : 0;
@@ -159,6 +200,7 @@ function AppContent() {
 
   // Quick new game (same settings, new random color if applicable)
   const handleQuickNewGame = useCallback(() => {
+    localStorage.removeItem(GAME_STORAGE_KEY);
     if (settings.mode === 'ai') {
       setPlayerColor(resolveColor(settings.colorChoice));
     }
@@ -376,6 +418,7 @@ function AppContent() {
           mustPass={mustPass}
           isPassing={isPassing}
           lastMove={lastMove}
+          lastTurnMoves={lastTurnAnimMoves}
           rawMoves={rawMoves}
           viewPly={viewPly}
           isViewingHistory={isViewingHistory}
@@ -391,6 +434,7 @@ function AppContent() {
           bottomName={bottomName}
           cancelPass={cancelPass}
           evaluation={settings.mode === 'ai' ? evaluation : undefined}
+          playerColor={playerColor}
           aiThinking={aiThinking}
           statusLine={
             <>

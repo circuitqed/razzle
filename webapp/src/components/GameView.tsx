@@ -26,6 +26,7 @@ export interface GameViewProps {
   mustPass: boolean;
   isPassing: boolean;
   lastMove: LastMove | null;
+  lastTurnMoves?: LastMove[];
   rawMoves: number[];
   viewPly: number | null;
   isViewingHistory: boolean;
@@ -49,6 +50,8 @@ export interface GameViewProps {
   evaluation?: number | null;
   aiThinking?: boolean;
   aiModelLoading?: boolean;
+  /** Human player's color (0=blue, 1=red) — used for eval percentage coloring */
+  playerColor?: number;
 
   // Clock elements rendered adjacent to player names
   topClock?: React.ReactNode;
@@ -70,6 +73,7 @@ export default function GameView({
   mustPass,
   isPassing,
   lastMove,
+  lastTurnMoves,
   rawMoves,
   viewPly,
   isViewingHistory,
@@ -86,6 +90,7 @@ export default function GameView({
   cancelPass,
   evaluation,
   aiThinking = false,
+  playerColor = 0,
   topClock,
   bottomClock,
   statusLine,
@@ -153,11 +158,12 @@ export default function GameView({
               mustPass={mustPass}
               flipped={flipped}
               lastMove={lastMove}
+              lastTurnMoves={lastTurnMoves}
               animate={!isViewingHistory}
             />
             {/* Eval meter - only when evaluation is provided */}
             {evaluation !== undefined && evaluation !== null && (
-              <EvaluationMeter value={evaluation} />
+              <EvaluationMeter value={evaluation} flipped={flipped} playerColor={playerColor} />
             )}
             {/* Desktop: move history panel + navigation buttons */}
             <div className="hidden sm:flex sm:flex-col sm:gap-2">

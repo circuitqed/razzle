@@ -38,6 +38,7 @@ interface UseGameReturn {
   mustPass: boolean;
   isPassing: boolean;
   lastMove: LastMove | null;
+  lastTurnAnimMoves: LastMove[] | undefined;
   moveHistory: MoveRecord[];
   rawMoves: number[];
   evaluation: number | null;
@@ -45,6 +46,7 @@ interface UseGameReturn {
   viewPly: number | null;
   isViewingHistory: boolean;
   startNewGame: () => Promise<void>;
+  resumeGame: (gameId: string) => Promise<boolean>;
   handleSquareClick: (square: number) => void;
   handleDragMove: (from: number, to: number) => void;
   endTurn: () => void;
@@ -85,6 +87,10 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
   const [rawMoves, setRawMoves] = useState<number[]>([]);
   const [evaluation, setEvaluation] = useState<number | null>(null);
   const [aiProgress, setAiProgress] = useState<{ simsDone: number; totalSims: number } | null>(null);
+  const [lastTurnAnimMoves, setLastTurnAnimMoves] = useState<LastMove[] | undefined>(undefined);
+
+  // Generation counter: incremented on new game / resume so stale async ops bail out
+  const gameGenRef = useRef(0);
 
   // Client-side AI worker
   const aiWorker = useAIWorker();
@@ -159,6 +165,9 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
   // Handle AI move - compute the FULL turn, then apply all at once.
   // AI thinks silently; only the final board state is shown.
   const handleAIMove = useCallback(async (gameId: string) => {
+    const gen = gameGenRef.current;
+    const isStale = () => gen !== gameGenRef.current;
+
     setAiThinking(true);
     try {
       let aiMoveCount = 0;
@@ -167,6 +176,7 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
       let aiValue: number | null = null;
 
       let currentState = await api.getGameState(gameId);
+      if (isStale()) return;
 
       while (currentState.status === 'playing' && currentState.current_player === aiPlayer) {
         aiMoveCount++;
@@ -194,19 +204,24 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
             const result = await aiWorker.search(engineState, {
               numSimulations: aiSimulations,
             });
+            if (isStale()) return;
             aiMove = result.bestMove;
             aiValue = result.value;
             setAiProgress(null);
             currentState = await api.makeMove(gameId, aiMove);
+            if (isStale()) return;
           } catch (clientErr) {
+            if (isStale()) return;
             logger.error('[useGame] Client-side AI failed, falling back to server:', clientErr);
             const aiResponse = await api.getAIMove(gameId, { simulations: aiSimulations, model: aiModel });
+            if (isStale()) return;
             currentState = aiResponse.game_state;
             aiMove = aiResponse.move;
             aiValue = aiResponse.value;
           }
         } else {
           const aiResponse = await api.getAIMove(gameId, { simulations: aiSimulations, model: aiModel });
+          if (isStale()) return;
           currentState = aiResponse.game_state;
           aiMove = aiResponse.move;
           aiValue = aiResponse.value;
@@ -219,6 +234,8 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
           newPlayer: currentState.current_player,
         });
       }
+
+      if (isStale()) return;
 
       // Apply the full AI turn at once
       setGameState(currentState);
@@ -243,19 +260,22 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
       setMoveHistory(prev => [...prev, ...newRecords]);
 
       // Set lastMove to last non-END_TURN for animation
-      const lastActual = [...aiTurnMoves].reverse().find(m => m !== END_TURN_MOVE);
+      const nonEndTurns = aiTurnMoves.filter(m => m !== END_TURN_MOVE);
+      const lastActual = nonEndTurns[nonEndTurns.length - 1];
       if (lastActual !== undefined) {
         const { src, dst } = decodeMove(lastActual);
         setLastMove({ from: src, to: dst });
-        // Play sound for the turn result
-        if (aiTurnMoves.some(m => m !== END_TURN_MOVE && newRecords.length > 0)) {
-          // If there were passes (more than one non-END_TURN move), play pass sound
-          const nonEndTurns = aiTurnMoves.filter(m => m !== END_TURN_MOVE);
-          if (nonEndTurns.length > 1) {
-            playPassSound();
-          } else {
-            playMoveSound();
-          }
+
+        // Multi-pass: set waypoint animation data
+        if (nonEndTurns.length > 1) {
+          setLastTurnAnimMoves(nonEndTurns.map(m => {
+            const d = decodeMove(m);
+            return { from: d.src, to: d.dst };
+          }));
+          playPassSound();
+        } else {
+          setLastTurnAnimMoves(undefined);
+          playMoveSound();
         }
       }
 
@@ -264,11 +284,14 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
         currentPlayer: currentState.current_player,
       });
     } catch (err) {
+      if (isStale()) return;
       logger.error('[useGame] AI move failed:', err);
       setError(err instanceof Error ? err.message : 'AI move failed');
     } finally {
-      setAiThinking(false);
-      setAiProgress(null);
+      if (!isStale()) {
+        setAiThinking(false);
+        setAiProgress(null);
+      }
     }
   }, [aiSimulations, aiModel, aiPlayer, aiWorker]);
 
@@ -276,20 +299,30 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
   const handleAIMoveRef = useRef(handleAIMove);
   handleAIMoveRef.current = handleAIMove;
 
-  // Trigger AI move when it's AI's turn (e.g., after new game where AI goes first)
+  // Guard against double-sends (e.g. from event bubbling)
+  const commitInProgressRef = useRef(false);
+
+  // Trigger AI move when it's AI's turn and nothing else is in progress.
+  // Covers: new game (AI goes first), resumed game (AI's turn), etc.
   useEffect(() => {
     if (!vsAI || !gameState || gameState.status !== 'playing') return;
     if (aiThinking || isLoading) return;
     if (gameState.current_player !== aiPlayer) return;
-    if (gameState.ply === 0 && aiPlayer === 0) {
-      handleAIMove(gameState.game_id);
-    }
-  }, [vsAI, gameState?.game_id, gameState?.current_player, gameState?.ply, aiPlayer, aiThinking, isLoading]);
+    handleAIMove(gameState.game_id);
+  }, [vsAI, gameState?.game_id, gameState?.current_player, gameState?.status, aiPlayer, aiThinking, isLoading]);
 
   // Commit a complete turn: send all sub-moves to the server, update state.
   const commitTurn = useCallback(
     (moves: number[]) => {
       if (!gameState) return;
+      if (commitInProgressRef.current) {
+        logger.info('[useGame] Ignoring duplicate commitTurn');
+        return;
+      }
+      commitInProgressRef.current = true;
+
+      const gen = gameGenRef.current;
+      const isStale = () => gen !== gameGenRef.current;
 
       setIsLoading(true);
       setError(null);
@@ -299,14 +332,18 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
 
       (async () => {
         try {
-          let currentState = gameState;
-          for (const move of moves) {
-            currentState = await api.makeMove(gameId, move);
-          }
+          logger.info('[useGame] Sending turn to server:', moves);
+          const currentState = await api.makeTurn(gameId, moves);
+          if (isStale()) return;
 
           setGameState(currentState);
 
-          // Record moves
+          // Use authoritative move list from server
+          if (currentState.moves) {
+            setRawMoves(currentState.moves);
+          }
+
+          // Record new moves in history
           const newRecords: MoveRecord[] = [];
           for (const move of moves) {
             if (move !== END_TURN_MOVE) {
@@ -318,10 +355,10 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
               });
             }
           }
-          setRawMoves((prev) => [...prev, ...moves]);
           setMoveHistory((prev) => [...prev, ...newRecords]);
 
-          // Set lastMove for animation
+          // Set lastMove for animation (human moves don't use multi-pass waypoints)
+          setLastTurnAnimMoves(undefined);
           const lastActual = [...moves].reverse().find((m) => m !== END_TURN_MOVE);
           if (lastActual !== undefined) {
             const { src, dst } = decodeMove(lastActual);
@@ -333,10 +370,14 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
             await handleAIMoveRef.current(currentState.game_id);
           }
         } catch (err) {
+          if (isStale()) return;
           logger.error('[useGame] commitTurn failed:', err);
           setError(err instanceof Error ? err.message : 'Move failed');
         } finally {
-          setIsLoading(false);
+          commitInProgressRef.current = false;
+          if (!isStale()) {
+            setIsLoading(false);
+          }
         }
       })();
     },
@@ -360,11 +401,14 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
 
   // Start a new game
   const startNewGame = useCallback(async () => {
+    gameGenRef.current++;  // Invalidate any in-flight AI/commit operations
+    setAiThinking(false);
     setIsLoading(true);
     setError(null);
     clearSelection();
     goToEnd();
     setLastMove(null);
+    setLastTurnAnimMoves(undefined);
     setMoveHistory([]);
     setRawMoves([]);
     setEvaluation(null);
@@ -383,6 +427,69 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
       setIsLoading(false);
     }
   }, [vsAI, aiSimulations, clearSelection, goToEnd]);
+
+  // Resume an existing game (e.g., after page refresh)
+  const resumeGame = useCallback(async (gameId: string): Promise<boolean> => {
+    gameGenRef.current++;  // Invalidate any in-flight AI/commit operations
+    setAiThinking(false);
+    setIsLoading(true);
+    setError(null);
+    clearSelection();
+    goToEnd();
+    setLastMove(null);
+    setLastTurnAnimMoves(undefined);
+    setMoveHistory([]);
+    setRawMoves([]);
+    setEvaluation(null);
+
+    try {
+      const state = await api.getGameState(gameId);
+
+      // Only resume games that are still in progress
+      if (state.status !== 'playing') {
+        return false;
+      }
+
+      setGameState(state);
+
+      // Restore move history from server
+      if (state.moves) {
+        setRawMoves(state.moves);
+
+        // Derive lastMove from move history
+        for (let i = state.moves.length - 1; i >= 0; i--) {
+          if (state.moves[i] !== END_TURN_MOVE) {
+            const { src, dst } = decodeMove(state.moves[i]);
+            setLastMove({ from: src, to: dst });
+            break;
+          }
+        }
+
+        // Rebuild moveHistory records
+        const records: MoveRecord[] = [];
+        for (const move of state.moves) {
+          if (move !== END_TURN_MOVE) {
+            const { src, dst } = decodeMove(move);
+            // Approximate the player from the move sequence
+            records.push({
+              move,
+              algebraic: `${squareToAlgebraic(src)}-${squareToAlgebraic(dst)}`,
+              player: 0 as Player, // Approximate - not critical for display
+            });
+          }
+        }
+        setMoveHistory(records);
+      }
+
+      // AI triggering handled by the useEffect that watches current_player
+      return true;
+    } catch (err) {
+      logger.error('[useGame] Failed to resume game:', err);
+      return false;
+    } finally {
+      setIsLoading(false);
+    }
+  }, [clearSelection, goToEnd]);
 
   // Undo last move
   const undoMove = useCallback(async () => {
@@ -449,6 +556,7 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
     mustPass,
     isPassing,
     lastMove: displayLastMove,
+    lastTurnAnimMoves,
     moveHistory,
     rawMoves,
     evaluation,
@@ -456,6 +564,7 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
     viewPly,
     isViewingHistory,
     startNewGame,
+    resumeGame,
     handleSquareClick,
     handleDragMove,
     endTurn,

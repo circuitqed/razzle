@@ -1,5 +1,5 @@
-import { describe, it, expect, vi } from 'vitest'
-import { render, fireEvent } from '@testing-library/react'
+import { describe, it, expect } from 'vitest'
+import { render } from '@testing-library/react'
 import Piece from './Piece'
 
 // Helper to render SVG components
@@ -45,25 +45,5 @@ describe('Piece component', () => {
     const polygon = container.querySelector('polygon')
     expect(polygon).toHaveAttribute('stroke', '#1f2937')
     expect(polygon).toHaveAttribute('stroke-width', '1.5')
-  })
-
-  it('calls onClick when provided and clicked', () => {
-    const handleClick = vi.fn()
-    const { container } = renderSvg(<Piece player={0} hasBall={false} onClick={handleClick} />)
-    const g = container.querySelector('g')
-    fireEvent.click(g!)
-    expect(handleClick).toHaveBeenCalledTimes(1)
-  })
-
-  it('has pointer cursor when onClick is provided', () => {
-    const { container } = renderSvg(<Piece player={0} hasBall={false} onClick={() => {}} />)
-    const g = container.querySelector('g')
-    expect(g).toHaveStyle({ cursor: 'pointer' })
-  })
-
-  it('has default cursor when onClick is not provided', () => {
-    const { container } = renderSvg(<Piece player={0} hasBall={false} />)
-    const g = container.querySelector('g')
-    expect(g).toHaveStyle({ cursor: 'default' })
   })
 })

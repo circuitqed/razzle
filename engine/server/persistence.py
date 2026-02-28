@@ -17,8 +17,13 @@ from typing import Optional
 from razzle.core.state import GameState
 
 
-# Default database location
-DEFAULT_DB_PATH = Path(__file__).parent / "games.db"
+# Default database location - use persistent data dir if it exists (Docker volume),
+# otherwise fall back to the server directory (local dev).
+_DATA_DIR = Path(__file__).parent / "data"
+if _DATA_DIR.is_dir():
+    DEFAULT_DB_PATH = _DATA_DIR / "games.db"
+else:
+    DEFAULT_DB_PATH = Path(__file__).parent / "games.db"
 
 # Password hashing configuration
 HASH_ITERATIONS = 100000
@@ -474,6 +479,34 @@ def append_move(game_id: str, move: int, db_path: Path = None) -> None:
         conn.execute(
             "UPDATE games SET moves_json = ?, move_timestamps_json = ?, updated_at = ? WHERE game_id = ?",
             (json.dumps(moves), json.dumps(timestamps), now, game_id)
+        )
+        conn.commit()
+
+
+def append_moves(game_id: str, moves: list[int], db_path: Path = None) -> None:
+    """Append multiple moves to a game's move history, with timestamps."""
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+    now = datetime.utcnow().isoformat() + 'Z'
+
+    with get_connection(db_path) as conn:
+        row = conn.execute(
+            "SELECT moves_json, move_timestamps_json FROM games WHERE game_id = ?",
+            (game_id,)
+        ).fetchone()
+        if row is None:
+            return
+
+        existing_moves = json.loads(row["moves_json"]) if row["moves_json"] else []
+        existing_moves.extend(int(m) for m in moves)
+
+        timestamps_json = row["move_timestamps_json"] if "move_timestamps_json" in row.keys() else "[]"
+        timestamps = json.loads(timestamps_json) if timestamps_json else []
+        timestamps.extend(now for _ in moves)
+
+        conn.execute(
+            "UPDATE games SET moves_json = ?, move_timestamps_json = ?, updated_at = ? WHERE game_id = ?",
+            (json.dumps(existing_moves), json.dumps(timestamps), now, game_id)
         )
         conn.commit()
 

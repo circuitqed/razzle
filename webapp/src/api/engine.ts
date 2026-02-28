@@ -20,8 +20,8 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   });
 
   if (!response.ok) {
-    const error = await response.json().catch(() => ({ message: 'Unknown error' }));
-    throw new EngineAPIError(response.status, error.code || 'UNKNOWN', error.message);
+    const error = await response.json().catch(() => ({ detail: 'Unknown error' }));
+    throw new EngineAPIError(response.status, error.code || 'UNKNOWN', error.detail || error.message || 'Unknown error');
   }
 
   return response.json();
@@ -51,6 +51,14 @@ export async function makeMove(gameId: string, move: number): Promise<GameState>
   return request(`/games/${gameId}/move`, {
     method: 'POST',
     body: JSON.stringify({ move }),
+  });
+}
+
+// Submit a complete turn (one or more sub-moves) atomically
+export async function makeTurn(gameId: string, moves: number[]): Promise<GameState> {
+  return request(`/games/${gameId}/turn`, {
+    method: 'POST',
+    body: JSON.stringify({ moves }),
   });
 }
 

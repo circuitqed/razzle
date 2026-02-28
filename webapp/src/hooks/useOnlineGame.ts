@@ -47,6 +47,7 @@ export interface UseOnlineGameReturn {
   mustPass: boolean;
   isPassing: boolean;
   lastMove: LastMove | null;
+  lastTurnAnimMoves: LastMove[] | undefined;
   rawMoves: number[];
   disconnectWarning: { gracePeriod: number; startTime: number } | null;
   handleSquareClick: (square: number) => void;
@@ -98,6 +99,7 @@ export function useOnlineGame(options: UseOnlineGameOptions): UseOnlineGameRetur
     gracePeriod: number;
     startTime: number;
   } | null>(null);
+  const [lastTurnAnimMoves, setLastTurnAnimMoves] = useState<LastMove[] | undefined>(undefined);
 
   // Rematch state
   const [rematchState, setRematchState] = useState<RematchState>('none');
@@ -117,6 +119,7 @@ export function useOnlineGame(options: UseOnlineGameOptions): UseOnlineGameRetur
   // Generation counter: incremented on each cleanup so stale WS handlers are ignored
   const connectionGenRef = useRef(0);
   const commitInProgressRef = useRef(false);
+  const prevRawMovesLenRef = useRef(0);
 
   // Refs for values used in callbacks to avoid re-creating connect function
   const myColorRef = useRef<0 | 1 | null>(null);
@@ -211,6 +214,22 @@ export function useOnlineGame(options: UseOnlineGameOptions): UseOnlineGameRetur
         }
         // Sync rawMoves and lastMove from server state
         if (data.moves) {
+          // Compute new moves since last state to detect multi-pass turns
+          const prevLen = prevRawMovesLenRef.current;
+          const newMoves = data.moves.slice(prevLen);
+          const nonEndTurns = newMoves.filter((m: number) => m !== END_TURN_MOVE);
+
+          // Set multi-pass animation if opponent made a multi-pass turn
+          if (nonEndTurns.length > 1) {
+            setLastTurnAnimMoves(nonEndTurns.map((m: number) => {
+              const { src, dst } = decodeMove(m);
+              return { from: src, to: dst };
+            }));
+          } else {
+            setLastTurnAnimMoves(undefined);
+          }
+
+          prevRawMovesLenRef.current = data.moves.length;
           setRawMoves(data.moves);
           let derivedLastMove: LastMove | null = null;
           for (let i = data.moves.length - 1; i >= 0; i--) {
@@ -413,11 +432,9 @@ export function useOnlineGame(options: UseOnlineGameOptions): UseOnlineGameRetur
       logger.info('[useOnlineGame] Committing turn:', moves);
       setIsLoading(true);
 
-      // Send all moves as WebSocket messages
-      for (const move of moves) {
-        onlineApi.sendOnlineMove(wsRef.current, move);
-      }
-      // State will be updated by onState handler when server processes all moves
+      // Send complete turn as a single atomic message
+      onlineApi.sendOnlineTurn(wsRef.current, moves);
+      // State will be updated by onState handler when server processes the turn
     },
     [connectionStatus]
   );
@@ -492,6 +509,7 @@ export function useOnlineGame(options: UseOnlineGameOptions): UseOnlineGameRetur
     mustPass,
     isPassing,
     lastMove: displayLastMove,
+    lastTurnAnimMoves,
     rawMoves,
     disconnectWarning,
     handleSquareClick,

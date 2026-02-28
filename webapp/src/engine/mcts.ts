@@ -123,7 +123,18 @@ function expandNode(node: MCTSNode, policy: Float32Array): void {
     const childState = copyState(node.state);
     applyMove(childState, move);
     const prior = policySum > 0 ? getPrior(move) / policySum : 1.0 / legalMoves.length;
-    node.children.set(move, createNode(childState, prior));
+    const child = createNode(childState, prior);
+
+    // Seed terminal children with actual game result so MCTS
+    // immediately knows about wins/losses regardless of NN prior
+    if (isTerminal(childState)) {
+      const result = getResult(childState, childState.currentPlayer);
+      const value = 2 * result - 1; // [-1, +1] from child's perspective
+      child.visitCount = 1;
+      child.valueSum = value;
+    }
+
+    node.children.set(move, child);
   }
 
   node.isExpanded = true;
@@ -164,6 +175,18 @@ export async function search(
     root.state,
   );
   expandNode(root, rootPolicy);
+
+  // Check for immediate winning move among children (e.g. winning pass)
+  // This catches wins that the neural net might give low prior to
+  const rootPlayer = root.state.currentPlayer;
+  for (const [action, child] of root.children) {
+    if (isTerminal(child.state)) {
+      const result = getResult(child.state, rootPlayer);
+      if (result === 1.0) {
+        return { bestMove: action, rootNode: root, simsDone: 0, value: 1.0 };
+      }
+    }
+  }
 
   // Pass quiescence for root
   let initialValue = rootValue;

@@ -136,24 +136,36 @@ class Node:
                 child_state = self.state.copy()
                 child_state.apply_move(move)
                 prior = get_prior(move) / policy_sum
-                self.children[move] = Node(
+                child = Node(
                     state=child_state,
                     parent=self,
                     parent_action=move,
                     prior=prior
                 )
+                # Seed terminal children with actual game result so MCTS
+                # immediately knows about wins/losses regardless of NN prior
+                if child_state.is_terminal():
+                    result = child_state.get_result(child_state.current_player)
+                    child.visit_count = 1
+                    child.value_sum = 2 * result - 1
+                self.children[move] = child
         else:
             # Uniform if policy is all zeros
             uniform = 1.0 / len(legal_moves) if legal_moves else 0.0
             for move in legal_moves:
                 child_state = self.state.copy()
                 child_state.apply_move(move)
-                self.children[move] = Node(
+                child = Node(
                     state=child_state,
                     parent=self,
                     parent_action=move,
                     prior=uniform
                 )
+                if child_state.is_terminal():
+                    result = child_state.get_result(child_state.current_player)
+                    child.visit_count = 1
+                    child.value_sum = 2 * result - 1
+                self.children[move] = child
 
         self.is_expanded = True
 
@@ -229,6 +241,18 @@ class MCTS:
         policy, value = self.evaluator.evaluate(root.state)
         self._track_eval(root.state)
         root.expand(policy)
+
+        # Check for immediate winning move (e.g. winning pass/knight move).
+        # Return early so we never miss a 1-ply win regardless of NN prior.
+        root_player = root.state.current_player
+        for move, child in root.children.items():
+            if child.state.is_terminal():
+                result = child.state.get_result(root_player)
+                if result == 1.0:
+                    win_value = 2 * child.state.get_result(child.state.current_player) - 1
+                    child.visit_count = self.config.num_simulations
+                    child.value_sum = win_value * self.config.num_simulations
+                    return root
 
         # Pass quiescence for root: if mid-pass, search all continuations
         # This ensures we find forced wins even if network priors are wrong
@@ -455,6 +479,18 @@ class MCTS:
         self._track_eval(root.state)
         root.expand(policy)
 
+        # Check for immediate winning move (e.g. winning pass/knight move).
+        # Return early so we never miss a 1-ply win regardless of NN prior.
+        root_player = root.state.current_player
+        for move, child in root.children.items():
+            if child.state.is_terminal():
+                result = child.state.get_result(root_player)
+                if result == 1.0:
+                    win_value = 2 * child.state.get_result(child.state.current_player) - 1
+                    child.visit_count = self.config.num_simulations
+                    child.value_sum = win_value * self.config.num_simulations
+                    return root
+
         # Pass quiescence for root: if mid-pass, search all continuations
         # This ensures we find forced wins even if network priors are wrong
         if self.config.pass_quiescence and root.state.has_passed:
@@ -650,6 +686,24 @@ class MCTS:
 
         self._track_eval(root.state)
         root.expand(policy)
+
+        # Check for immediate winning move (e.g. winning pass/knight move).
+        # Return early so we never miss a 1-ply win regardless of NN prior.
+        root_player = root.state.current_player
+        for move, child in root.children.items():
+            if child.state.is_terminal():
+                result = child.state.get_result(root_player)
+                if result == 1.0:
+                    win_value = 2 * child.state.get_result(child.state.current_player) - 1
+                    child.visit_count = self.config.num_simulations
+                    child.value_sum = win_value * self.config.num_simulations
+                    elapsed = time.time() - start_time
+                    return root, {
+                        'num_simulations': 0,
+                        'difficulty': difficulty,
+                        'time_elapsed': elapsed,
+                        'early_stop': True,
+                    }
 
         # Pass quiescence for root: if mid-pass, search all continuations
         # This ensures we find forced wins even if network priors are wrong

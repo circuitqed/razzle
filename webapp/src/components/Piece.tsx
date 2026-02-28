@@ -6,16 +6,15 @@ interface PieceProps {
   isSelected?: boolean;
   isIneligible?: boolean;
   mustPass?: boolean;
-  onClick?: () => void;
 }
 
-export default function Piece({ player, hasBall, isSelected, isIneligible, mustPass, onClick }: PieceProps) {
+export default function Piece({ player, hasBall, isSelected, isIneligible, mustPass }: PieceProps) {
   const baseColor = player === 0 ? '#3b82f6' : '#ef4444';
   const strokeColor = isSelected ? '#fbbf24' : '#1f2937';
   const strokeWidth = isSelected ? 3 : 1.5;
 
   return (
-    <g onClick={onClick} style={{ cursor: onClick ? 'pointer' : 'default' }}>
+    <g>
       {/* Main piece - diamond shape */}
       <polygon
         points="25,8 42,25 25,42 8,25"
