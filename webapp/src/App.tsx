@@ -1,6 +1,6 @@
 import { Component, useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import type { ReactNode, ErrorInfo } from 'react';
-import { BrowserRouter, Routes, Route, useParams, useNavigate } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, useParams, useNavigate, useLocation } from 'react-router-dom';
 import BugReportDialog from './components/BugReportDialog';
 import ConfirmDialog from './components/ConfirmDialog';
 import GameView from './components/GameView';
@@ -80,7 +80,11 @@ function AppContent() {
   } | null>(null);
 
   const navigate = useNavigate();
+  const location = useLocation();
   const { user } = useAuth();
+
+  // If arriving from an online game, don't resume saved AI game
+  const fromOnline = (location.state as { fromOnline?: boolean })?.fromOnline === true;
 
   const toggleSound = () => {
     const newValue = !soundOn;
@@ -135,7 +139,7 @@ function AppContent() {
 
   // On mount: resume saved game or start new
   useEffect(() => {
-    if (savedGame) {
+    if (savedGame && !fromOnline) {
       resumeGame(savedGame.gameId).then(success => {
         if (!success) {
           localStorage.removeItem(GAME_STORAGE_KEY);
@@ -143,6 +147,9 @@ function AppContent() {
         }
       });
     } else {
+      if (fromOnline) {
+        localStorage.removeItem(GAME_STORAGE_KEY);
+      }
       startNewGame();
     }
     fetchModels();
@@ -248,14 +255,19 @@ function AppContent() {
   const bottomName = settings.mode === 'ai' ? playerName : (shouldFlipBoard ? 'Red' : 'Blue');
   const topName = settings.mode === 'ai' ? opponentName : (shouldFlipBoard ? 'Blue' : 'Red');
 
-  // Winner text
-  const getWinnerText = () => {
-    if (!gameState || gameState.winner === null) return '';
+  // Winner text + color
+  const winnerDisplay = useMemo(() => {
+    if (!gameState || gameState.winner === null) return null;
+    const colorClass = gameState.winner === 0 ? 'text-blue-400' : 'text-red-400';
     if (settings.mode === 'ai') {
-      return gameState.winner === playerColor ? 'You Win!' : `${opponentName} Wins!`;
+      const text = gameState.winner === playerColor
+        ? 'You Win!'
+        : `${opponentName} Wins!`;
+      return { text, colorClass };
     }
-    return gameState.winner === 0 ? 'Blue Wins!' : 'Red Wins!';
-  };
+    const text = gameState.winner === 0 ? 'Blue Wins!' : 'Red Wins!';
+    return { text, colorClass };
+  }, [gameState, settings.mode, playerColor, opponentName]);
 
   // Turn indicator text (consolidated with AI thinking)
   const turnIndicator = useMemo(() => {
@@ -387,7 +399,7 @@ function AppContent() {
   }, [waitingGame, navigate]);
 
   return (
-    <div className="min-h-screen bg-gray-900 text-white flex flex-col">
+    <div className="h-[100dvh] bg-gray-900 text-white flex flex-col overflow-hidden">
       {/* Header bar */}
       <header className="flex items-center justify-between px-4 py-2 shrink-0">
         <div className="w-20" /> {/* Spacer for balance */}
@@ -408,7 +420,7 @@ function AppContent() {
         </div>
       </header>
 
-      <main className="flex-1 flex flex-col items-center p-2 sm:p-4 pb-4">
+      <main className="flex-1 min-h-0 flex flex-col items-center p-2 sm:p-4 pb-4 overflow-y-auto">
         <GameView
           gameState={gameState}
           selectedSquare={selectedSquare}
@@ -438,8 +450,8 @@ function AppContent() {
           aiThinking={aiThinking}
           statusLine={
             <>
-              {gameState?.status === 'finished' && gameState.winner !== null && (
-                <span className="text-xl font-bold text-yellow-400">{getWinnerText()}</span>
+              {gameState?.status === 'finished' && winnerDisplay && (
+                <span className={`text-xl font-bold ${winnerDisplay.colorClass}`}>{winnerDisplay.text}</span>
               )}
               {turnIndicator && gameState?.status === 'playing' && (
                 <>

@@ -131,14 +131,44 @@ export default function OnlineGame({ gameId, onGameEnd }: OnlineGameProps) {
     return myColor === 0 ? 'Red' : 'Blue';
   }, [myColor, opponent]);
 
-  // Rich name elements: opponent gets rating + connection dot
+  // Forfeit countdown: show after 30s of opponent disconnect
+  const FORFEIT_DISPLAY_DELAY = 30;
+  const [forfeitCountdown, setForfeitCountdown] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (!disconnectWarning) {
+      setForfeitCountdown(null);
+      return;
+    }
+    const tick = () => {
+      const elapsed = (Date.now() - disconnectWarning.startTime) / 1000;
+      const remaining = disconnectWarning.gracePeriod - elapsed;
+      if (elapsed >= FORFEIT_DISPLAY_DELAY && remaining > 0) {
+        setForfeitCountdown(Math.ceil(remaining));
+      } else if (remaining <= 0) {
+        setForfeitCountdown(0);
+      } else {
+        setForfeitCountdown(null);
+      }
+    };
+    tick();
+    const interval = setInterval(tick, 1000);
+    return () => clearInterval(interval);
+  }, [disconnectWarning]);
+
+  // Rich name elements: opponent gets rating + connection dot + forfeit countdown
   const opponentNameEl = useMemo(() => (
     <div className="flex items-center gap-1.5">
       <span>{opponentDisplayName}</span>
       {opponent?.elo_rating && <span className="text-gray-600">({Math.round(opponent.elo_rating)})</span>}
       <span className={`w-1.5 h-1.5 rounded-full ${opponentConnected ? 'bg-green-500' : 'bg-red-500 animate-pulse'}`} />
+      {forfeitCountdown !== null && (
+        <span className="text-red-400 text-xs">
+          forfeit in {forfeitCountdown}s
+        </span>
+      )}
     </div>
-  ), [opponentDisplayName, opponent?.elo_rating, opponentConnected]);
+  ), [opponentDisplayName, opponent?.elo_rating, opponentConnected, forfeitCountdown]);
 
   const myNameEl = useMemo(() => (
     <span>{myColor === 0 ? 'Blue (You)' : 'Red (You)'}</span>
@@ -254,12 +284,15 @@ export default function OnlineGame({ gameId, onGameEnd }: OnlineGameProps) {
     return undefined;
   }, [myColor, bottomPlayerIndex, isCorrespondence, moveDeadline, timeRemaining, liveCurrentPlayer, gameOver, clocksStarted]);
 
-  // Winner text
-  const getWinnerText = () => {
-    if (!gameState || gameState.winner === null) return '';
-    if (gameState.winner === myColor) return 'You Win!';
-    return 'You Lose';
-  };
+  // Winner text + color
+  const winnerDisplay = useMemo(() => {
+    if (!gameState || gameState.winner === null) return null;
+    const winnerName = gameState.winner === myColor
+      ? 'You'
+      : (opponent?.display_name || (gameState.winner === 0 ? 'Blue' : 'Red'));
+    const colorClass = gameState.winner === 0 ? 'text-blue-400' : 'text-red-400';
+    return { text: `${winnerName} Win${gameState.winner === myColor ? '' : 's'}!`, colorClass };
+  }, [gameState, myColor, opponent]);
 
   // Turn indicator
   const turnIndicator = useMemo(() => {
@@ -270,7 +303,7 @@ export default function OnlineGame({ gameId, onGameEnd }: OnlineGameProps) {
   }, [gameState, isMyTurn, opponentDisplayName]);
 
   return (
-    <div className="min-h-screen bg-gray-900 text-white flex flex-col">
+    <div className="h-[100dvh] bg-gray-900 text-white flex flex-col overflow-hidden">
       {/* Header bar with online overlay */}
       <header className="flex items-center justify-between px-4 py-2 shrink-0">
         <div className="w-20" />
@@ -286,16 +319,15 @@ export default function OnlineGame({ gameId, onGameEnd }: OnlineGameProps) {
         </div>
       </header>
 
-      {/* Online-specific overlay (connection modals, disconnect warning) */}
+      {/* Online-specific overlay (connection modals) */}
       {myColor !== null && (
         <OnlineGameOverlay
           connectionStatus={connectionStatus}
-          disconnectWarning={disconnectWarning}
           onReconnect={reconnect}
         />
       )}
 
-      <main className="flex-1 flex flex-col items-center p-2 sm:p-4 pb-4">
+      <main className="flex-1 min-h-0 flex flex-col items-center p-2 sm:p-4 pb-4 overflow-y-auto">
         <GameView
           gameState={effectiveGameState}
           selectedSquare={selectedSquare}
@@ -324,8 +356,8 @@ export default function OnlineGame({ gameId, onGameEnd }: OnlineGameProps) {
           bottomClock={bottomClock}
           statusLine={
             <>
-              {gameState?.status === 'finished' && gameState.winner !== null && (
-                <span className="text-xl font-bold text-yellow-400">{getWinnerText()}</span>
+              {gameState?.status === 'finished' && winnerDisplay && (
+                <span className={`text-xl font-bold ${winnerDisplay.colorClass}`}>{winnerDisplay.text}</span>
               )}
               {turnIndicator && (
                 <>
@@ -360,7 +392,7 @@ export default function OnlineGame({ gameId, onGameEnd }: OnlineGameProps) {
               {/* Back to Menu - after game ends */}
               {gameState && gameState.status !== 'playing' && (
                 <button
-                  onClick={() => navigate('/')}
+                  onClick={() => navigate('/', { state: { fromOnline: true } })}
                   className="px-3 py-2 sm:px-4 bg-gray-600 hover:bg-gray-700 rounded font-medium transition-colors text-sm sm:text-base"
                 >
                   Back to Menu

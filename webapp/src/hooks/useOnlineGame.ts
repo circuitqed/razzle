@@ -219,8 +219,9 @@ export function useOnlineGame(options: UseOnlineGameOptions): UseOnlineGameRetur
           const newMoves = data.moves.slice(prevLen);
           const nonEndTurns = newMoves.filter((m: number) => m !== END_TURN_MOVE);
 
-          // Set multi-pass animation if opponent made a multi-pass turn
-          if (nonEndTurns.length > 1) {
+          // Set multi-pass animation only for opponent's incremental moves
+          // Skip on initial load (prevLen === 0) and our own echoed turns
+          if (nonEndTurns.length > 1 && prevLen > 0 && !commitInProgressRef.current) {
             setLastTurnAnimMoves(nonEndTurns.map((m: number) => {
               const { src, dst } = decodeMove(m);
               return { from: src, to: dst };
