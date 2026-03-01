@@ -58,6 +58,7 @@ def init_db(db_path: Path = None) -> None:
                 ai_simulations INTEGER NOT NULL DEFAULT 800,
                 state_json TEXT NOT NULL,
                 moves_json TEXT NOT NULL DEFAULT '[]',
+                move_timestamps_json TEXT DEFAULT '[]',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )
@@ -1194,6 +1195,22 @@ def get_training_games_stats(db_path: Path = None) -> dict:
         }
 
 
+def get_total_games_trained(db_path: Path = None) -> int:
+    """Get the total number of games trained across all iterations.
+
+    Computed from the training_metrics table which stores num_games per iteration.
+    This is the authoritative source, surviving trainer restarts.
+    """
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+
+    with get_connection(db_path) as conn:
+        row = conn.execute(
+            "SELECT COALESCE(SUM(num_games), 0) as total FROM training_metrics"
+        ).fetchone()
+        return row["total"]
+
+
 def save_training_model(
     version: str,
     iteration: int,
@@ -2268,6 +2285,23 @@ def get_online_game_status(
         state = state_from_json(row["state_json"])
         is_your_turn = state.current_player == your_color
 
+        # Your info
+        your_info = None
+        if your_color == 0 and row["player1_user_id"]:
+            my_id = row["player1_user_id"]
+            your_info = {
+                "user_id": my_id,
+                "display_name": row["p1_name"] or ("Anonymous" if my_id.startswith("anon_") else my_id),
+                **({"elo_rating": row["p1_elo"]} if row["p1_elo"] and not my_id.startswith("anon_") else {}),
+            }
+        elif your_color == 1 and row["player2_user_id"]:
+            my_id = row["player2_user_id"]
+            your_info = {
+                "user_id": my_id,
+                "display_name": row["p2_name"] or ("Anonymous" if my_id.startswith("anon_") else my_id),
+                **({"elo_rating": row["p2_elo"]} if row["p2_elo"] and not my_id.startswith("anon_") else {}),
+            }
+
         # Opponent info
         opponent = None
         if your_color == 0 and row["player2_user_id"]:
@@ -2297,6 +2331,7 @@ def get_online_game_status(
             "join_code": row["join_code"],
             "status": row["online_status"],
             "your_color": your_color,
+            "your_info": your_info,
             "opponent": opponent,
             "is_your_turn": is_your_turn,
             "winner": row["winner"],

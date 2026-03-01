@@ -9,7 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from server import persistence
-from server.main import app
+from server.main import app, auth_limiter, game_create_limiter
 
 
 @pytest.fixture
@@ -26,8 +26,11 @@ def client(temp_db, monkeypatch):
     """Create a test client with temporary database."""
     # Override the default db path before any database operations
     monkeypatch.setattr(persistence, 'DEFAULT_DB_PATH', temp_db)
+    # Reset rate limiters so tests aren't affected by prior test classes
+    auth_limiter._hits.clear()
+    game_create_limiter._hits.clear()
 
-    with TestClient(app) as client:
+    with TestClient(app, base_url="https://testserver") as client:
         yield client
 
 

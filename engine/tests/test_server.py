@@ -22,7 +22,8 @@ def clear_games():
 @pytest.fixture
 def client():
     """Create test client."""
-    return TestClient(app)
+    with TestClient(app) as client:
+        yield client
 
 
 class TestHealthEndpoint:
@@ -335,7 +336,7 @@ class TestWebSocket:
             assert error["data"]["code"] == "INVALID_MOVE"
 
     def test_websocket_nonexistent_game(self, client):
-        # Try to connect to nonexistent game
-        with pytest.raises(Exception):
-            with client.websocket_connect("/games/nonexistent/ws"):
-                pass
+        # Server accepts then closes with 4004 for nonexistent games
+        with client.websocket_connect("/games/nonexistent/ws") as ws:
+            with pytest.raises(Exception):
+                ws.receive_json()

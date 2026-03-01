@@ -15,7 +15,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from server import persistence
-from server.main import app, TRAINING_MODELS_DIR, TRAINING_STATE_DIR
+from server.main import app, TRAINING_MODELS_DIR, TRAINING_STATE_DIR, require_training_key
 
 
 @pytest.fixture
@@ -49,8 +49,11 @@ def temp_state_dir(monkeypatch):
 def client(temp_db, temp_models_dir, temp_state_dir, monkeypatch):
     """Create a test client with temporary database, models, and state directories."""
     monkeypatch.setattr(persistence, 'DEFAULT_DB_PATH', temp_db)
+    # Override training key dependency so tests don't need X-API-Key header
+    app.dependency_overrides[require_training_key] = lambda: None
     with TestClient(app) as client:
         yield client
+    app.dependency_overrides.pop(require_training_key, None)
 
 
 class TestSubmitTrainingGame:
