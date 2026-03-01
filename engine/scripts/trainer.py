@@ -585,6 +585,22 @@ class DistributedTrainer:
             except Exception as e:
                 print(f"[Trainer] Could not restore optimizer state: {e}")
 
+        # Query API for authoritative total_games_trained
+        try:
+            api_total = self.api_client.get_total_games_trained()
+            if api_total is not None:
+                if api_total > self.total_games_trained:
+                    print(f"[Trainer] API reports {api_total:,} total games trained "
+                          f"(state file had {self.total_games_trained:,}), using API value")
+                    self.total_games_trained = api_total
+                else:
+                    print(f"[Trainer] API confirms {api_total:,} total games trained")
+        except Exception as e:
+            print(f"[Trainer] Could not query API for total_games_trained: {e}")
+
+        # Apply LR schedule based on restored total_games_trained
+        self._update_learning_rate()
+
         # Load replay buffer
         if replay_path.exists():
             try:

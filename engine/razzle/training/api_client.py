@@ -305,6 +305,22 @@ class TrainingAPIClient:
         response.raise_for_status()
         return response.json()
 
+    def get_total_games_trained(self) -> Optional[int]:
+        """
+        Get the authoritative total games trained from the server.
+
+        Computed server-side from the training_metrics table.
+
+        Returns:
+            Total games trained, or None if the request fails
+        """
+        try:
+            data = self.get_dashboard()
+            return data.get("total_games_trained")
+        except Exception as e:
+            logger.warning(f"Failed to get total_games_trained from API: {e}")
+            return None
+
     def submit_metrics(self, iteration: int, metrics: dict) -> bool:
         """
         Submit training metrics to API for dashboard.
