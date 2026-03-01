@@ -335,6 +335,7 @@ class TrainingDashboardResponse(BaseModel):
     status: str
     games_pending: int
     games_total: int
+    total_games_trained: int = 0
     latest_model: Optional[ModelInfo] = None
     workers: dict[str, WorkerStats]
     models: list[ModelInfo]
@@ -1899,10 +1900,13 @@ async def get_training_dashboard():
             created_at=latest["created_at"],
         )
 
+    total_games_trained = persistence.get_total_games_trained()
+
     return TrainingDashboardResponse(
         status="active" if workers else "idle",
         games_pending=stats.get("pending", 0),
         games_total=stats.get("total", 0),
+        total_games_trained=total_games_trained,
         latest_model=latest_model,
         workers=workers,
         models=model_infos,
@@ -2651,6 +2655,7 @@ class OnlineGameStatusResponse(BaseModel):
     join_code: str
     status: str
     your_color: int
+    your_info: Optional[OnlineOpponentInfo] = None
     opponent: Optional[OnlineOpponentInfo]
     is_your_turn: bool
     winner: Optional[int]
@@ -3020,11 +3025,16 @@ async def get_online_game_status(
     if result.get("opponent"):
         opponent = OnlineOpponentInfo(**result["opponent"])
 
+    your_info = None
+    if result.get("your_info"):
+        your_info = OnlineOpponentInfo(**result["your_info"])
+
     return OnlineGameStatusResponse(
         game_id=result["game_id"],
         join_code=result["join_code"],
         status=result["status"],
         your_color=result["your_color"],
+        your_info=your_info,
         opponent=opponent,
         is_your_turn=result["is_your_turn"],
         winner=result["winner"],

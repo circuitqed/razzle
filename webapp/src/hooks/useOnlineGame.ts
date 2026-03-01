@@ -36,6 +36,7 @@ export interface UseOnlineGameReturn {
   gameState: GameState | null;
   myColor: 0 | 1 | null;
   isMyTurn: boolean;
+  myInfo: onlineApi.OnlineOpponentInfo | null;
   opponent: onlineApi.OnlineOpponentInfo | null;
   opponentConnected: boolean;
   connectionStatus: ConnectionStatus;
@@ -86,6 +87,7 @@ export function useOnlineGame(options: UseOnlineGameOptions): UseOnlineGameRetur
   // Game state
   const [gameState, setGameState] = useState<GameState | null>(null);
   const [myColor, setMyColor] = useState<0 | 1 | null>(null);
+  const [myInfo, setMyInfo] = useState<onlineApi.OnlineOpponentInfo | null>(null);
   const [opponent, setOpponent] = useState<onlineApi.OnlineOpponentInfo | null>(null);
   const [opponentConnected, setOpponentConnected] = useState(false);
   const [onlineStatus, setOnlineStatus] = useState<string>('unknown');
@@ -403,6 +405,7 @@ export function useOnlineGame(options: UseOnlineGameOptions): UseOnlineGameRetur
       try {
         const status = await onlineApi.getOnlineGameStatus(gameId);
         setMyColor(status.your_color as 0 | 1);
+        setMyInfo(status.your_info ?? null);
         setOpponent(status.opponent);
         setOnlineStatus(status.status);
       } catch (err) {
@@ -499,6 +502,7 @@ export function useOnlineGame(options: UseOnlineGameOptions): UseOnlineGameRetur
     gameState: effectiveGameState,
     myColor,
     isMyTurn,
+    myInfo,
     opponent,
     opponentConnected,
     connectionStatus,

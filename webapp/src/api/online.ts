@@ -58,6 +58,7 @@ export interface OnlineGameStatusResponse {
   join_code: string;
   status: string;
   your_color: number;
+  your_info: OnlineOpponentInfo | null;
   opponent: OnlineOpponentInfo | null;
   is_your_turn: boolean;
   winner: number | null;

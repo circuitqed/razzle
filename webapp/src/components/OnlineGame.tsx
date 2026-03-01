@@ -46,6 +46,7 @@ export default function OnlineGame({ gameId, onGameEnd }: OnlineGameProps) {
     gameState,
     myColor,
     isMyTurn,
+    myInfo,
     opponent,
     opponentConnected,
     connectionStatus,
@@ -170,9 +171,15 @@ export default function OnlineGame({ gameId, onGameEnd }: OnlineGameProps) {
     </div>
   ), [opponentDisplayName, opponent?.elo_rating, opponentConnected, forfeitCountdown]);
 
-  const myNameEl = useMemo(() => (
-    <span>{myColor === 0 ? 'Blue (You)' : 'Red (You)'}</span>
-  ), [myColor]);
+  const myNameEl = useMemo(() => {
+    const name = myInfo?.display_name || (myColor === 0 ? 'Blue' : 'Red');
+    return (
+      <div className="flex items-center gap-1.5">
+        <span>{name}</span>
+        {myInfo?.elo_rating && <span className="text-gray-600">({Math.round(myInfo.elo_rating)})</span>}
+      </div>
+    );
+  }, [myColor, myInfo]);
 
   // Names follow board orientation: player whose territory is at bottom gets bottomName
   // Not flipped: bottom = player 0 (blue), top = player 1 (red)
@@ -288,11 +295,11 @@ export default function OnlineGame({ gameId, onGameEnd }: OnlineGameProps) {
   const winnerDisplay = useMemo(() => {
     if (!gameState || gameState.winner === null) return null;
     const winnerName = gameState.winner === myColor
-      ? 'You'
+      ? (myInfo?.display_name || 'You')
       : (opponent?.display_name || (gameState.winner === 0 ? 'Blue' : 'Red'));
     const colorClass = gameState.winner === 0 ? 'text-blue-400' : 'text-red-400';
-    return { text: `${winnerName} Win${gameState.winner === myColor ? '' : 's'}!`, colorClass };
-  }, [gameState, myColor, opponent]);
+    return { text: `${winnerName} Wins!`, colorClass };
+  }, [gameState, myColor, myInfo, opponent]);
 
   // Turn indicator
   const turnIndicator = useMemo(() => {
