@@ -94,6 +94,7 @@ class SelfPlayWorker:
         random_opening_fraction: float = 0.0,  # Fraction of games with random opening
         arena_fraction: float = 0.1,  # Fraction of games that are arena matches
         arena_recency_weight: float = 2.0,  # Higher = prefer more recent models
+        max_games: int = 0,  # Stop after N games (0 = unlimited)
     ):
         self.worker_id = worker_id
         self.api_url = api_url
@@ -110,6 +111,7 @@ class SelfPlayWorker:
         self.random_opening_fraction = random_opening_fraction
         self.arena_fraction = arena_fraction
         self.arena_recency_weight = arena_recency_weight
+        self.max_games = max_games
 
         # Directories
         self.model_dir = self.workspace / "model"
@@ -679,6 +681,11 @@ class SelfPlayWorker:
                         print(f"[Worker {self.worker_id}] Game {self.games_completed}: "
                               f"{len(moves)} moves, winner={winner_str}")
 
+                # Check game limit
+                if self.max_games > 0 and self.games_completed >= self.max_games:
+                    print(f"[Worker {self.worker_id}] Reached game limit ({self.max_games})")
+                    break
+
                 # Check for new model periodically
                 if self.games_completed % self.model_check_interval == 0:
                     self._check_for_new_model()
@@ -735,6 +742,8 @@ def main():
                         help='Fraction of games that are arena matches between models (default: 0.1)')
     parser.add_argument('--arena-recency-weight', type=float, default=2.0,
                         help='Weight for recency in arena model selection (default: 2.0)')
+    parser.add_argument('--max-games', type=int, default=0,
+                        help='Stop after N games (0 = unlimited)')
 
     args = parser.parse_args()
 
@@ -762,6 +771,7 @@ def main():
         random_opening_fraction=args.random_opening_fraction,
         arena_fraction=args.arena_fraction,
         arena_recency_weight=args.arena_recency_weight,
+        max_games=args.max_games,
     )
 
     # Handle signals for graceful shutdown

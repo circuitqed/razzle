@@ -3,7 +3,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
-#SBATCH --time=48:00:00
+#SBATCH --time=06:00:00
 #SBATCH --output=logs/worker_%j.out
 #SBATCH --error=logs/worker_%j.err
 #
@@ -20,6 +20,7 @@ SIMULATIONS=400
 BATCH_SIZE=32
 NETWORK_SIZE="medium"
 WORKER_BASE_ID="${WORKER_BASE_ID:-0}"
+MAX_GAMES="${MAX_GAMES:-0}"
 
 # Worker ID: sherlock_<SLURM_JOB_ID>_<base>
 WORKER_ID="sherlock_${SLURM_JOB_ID}_${WORKER_BASE_ID}"
@@ -50,6 +51,7 @@ echo "GPU: $(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null || ec
 echo "CUDA visible: $CUDA_VISIBLE_DEVICES"
 echo "API: $API_URL"
 echo "Simulations: $SIMULATIONS"
+echo "Max games: ${MAX_GAMES:-unlimited}"
 echo "Started: $(date)"
 echo "========================="
 
@@ -67,4 +69,5 @@ python3 scripts/worker_selfplay.py \
     --temperature-moves 30 \
     --random-opening-fraction 0.3 \
     --arena-fraction 0.1 \
-    --model-check-interval 5
+    --model-check-interval 5 \
+    --max-games "$MAX_GAMES"
