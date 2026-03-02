@@ -9,9 +9,9 @@
 #   ./submit_workers.sh 5000 16     # 5000 games across 16 workers
 #
 # Each worker gets TOTAL_GAMES/NUM_WORKERS games and exits when done.
-# At ~85 games/hr per Titan Xp GPU:
-#   1000 games / 8 workers = 125 games each ≈ 1.5 hours
-#   5000 games / 16 workers = 312 games each ≈ 3.7 hours
+# At ~17 games/hr per GPU (2000 sims):
+#   1000 games / 16 workers = 63 games each ≈ 3.7 hours
+#   5000 games / 16 workers = 312 games each ≈ 18 hours
 
 set -e
 
@@ -22,7 +22,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 GAMES_PER_WORKER=$(( (TOTAL_GAMES + NUM_WORKERS - 1) / NUM_WORKERS ))
 
 # Estimate wall time: ~85 games/hr on Titan Xp, add 50% buffer for queue/startup
-EST_HOURS=$(python3 -c "import math; print(max(1, math.ceil($GAMES_PER_WORKER / 85 * 1.5)))")
+EST_HOURS=$(python3 -c "import math; print(max(1, math.ceil($GAMES_PER_WORKER / 17 * 1.5)))")
 WALL_TIME="${EST_HOURS}:00:00"
 # Cap at 48h (partition max)
 if [ "$EST_HOURS" -gt 48 ]; then

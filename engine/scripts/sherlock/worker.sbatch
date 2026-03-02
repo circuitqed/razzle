@@ -16,7 +16,7 @@ set -e
 
 # --- Configuration ---
 API_URL="https://razzledazzle.lazybrains.com/api"
-SIMULATIONS=400
+SIMULATIONS=2000
 BATCH_SIZE=32
 NETWORK_SIZE="medium"
 WORKER_BASE_ID="${WORKER_BASE_ID:-0}"
@@ -67,6 +67,7 @@ python3 scripts/worker_selfplay.py \
     --batch-size "$BATCH_SIZE" \
     --network-size "$NETWORK_SIZE" \
     --temperature-moves 30 \
+    --random-opening-moves 8 \
     --random-opening-fraction 0.3 \
     --arena-fraction 0.1 \
     --model-check-interval 5 \
