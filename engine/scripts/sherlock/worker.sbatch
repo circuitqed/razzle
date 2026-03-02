@@ -81,6 +81,12 @@ for i in $(seq 0 $((WORKERS_PER_GPU - 1))); do
         --max-games "$MAX_GAMES" &
 
     PIDS+=($!)
+
+    # Stagger launches to avoid CUDA initialization race
+    if [ "$i" -lt $((WORKERS_PER_GPU - 1)) ]; then
+        echo "Waiting 30s before next worker..."
+        sleep 30
+    fi
 done
 
 echo "All $WORKERS_PER_GPU workers launched (PIDs: ${PIDS[*]})"
