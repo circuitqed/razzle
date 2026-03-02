@@ -20,7 +20,7 @@ export default function GameBrowser({ isOpen, onClose, onSelectGame }: GameBrows
   // Filters
   const [statusFilter, setStatusFilter] = useState<string>('');
   const [resultFilter, setResultFilter] = useState<string>('');
-  const [myGamesOnly, setMyGamesOnly] = useState(false);
+  const [myGamesOnly, setMyGamesOnly] = useState(!!user);
 
   const fetchGames = useCallback(async () => {
     setIsLoading(true);
@@ -229,7 +229,7 @@ export default function GameBrowser({ isOpen, onClose, onSelectGame }: GameBrows
                         onClick={() => onSelectGame(game.game_id)}
                         className="px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-xs transition-colors"
                       >
-                        Replay
+                        View
                       </button>
                     </td>
                   </tr>

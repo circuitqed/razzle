@@ -406,6 +406,13 @@ function AppContent() {
         <h1 className="text-xl sm:text-2xl font-bold">Razzle Dazzle</h1>
         <div className="flex items-center gap-2">
           <button
+            onClick={() => setShowGameBrowser(true)}
+            className="p-1.5 text-gray-400 hover:text-white transition-colors"
+            title="Game history (B)"
+          >
+{'\u{1F4CB}'}
+          </button>
+          <button
             onClick={() => setShowBugReport(true)}
             className="p-1.5 text-gray-400 hover:text-white transition-colors"
             title="Report a bug"

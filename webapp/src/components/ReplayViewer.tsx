@@ -3,7 +3,7 @@ import Board from './Board';
 import ReplayControls from './ReplayControls';
 import MoveHistory from './MoveHistory';
 import * as gamesApi from '../api/games';
-import type { GameFull, MoveClassification } from '../api/games';
+import type { GameFull } from '../api/games';
 import { reconstructPositions, getLastMoveAtPosition, type ReplayState } from '../utils/replay';
 
 interface ReplayViewerProps {
@@ -19,8 +19,8 @@ export default function ReplayViewer({ gameId, onClose }: ReplayViewerProps) {
   const [playSpeed, setPlaySpeed] = useState(1);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [analysis, setAnalysis] = useState<MoveClassification[] | null>(null);
-  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  // Server-side analysis removed to avoid server load.
+  // TODO: re-add using client-side AI (Web Worker + ONNX)
 
   // Load game data
   useEffect(() => {
@@ -120,19 +120,6 @@ export default function ReplayViewer({ gameId, onClose }: ReplayViewerProps) {
     setIsPlaying(false);
   }, []);
 
-  const handleAnalyze = useCallback(async () => {
-    if (!gameData) return;
-    setIsAnalyzing(true);
-    try {
-      const result = await gamesApi.analyzeGame(gameId, 100);
-      setAnalysis(result.move_analyses);
-    } catch (err) {
-      console.error('Analysis failed:', err);
-    } finally {
-      setIsAnalyzing(false);
-    }
-  }, [gameData, gameId]);
-
   // Current position
   const currentState = positions[currentPly];
   const lastMove = currentPly > 0 && gameData
@@ -144,11 +131,6 @@ export default function ReplayViewer({ gameId, onClose }: ReplayViewerProps) {
     if (!gameData) return [];
     return gameData.moves.slice(0, currentPly);
   }, [gameData, currentPly]);
-
-  // Get analysis for current move
-  const currentMoveAnalysis = currentPly > 0 && analysis
-    ? analysis[currentPly - 1]
-    : null;
 
   if (isLoading) {
     return (
@@ -221,71 +203,10 @@ export default function ReplayViewer({ gameId, onClose }: ReplayViewerProps) {
 
           {/* Side panel */}
           <div className="flex flex-col gap-4 w-full lg:w-auto">
-            {/* Move analysis badge */}
-            {currentMoveAnalysis && (
-              <div className={`px-3 py-2 rounded text-sm ${
-                currentMoveAnalysis.classification === 'best' ? 'bg-green-900 text-green-300' :
-                currentMoveAnalysis.classification === 'good' ? 'bg-blue-900 text-blue-300' :
-                currentMoveAnalysis.classification === 'inaccuracy' ? 'bg-yellow-900 text-yellow-300' :
-                currentMoveAnalysis.classification === 'mistake' ? 'bg-orange-900 text-orange-300' :
-                'bg-red-900 text-red-300'
-              }`}>
-                <span className="font-medium capitalize">{currentMoveAnalysis.classification}</span>
-                <span className="text-xs ml-2">
-                  ({currentMoveAnalysis.algebraic}, eval: {currentMoveAnalysis.value_after.toFixed(2)})
-                </span>
-                {currentMoveAnalysis.classification !== 'best' && (
-                  <div className="text-xs mt-1 opacity-80">
-                    Best: {currentMoveAnalysis.best_move_algebraic}
-                  </div>
-                )}
-              </div>
-            )}
-
             {/* Move History */}
             <div className="hidden lg:block">
               <MoveHistory moves={movesUpToPly} />
             </div>
-
-            {/* Analyze button */}
-            {!analysis && (
-              <button
-                onClick={handleAnalyze}
-                disabled={isAnalyzing}
-                className="px-4 py-2 bg-purple-600 hover:bg-purple-700 disabled:bg-gray-600 text-white rounded font-medium transition-colors"
-              >
-                {isAnalyzing ? 'Analyzing...' : 'Analyze Game'}
-              </button>
-            )}
-
-            {/* Analysis summary */}
-            {analysis && (
-              <div className="bg-gray-800 rounded p-3 text-sm">
-                <h4 className="font-medium text-gray-300 mb-2">Analysis Summary</h4>
-                <div className="grid grid-cols-5 gap-1 text-xs">
-                  <div className="text-center">
-                    <div className="text-green-400 font-medium">{analysis.filter(m => m.classification === 'best').length}</div>
-                    <div className="text-gray-500">Best</div>
-                  </div>
-                  <div className="text-center">
-                    <div className="text-blue-400 font-medium">{analysis.filter(m => m.classification === 'good').length}</div>
-                    <div className="text-gray-500">Good</div>
-                  </div>
-                  <div className="text-center">
-                    <div className="text-yellow-400 font-medium">{analysis.filter(m => m.classification === 'inaccuracy').length}</div>
-                    <div className="text-gray-500">Inac.</div>
-                  </div>
-                  <div className="text-center">
-                    <div className="text-orange-400 font-medium">{analysis.filter(m => m.classification === 'mistake').length}</div>
-                    <div className="text-gray-500">Mist.</div>
-                  </div>
-                  <div className="text-center">
-                    <div className="text-red-400 font-medium">{analysis.filter(m => m.classification === 'blunder').length}</div>
-                    <div className="text-gray-500">Blun.</div>
-                  </div>
-                </div>
-              </div>
-            )}
           </div>
         </div>
 
