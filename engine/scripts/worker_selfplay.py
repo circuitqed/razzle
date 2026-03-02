@@ -154,6 +154,18 @@ class SelfPlayWorker:
             pass
         return "unknown"
 
+    def _load_model_to_device(self, network: RazzleNet) -> BatchedEvaluator:
+        """Move network to device and create evaluator.
+
+        Loads on CPU first, then moves to GPU to avoid CUDA initialization
+        races when multiple workers share a GPU.
+        """
+        return BatchedEvaluator(
+            network,
+            batch_size=self.batch_size,
+            device=self.device
+        )
+
     def _download_latest_model(self) -> bool:
         """Download the latest model from the API."""
         try:
@@ -169,13 +181,9 @@ class SelfPlayWorker:
             print(f"[Worker {self.worker_id}] Downloading model: {model_info.version}")
             self.api_client.download_model(model_info.version, model_path)
 
-            # Load model
-            self.network = RazzleNet.load(model_path, device=self.device)
-            self.evaluator = BatchedEvaluator(
-                self.network,
-                batch_size=self.batch_size,
-                device=self.device
-            )
+            # Load model on CPU first, then move to device
+            self.network = RazzleNet.load(model_path, device='cpu')
+            self.evaluator = self._load_model_to_device(self.network)
             self.model_version = model_info.version
             print(f"[Worker {self.worker_id}] Loaded model: {self.model_version}")
             return True
@@ -185,40 +193,47 @@ class SelfPlayWorker:
             return False
 
     def _load_or_create_network(self) -> bool:
-        """Load model from API or create new one."""
-        try:
-            # First try to download from API
-            if self._download_latest_model():
+        """Load model from API or create new one.
+
+        Retries on failure (e.g. transient CUDA errors when multiple
+        workers initialize on the same GPU).
+        """
+        max_retries = 5
+        for attempt in range(max_retries):
+            try:
+                # First try to download from API
+                if self._download_latest_model():
+                    return True
+
+                # Check local model directory
+                model_files = sorted(self.model_dir.glob("*.pt"))
+                if model_files:
+                    latest = model_files[-1]
+                    self.network = RazzleNet.load(latest, device='cpu')
+                    self.model_version = latest.stem
+                    print(f"[Worker {self.worker_id}] Loaded local model: {self.model_version}")
+                else:
+                    # Create new network (on CPU, evaluator moves to device)
+                    if self.filters > 0 and self.blocks > 0:
+                        self.network = create_network(num_filters=self.filters, num_blocks=self.blocks, device='cpu')
+                    else:
+                        self.network = create_network(preset=self.network_size, device='cpu')
+                    self.model_version = "initial"
+                    print(f"[Worker {self.worker_id}] Created new network")
+
+                # Create evaluator (moves model to device)
+                self.evaluator = self._load_model_to_device(self.network)
                 return True
 
-            # Check local model directory
-            model_files = sorted(self.model_dir.glob("*.pt"))
-            if model_files:
-                latest = model_files[-1]
-                self.network = RazzleNet.load(latest, device=self.device)
-                self.model_version = latest.stem
-                print(f"[Worker {self.worker_id}] Loaded local model: {self.model_version}")
-            else:
-                # Create new network
-                if self.filters > 0 and self.blocks > 0:
-                    self.network = create_network(num_filters=self.filters, num_blocks=self.blocks, device=self.device)
-                else:
-                    self.network = create_network(preset=self.network_size, device=self.device)
-                self.model_version = "initial"
-                print(f"[Worker {self.worker_id}] Created new network")
+            except Exception as e:
+                self.error_message = f"Failed to load network: {e}"
+                print(f"[Worker {self.worker_id}] {self.error_message}")
+                if attempt < max_retries - 1:
+                    delay = 10 * (attempt + 1)
+                    print(f"[Worker {self.worker_id}] Retrying in {delay}s (attempt {attempt + 2}/{max_retries})...")
+                    time.sleep(delay)
 
-            # Create evaluator
-            self.evaluator = BatchedEvaluator(
-                self.network,
-                batch_size=self.batch_size,
-                device=self.device
-            )
-            return True
-
-        except Exception as e:
-            self.error_message = f"Failed to load network: {e}"
-            print(f"[Worker {self.worker_id}] {self.error_message}")
-            return False
+        return False
 
     def _check_for_new_model(self) -> bool:
         """Check if a new model is available via API."""
@@ -409,7 +424,7 @@ class SelfPlayWorker:
                 print(f"[Worker {self.worker_id}] Downloading model for arena: {version}")
                 self.api_client.download_model(version, model_path)
 
-            net = RazzleNet.load(model_path, device=self.device)
+            net = RazzleNet.load(model_path, device='cpu')
             # Keep cache small (max 5 models)
             if len(self.model_cache) >= 5:
                 # Remove oldest
@@ -417,7 +432,7 @@ class SelfPlayWorker:
                 del self.model_cache[oldest]
             self.model_cache[version] = net
 
-        return BatchedEvaluator(net, batch_size=self.batch_size, device=self.device)
+        return self._load_model_to_device(net)
 
     def play_arena_game(self, model1_version: str, model2_version: str) -> tuple[list[int], float, list[dict[int, int]], str, str]:
         """
