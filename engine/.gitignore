@@ -58,6 +58,9 @@ plots/
 *.onnx
 games.db
 
+# C extension build artifacts
+razzle_fast/razzle_fast/
+
 # OS
 .DS_Store
 Thumbs.db

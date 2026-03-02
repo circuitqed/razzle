@@ -38,7 +38,7 @@ class MCTSConfig:
     dirichlet_alpha: float = 0.3  # Noise for root exploration
     dirichlet_epsilon: float = 0.25  # Weight of noise at root
     temperature: float = 1.0  # Temperature for move selection
-    batch_size: int = 32  # Number of parallel simulations for batched search
+    batch_size: int = 0  # 0 = auto (5% of sims, rounded down to power of 2, min 8)
     virtual_loss: int = 3  # Virtual loss to encourage exploration in parallel search
 
     # Early termination settings
@@ -50,6 +50,18 @@ class MCTSConfig:
     # Pass quiescence: continue search through pass sequences to avoid evaluating mid-turn
     pass_quiescence: bool = True  # Don't evaluate mid-pass positions
     pass_quiescence_max_depth: int = 10  # Max passes to extend (safety limit)
+
+    def __post_init__(self):
+        if self.batch_size <= 0:
+            self.batch_size = _auto_batch_size(self.num_simulations)
+
+
+def _auto_batch_size(num_sims: int) -> int:
+    """Compute batch size as ~5% of simulations, rounded down to power of 2, min 8."""
+    target = num_sims * 0.05
+    if target <= 8:
+        return 8
+    return 1 << int(math.log2(target))
 
 
 @dataclass
