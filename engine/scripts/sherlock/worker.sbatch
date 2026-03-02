@@ -25,6 +25,7 @@ WORKER_BASE_ID="${WORKER_BASE_ID:-0}"
 WORKER_ID="sherlock_${SLURM_JOB_ID}_${WORKER_BASE_ID}"
 
 # --- Environment setup ---
+export PYTHONUNBUFFERED=1
 module load py-pytorch/2.4.1_py312
 
 # Project paths
