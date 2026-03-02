@@ -93,7 +93,6 @@ class SelfPlayWorker:
         random_opening_moves: int = 0,  # Number of random moves at start
         random_opening_fraction: float = 0.0,  # Fraction of games with random opening
         arena_fraction: float = 0.1,  # Fraction of games that are arena matches
-        arena_recency_weight: float = 2.0,  # Higher = prefer more recent models
         max_games: int = 0,  # Stop after N games (0 = unlimited)
     ):
         self.worker_id = worker_id
@@ -110,7 +109,6 @@ class SelfPlayWorker:
         self.random_opening_moves = random_opening_moves
         self.random_opening_fraction = random_opening_fraction
         self.arena_fraction = arena_fraction
-        self.arena_recency_weight = arena_recency_weight
         self.max_games = max_games
 
         # Directories
@@ -238,108 +236,164 @@ class SelfPlayWorker:
         return False
 
     def _refresh_available_models(self) -> list[str]:
-        """Get list of available models from API for arena matches."""
+        """Get benchmark models (every 10th iteration + latest) for arena matches."""
         try:
             import requests
             resp = requests.get(f"{self.api_url}/training/models", timeout=10)
             if resp.status_code == 200:
                 data = resp.json()
                 models = data.get('models', [])
-                # Extract version strings, sorted by iteration
-                versions = []
+
+                # Parse iteration numbers
+                parsed = []
                 for m in models:
                     v = m.get('version', '')
-                    if v:
-                        versions.append(v)
-                # Sort by iteration number (initial first, then iter_001, iter_002, etc.)
-                def sort_key(v):
+                    if not v:
+                        continue
                     if v == 'initial':
-                        return 0
-                    try:
-                        return int(v.split('_')[1])
-                    except:
-                        return 0
-                versions.sort(key=sort_key)
-                self.available_models = versions
-                return versions
+                        parsed.append((0, v))
+                    else:
+                        try:
+                            parsed.append((int(v.split('_')[1]), v))
+                        except (IndexError, ValueError):
+                            continue
+
+                if not parsed:
+                    return self.available_models
+
+                parsed.sort(key=lambda x: x[0])
+                max_iter = parsed[-1][0]
+
+                # Keep only benchmark iterations (mod 10) + the latest
+                benchmarks = []
+                for iteration, version in parsed:
+                    if iteration % 10 == 0 or iteration == max_iter:
+                        benchmarks.append(version)
+
+                self.available_models = benchmarks
+                return benchmarks
         except Exception as e:
             print(f"[Worker {self.worker_id}] Error fetching model list: {e}")
         return self.available_models
 
     def _get_model_elos(self) -> dict[str, float]:
-        """Fetch ELO ratings for models from API."""
+        """Fetch Elo ratings for models from API.
+
+        Filters to the highest-sim-count rating per model to get
+        the most reliable estimates.
+        """
         try:
             import requests
             resp = requests.get(f"{self.api_url}/arena/ratings", timeout=10)
             if resp.status_code == 200:
                 data = resp.json()
                 ratings = data.get('ratings', [])
-                # Build dict of model_version -> elo
-                elos = {}
+                # Keep highest-sim-count entry per model for reliability
+                elos: dict[str, tuple[int, float]] = {}  # version -> (sims, elo)
                 for r in ratings:
                     version = r.get('model_version', '')
-                    elo = r.get('elo_rating', 1000)
-                    if version:
-                        elos[version] = elo
-                return elos
+                    elo = r.get('elo_rating', 1200)
+                    sims = r.get('simulations', 0)
+                    games = r.get('games_played', 0)
+                    if not version or games < 10:
+                        continue
+                    if version not in elos or sims > elos[version][0]:
+                        elos[version] = (sims, elo)
+                return {v: elo for v, (_, elo) in elos.items()}
         except Exception as e:
-            print(f"[Worker {self.worker_id}] Error fetching ELO ratings: {e}")
+            print(f"[Worker {self.worker_id}] Error fetching Elo ratings: {e}")
         return {}
+
+    @staticmethod
+    def _iter_number(version: str) -> int:
+        """Extract iteration number from version string."""
+        if version == 'initial':
+            return 0
+        try:
+            return int(version.split('_')[1])
+        except (IndexError, ValueError):
+            return 0
+
+    def _interpolate_elo(self, version: str, elos: dict[str, float], all_models: list[str]) -> float:
+        """Estimate Elo for an unrated model by interpolating from neighbors."""
+        target_iter = self._iter_number(version)
+
+        # Find nearest rated neighbors
+        below, above = None, None
+        for m in all_models:
+            if m not in elos:
+                continue
+            it = self._iter_number(m)
+            if it <= target_iter and (below is None or it > self._iter_number(below)):
+                below = m
+            if it >= target_iter and (above is None or it < self._iter_number(above)):
+                above = m
+
+        if below and above and below != above:
+            # Linear interpolation
+            it_lo, it_hi = self._iter_number(below), self._iter_number(above)
+            t = (target_iter - it_lo) / (it_hi - it_lo) if it_hi != it_lo else 0.5
+            return elos[below] + t * (elos[above] - elos[below])
+        elif below:
+            return elos[below]
+        elif above:
+            return elos[above]
+        return 1200.0  # fallback
 
     def _select_arena_models(self) -> tuple[str, str]:
         """
-        Select two different models for arena match.
+        Select two models for arena match using entropy-weighted pair sampling.
 
-        Uses combined recency + ELO weighting:
-        - Recency: more recent models get higher weight
-        - ELO: higher rated models get higher weight
-
-        Combined weight = recency_weight * elo_weight
-        This prioritizes matches between strong recent models.
+        Restricts pool to benchmark iterations (mod 10) + latest model.
+        Weights each pair by softmax(entropy(expected_outcome) / temperature),
+        so competitive matchups (close Elo) are strongly preferred while
+        still allowing occasional wider-gap games.
         """
+        SOFTMAX_TEMP = 0.25
+
         models = self._refresh_available_models()
         if len(models) < 2:
-            # Not enough models, return latest twice (will skip arena)
             return (self.model_version, self.model_version)
 
-        # Get ELO ratings
+        # Get Elo ratings, interpolate for unrated models
         elos = self._get_model_elos()
+        model_elos = {}
+        for m in models:
+            if m in elos:
+                model_elos[m] = elos[m]
+            else:
+                model_elos[m] = self._interpolate_elo(m, elos, models)
 
-        # Compute combined weights
-        n = len(models)
-        weights = np.zeros(n)
+        # Build all pairs and compute entropy weights
+        from itertools import combinations
+        import math
 
-        for i, model in enumerate(models):
-            # Recency weight: (index + 1) ^ recency_weight
-            recency = (i + 1) ** self.arena_recency_weight
+        pairs = list(combinations(range(len(models)), 2))
+        if not pairs:
+            return (self.model_version, self.model_version)
 
-            # ELO weight: normalize ELO to reasonable scale
-            # ELO typically ranges 1000-2000, so (elo/1000)^2 gives good spread
-            elo = elos.get(model, 1200)  # Default 1200 for unrated models
-            elo_weight = (elo / 1000) ** 2
+        raw_entropies = np.zeros(len(pairs))
+        for k, (i, j) in enumerate(pairs):
+            diff = abs(model_elos[models[i]] - model_elos[models[j]])
+            win_prob = 1.0 / (1.0 + 10 ** (-diff / 400))
+            # Binary entropy
+            if win_prob <= 0.001 or win_prob >= 0.999:
+                raw_entropies[k] = 0.001
+            else:
+                raw_entropies[k] = -(win_prob * math.log2(win_prob)
+                                     + (1 - win_prob) * math.log2(1 - win_prob))
 
-            # Combined weight
-            weights[i] = recency * elo_weight
+        # Softmax with temperature to sharpen distribution toward competitive matchups
+        logits = raw_entropies / SOFTMAX_TEMP
+        logits -= logits.max()  # numerical stability
+        exp_w = np.exp(logits)
+        probs = exp_w / exp_w.sum()
 
-        # Normalize to probabilities
-        if weights.sum() > 0:
-            probs = weights / weights.sum()
-        else:
-            probs = np.ones(n) / n
+        # Sample a pair
+        idx = np.random.choice(len(pairs), p=probs)
+        i, j = pairs[idx]
 
-        # Select two different models
-        idx1 = np.random.choice(n, p=probs)
-        # For second model, exclude first and renormalize
-        probs2 = probs.copy()
-        probs2[idx1] = 0
-        if probs2.sum() > 0:
-            probs2 = probs2 / probs2.sum()
-            idx2 = np.random.choice(n, p=probs2)
-        else:
-            # Fallback: random different model
-            idx2 = (idx1 + 1) % n
-
-        return (models[idx1], models[idx2])
+        return (models[i], models[j])
 
     def _get_model_evaluator(self, version: str) -> BatchedEvaluator:
         """Get evaluator for a specific model version, using cache."""
@@ -740,8 +794,6 @@ def main():
                         help='Fraction of games with random openings (default: 0.3)')
     parser.add_argument('--arena-fraction', type=float, default=0.1,
                         help='Fraction of games that are arena matches between models (default: 0.1)')
-    parser.add_argument('--arena-recency-weight', type=float, default=2.0,
-                        help='Weight for recency in arena model selection (default: 2.0)')
     parser.add_argument('--max-games', type=int, default=0,
                         help='Stop after N games (0 = unlimited)')
 
@@ -770,7 +822,6 @@ def main():
         random_opening_moves=args.random_opening_moves,
         random_opening_fraction=args.random_opening_fraction,
         arena_fraction=args.arena_fraction,
-        arena_recency_weight=args.arena_recency_weight,
         max_games=args.max_games,
     )
 

@@ -66,7 +66,7 @@ python3 scripts/worker_selfplay.py \
     --simulations "$SIMULATIONS" \
     --batch-size "$BATCH_SIZE" \
     --network-size "$NETWORK_SIZE" \
-    --temperature-moves 30 \
+    --temperature-moves 15 \
     --random-opening-moves 8 \
     --random-opening-fraction 0.3 \
     --arena-fraction 0.1 \
