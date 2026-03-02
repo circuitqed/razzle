@@ -55,6 +55,7 @@ class TrainingAPIClient:
         base_url: Optional[str] = None,
         timeout: float = 30.0,
         max_retries: int = 3,
+        api_key: Optional[str] = None,
     ):
         """
         Initialize the API client.
@@ -63,6 +64,7 @@ class TrainingAPIClient:
             base_url: Server URL (default: from RAZZLE_API_URL env var or http://localhost:8000)
             timeout: Request timeout in seconds
             max_retries: Number of retries for failed requests
+            api_key: Training API key (default: from TRAINING_API_KEY env var)
         """
         self.base_url = base_url or os.environ.get("RAZZLE_API_URL", "http://localhost:8000")
         self.timeout = timeout
@@ -72,11 +74,16 @@ class TrainingAPIClient:
         retry_strategy = Retry(
             total=max_retries,
             backoff_factor=0.5,
-            status_forcelist=[500, 502, 503, 504],
+            status_forcelist=[500, 502, 504],
         )
         adapter = HTTPAdapter(max_retries=retry_strategy)
         self.session.mount("http://", adapter)
         self.session.mount("https://", adapter)
+
+        # Set API key header if available
+        key = api_key or os.environ.get("TRAINING_API_KEY", "")
+        if key:
+            self.session.headers["X-API-Key"] = key
 
     def _url(self, path: str) -> str:
         """Build full URL for a path."""
