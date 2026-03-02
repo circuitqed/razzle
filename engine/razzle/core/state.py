@@ -271,7 +271,7 @@ class GameState:
 
     def __hash__(self) -> int:
         """Hash for transposition table."""
-        return hash((self.pieces, self.balls, self.current_player, self.touched_mask, self.has_passed))
+        return hash((tuple(self.pieces), tuple(self.balls), self.current_player, self.touched_mask, self.has_passed))
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, GameState):

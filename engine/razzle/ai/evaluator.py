@@ -6,6 +6,7 @@ them in batches for efficient GPU utilization.
 """
 
 from __future__ import annotations
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Callable, Optional
 from threading import Lock, Condition
@@ -36,7 +37,8 @@ class BatchedEvaluator:
         self,
         network: RazzleNet,
         batch_size: int = 32,
-        device: str = 'cpu'
+        device: str = 'cpu',
+        cache_size: int = 10000,
     ):
         self.network = network.to(device)
         self.network.eval()
@@ -47,9 +49,37 @@ class BatchedEvaluator:
         self.lock = Lock()
         self.condition = Condition(self.lock)
 
+        # LRU eval cache: GameState -> (policy, value, difficulty)
+        self._cache: OrderedDict[GameState, tuple[np.ndarray, float, float]] = OrderedDict()
+        self._cache_size = cache_size
+
         # Statistics
         self.total_evals = 0
         self.total_batches = 0
+        self.cache_hits = 0
+        self.cache_misses = 0
+
+    def _cache_put(self, state: GameState, policy: np.ndarray, value: float, difficulty: float) -> None:
+        """Add an entry to the LRU cache, evicting oldest if full."""
+        if self._cache_size <= 0:
+            return
+        self._cache[state] = (policy, value, difficulty)
+        if len(self._cache) > self._cache_size:
+            self._cache.popitem(last=False)
+
+    def _cache_get(self, state: GameState) -> tuple[np.ndarray, float, float] | None:
+        """Look up state in cache. Returns (policy, value, difficulty) or None."""
+        entry = self._cache.get(state)
+        if entry is not None:
+            self._cache.move_to_end(state)
+            self.cache_hits += 1
+            return entry
+        self.cache_misses += 1
+        return None
+
+    def clear_cache(self) -> None:
+        """Clear the eval cache (e.g. after loading a new model)."""
+        self._cache.clear()
 
     def evaluate(self, state: GameState) -> tuple[np.ndarray, float]:
         """
@@ -59,18 +89,24 @@ class BatchedEvaluator:
           - policy: numpy array of shape (3137,) with move probabilities
           - value: float in [-1, 1]
         """
+        cached = self._cache_get(state)
+        if cached is not None:
+            return cached[0], cached[1]
+
         tensor = torch.from_numpy(state.to_tensor()).unsqueeze(0).to(self.device)
 
         with torch.no_grad():
-            log_policy, value, _ = self.network(tensor)
+            log_policy, value, difficulty = self.network(tensor)
 
         policy = torch.exp(log_policy).squeeze(0).cpu().numpy()
         value = value.item()
+        difficulty = difficulty.item()
 
         # Rotate policy back for player 1 (board was rotated in to_tensor)
         if state.current_player == 1:
             policy = rotate_policy_180(policy)
 
+        self._cache_put(state, policy, value, difficulty)
         self.total_evals += 1
         self.total_batches += 1
 
@@ -85,6 +121,10 @@ class BatchedEvaluator:
           - value: float in [-1, 1]
           - difficulty: float in [0, 1] predicting search difficulty
         """
+        cached = self._cache_get(state)
+        if cached is not None:
+            return cached
+
         tensor = torch.from_numpy(state.to_tensor()).unsqueeze(0).to(self.device)
 
         with torch.no_grad():
@@ -98,6 +138,7 @@ class BatchedEvaluator:
         if state.current_player == 1:
             policy = rotate_policy_180(policy)
 
+        self._cache_put(state, policy, value, difficulty)
         self.total_evals += 1
         self.total_batches += 1
 
@@ -112,25 +153,42 @@ class BatchedEvaluator:
         if not states:
             return []
 
-        # Stack state tensors
-        tensors = np.stack([s.to_tensor() for s in states])
-        batch = torch.from_numpy(tensors).to(self.device)
-
-        with torch.no_grad():
-            log_policies, values, _ = self.network(batch)
-
-        policies = torch.exp(log_policies).cpu().numpy()
-        values = values.squeeze(-1).cpu().numpy()
-
-        # Rotate policies back for player 1 states
+        # Check cache for each state
+        results: list[tuple[np.ndarray, float] | None] = []
+        miss_indices: list[int] = []
+        miss_states: list[GameState] = []
         for i, state in enumerate(states):
-            if state.current_player == 1:
-                policies[i] = rotate_policy_180(policies[i])
+            cached = self._cache_get(state)
+            if cached is not None:
+                results.append((cached[0], cached[1]))
+            else:
+                results.append(None)
+                miss_indices.append(i)
+                miss_states.append(state)
 
-        self.total_evals += len(states)
-        self.total_batches += 1
+        # Evaluate cache misses
+        if miss_states:
+            tensors = np.stack([s.to_tensor() for s in miss_states])
+            batch = torch.from_numpy(tensors).to(self.device)
 
-        return [(policies[i], values[i]) for i in range(len(states))]
+            with torch.no_grad():
+                log_policies, values, difficulties = self.network(batch)
+
+            policies = torch.exp(log_policies).cpu().numpy()
+            values_np = values.squeeze(-1).cpu().numpy()
+            difficulties_np = difficulties.squeeze(-1).cpu().numpy()
+
+            # Rotate policies back for player 1 states
+            for j, state in enumerate(miss_states):
+                if state.current_player == 1:
+                    policies[j] = rotate_policy_180(policies[j])
+                self._cache_put(state, policies[j], float(values_np[j]), float(difficulties_np[j]))
+                results[miss_indices[j]] = (policies[j], float(values_np[j]))
+
+            self.total_evals += len(miss_states)
+            self.total_batches += 1
+
+        return results
 
     def evaluate_batch_with_difficulty(
         self, states: list[GameState]
@@ -143,26 +201,43 @@ class BatchedEvaluator:
         if not states:
             return []
 
-        # Stack state tensors
-        tensors = np.stack([s.to_tensor() for s in states])
-        batch = torch.from_numpy(tensors).to(self.device)
-
-        with torch.no_grad():
-            log_policies, values, difficulties = self.network(batch)
-
-        policies = torch.exp(log_policies).cpu().numpy()
-        values = values.squeeze(-1).cpu().numpy()
-        difficulties = difficulties.squeeze(-1).cpu().numpy()
-
-        # Rotate policies back for player 1 states
+        # Check cache for each state
+        results: list[tuple[np.ndarray, float, float] | None] = []
+        miss_indices: list[int] = []
+        miss_states: list[GameState] = []
         for i, state in enumerate(states):
-            if state.current_player == 1:
-                policies[i] = rotate_policy_180(policies[i])
+            cached = self._cache_get(state)
+            if cached is not None:
+                results.append(cached)
+            else:
+                results.append(None)
+                miss_indices.append(i)
+                miss_states.append(state)
 
-        self.total_evals += len(states)
-        self.total_batches += 1
+        # Evaluate cache misses
+        if miss_states:
+            tensors = np.stack([s.to_tensor() for s in miss_states])
+            batch = torch.from_numpy(tensors).to(self.device)
 
-        return [(policies[i], values[i], difficulties[i]) for i in range(len(states))]
+            with torch.no_grad():
+                log_policies, values, difficulties = self.network(batch)
+
+            policies = torch.exp(log_policies).cpu().numpy()
+            values_np = values.squeeze(-1).cpu().numpy()
+            difficulties_np = difficulties.squeeze(-1).cpu().numpy()
+
+            # Rotate policies back for player 1 states
+            for j, state in enumerate(miss_states):
+                if state.current_player == 1:
+                    policies[j] = rotate_policy_180(policies[j])
+                entry = (policies[j], float(values_np[j]), float(difficulties_np[j]))
+                self._cache_put(state, *entry)
+                results[miss_indices[j]] = entry
+
+            self.total_evals += len(miss_states)
+            self.total_batches += 1
+
+        return results
 
     def request_eval(
         self,
@@ -202,10 +277,15 @@ class BatchedEvaluator:
 
     def stats(self) -> dict:
         """Get evaluation statistics."""
+        total_lookups = self.cache_hits + self.cache_misses
         return {
             'total_evals': self.total_evals,
             'total_batches': self.total_batches,
-            'avg_batch_size': self.total_evals / max(1, self.total_batches)
+            'avg_batch_size': self.total_evals / max(1, self.total_batches),
+            'cache_hits': self.cache_hits,
+            'cache_misses': self.cache_misses,
+            'cache_hit_rate': self.cache_hits / max(1, total_lookups),
+            'cache_size': len(self._cache),
         }
 
 

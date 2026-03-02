@@ -152,12 +152,13 @@ class TestBatchedEvaluator:
         state = GameState.new_game()
 
         evaluator.evaluate(state)
-        evaluator.evaluate(state)
-        evaluator.evaluate_batch([state, state, state])
+        evaluator.evaluate(state)  # cache hit
+        evaluator.evaluate_batch([state, state, state])  # all cache hits
 
         stats = evaluator.stats()
-        assert stats['total_evals'] == 5
-        assert stats['total_batches'] == 3
+        assert stats['total_evals'] == 1  # only first evaluate is a miss
+        assert stats['cache_hits'] == 4
+        assert stats['cache_misses'] == 1
 
     def test_deterministic_evaluation(self):
         """Same state should give same output (network in eval mode)."""
