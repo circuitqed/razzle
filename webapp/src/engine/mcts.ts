@@ -383,23 +383,115 @@ function shouldStopEarly(root: MCTSNode, cfg: MCTSConfig): boolean {
 /**
  * Get visit-count-based policy from root node.
  * Returns Float32Array of length NUM_ACTIONS.
+ *
+ * @param temperature - Controls policy sharpness:
+ *   0: one-hot on highest-visited move (greedy)
+ *   1: proportional to raw visit counts
+ *   >0, !=1: visits^(1/temp) then normalize
  */
-export function getPolicy(root: MCTSNode): Float32Array {
-  // NUM_ACTIONS imported at top of file
+export function getPolicy(root: MCTSNode, temperature: number = 1.0): Float32Array {
   const policySize = END_TURN_ACTION + 1; // 3137
   const policy = new Float32Array(policySize);
+
+  const actionToIndex = (action: number): number =>
+    action === -1 ? END_TURN_ACTION : action;
 
   let totalVisits = 0;
   for (const [, child] of root.children) {
     totalVisits += child.visitCount;
   }
 
-  if (totalVisits > 0) {
-    for (const [action, child] of root.children) {
-      const idx = action === -1 ? END_TURN_ACTION : action;
-      policy[idx] = child.visitCount / totalVisits;
+  if (totalVisits > 0 && temperature > 0) {
+    if (temperature === 1.0) {
+      // Proportional to visits
+      for (const [action, child] of root.children) {
+        policy[actionToIndex(action)] = child.visitCount / totalVisits;
+      }
+    } else {
+      // Apply temperature: visits^(1/temp) then normalize
+      const invTemp = 1.0 / temperature;
+      let sum = 0;
+      const scaled: Array<[number, number]> = [];
+      for (const [action, child] of root.children) {
+        const v = Math.pow(child.visitCount, invTemp);
+        scaled.push([action, v]);
+        sum += v;
+      }
+      for (const [action, v] of scaled) {
+        policy[actionToIndex(action)] = v / sum;
+      }
     }
+  } else if (root.children.size > 0) {
+    // Greedy (temperature == 0): one-hot on highest visits
+    let bestAction = -1;
+    let bestVisits = -1;
+    for (const [action, child] of root.children) {
+      if (child.visitCount > bestVisits) {
+        bestVisits = child.visitCount;
+        bestAction = action;
+      }
+    }
+    policy[actionToIndex(bestAction)] = 1.0;
   }
 
   return policy;
+}
+
+/**
+ * Select a move from the root node based on visit counts and temperature.
+ *
+ * @param temperature - Controls selection:
+ *   0: return highest-visited move (greedy/deterministic)
+ *   >0: sample from temperature-scaled visit distribution
+ */
+export function selectMove(root: MCTSNode, temperature: number = 0): number {
+  if (root.children.size === 0) {
+    throw new Error('No legal moves');
+  }
+
+  const actions: number[] = [];
+  const visits: number[] = [];
+  for (const [action, child] of root.children) {
+    actions.push(action);
+    visits.push(child.visitCount);
+  }
+
+  if (temperature === 0) {
+    // Greedy: pick highest visit count
+    let bestIdx = 0;
+    for (let i = 1; i < visits.length; i++) {
+      if (visits[i] > visits[bestIdx]) {
+        bestIdx = i;
+      }
+    }
+    return actions[bestIdx];
+  }
+
+  // Sample from temperature-scaled distribution
+  const totalVisits = visits.reduce((a, b) => a + b, 0);
+  if (totalVisits === 0) {
+    // Uniform random
+    return actions[Math.floor(Math.random() * actions.length)];
+  }
+
+  let probs: number[];
+  if (temperature === 1.0) {
+    probs = visits.map((v) => v / totalVisits);
+  } else {
+    const invTemp = 1.0 / temperature;
+    const scaled = visits.map((v) => Math.pow(v, invTemp));
+    const sum = scaled.reduce((a, b) => a + b, 0);
+    probs = scaled.map((v) => v / sum);
+  }
+
+  // Weighted random selection
+  const r = Math.random();
+  let cumulative = 0;
+  for (let i = 0; i < probs.length; i++) {
+    cumulative += probs[i];
+    if (r < cumulative) {
+      return actions[i];
+    }
+  }
+  return actions[actions.length - 1];
 }
