@@ -37,6 +37,7 @@ const mockGames = {
       created_at: '2024-01-15T10:00:00Z',
       updated_at: '2024-01-15T10:30:00Z',
       ai_model_version: '/models/model_v1.pt',
+      ai_simulations: 800,
     },
     {
       game_id: 'game2',
@@ -53,6 +54,7 @@ const mockGames = {
       created_at: '2024-01-16T14:00:00Z',
       updated_at: '2024-01-16T14:15:00Z',
       ai_model_version: null,
+      ai_simulations: 0,
     },
   ],
   total: 2,

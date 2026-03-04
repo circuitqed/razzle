@@ -90,18 +90,20 @@ export default function GameBrowser({ isOpen, onClose, onSelectGame }: GameBrows
   };
 
   const getPlayersText = (game: GameSummary) => {
-    // Extract just the filename from model path (e.g., "/path/to/model.pt" -> "model.pt")
-    const getModelName = (modelPath: string | null) => {
-      if (!modelPath) return 'AI';
-      const parts = modelPath.split('/');
-      return parts[parts.length - 1];
+    const getAIName = () => {
+      let name = 'AI';
+      if (game.ai_model_version) {
+        const filename = game.ai_model_version.split('/').pop() || '';
+        name = filename.replace('.pt', '') || 'AI';
+      }
+      if (game.ai_simulations > 0) {
+        return `${name} - ${game.ai_simulations} sims`;
+      }
+      return name;
     };
 
     const getPlayerName = (username: string | null, isAI: boolean) => {
-      if (isAI) {
-        return getModelName(game.ai_model_version);
-      }
-      // Use username if available, otherwise "Human"
+      if (isAI) return getAIName();
       return username || 'Human';
     };
 

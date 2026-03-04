@@ -19,6 +19,7 @@ export interface GameSummary {
   created_at: string;
   updated_at: string;
   ai_model_version: string | null;
+  ai_simulations: number;
 }
 
 export interface GameListResponse {

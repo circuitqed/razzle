@@ -3163,6 +3163,7 @@ class GameSummary(BaseModel):
     created_at: str
     updated_at: str
     ai_model_version: Optional[str]
+    ai_simulations: int = 0
 
 
 class GameListResponse(BaseModel):

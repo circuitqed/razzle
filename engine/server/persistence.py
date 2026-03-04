@@ -921,6 +921,7 @@ def list_games(
         rows = conn.execute(
             f"""SELECT g.game_id, g.player1_type, g.player2_type, g.player1_user_id, g.player2_user_id,
                        g.state_json, g.moves_json, g.created_at, g.updated_at, g.ai_model_version,
+                       g.ai_simulations,
                        u1.username as player1_username, u2.username as player2_username
                 FROM games g
                 LEFT JOIN users u1 ON g.player1_user_id = u1.user_id
@@ -966,6 +967,7 @@ def list_games(
                 "created_at": row["created_at"],
                 "updated_at": row["updated_at"],
                 "ai_model_version": row["ai_model_version"],
+                "ai_simulations": row["ai_simulations"],
             })
 
         # Paginate results
