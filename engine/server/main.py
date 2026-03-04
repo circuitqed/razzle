@@ -1489,8 +1489,12 @@ async def get_latest_onnx_model():
             size_bytes=onnx_path.stat().st_size,
         )
 
-    # Use most recent
-    onnx_files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    # Use highest iteration number (iter_NNN.onnx)
+    import re
+    def _iter_number(p: Path) -> int:
+        m = re.search(r'iter_(\d+)', p.stem)
+        return int(m.group(1)) if m else -1
+    onnx_files.sort(key=_iter_number, reverse=True)
     best = onnx_files[0]
 
     return OnnxModelInfo(
