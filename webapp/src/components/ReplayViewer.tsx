@@ -1,10 +1,14 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import Board from './Board';
 import ReplayControls from './ReplayControls';
 import MoveHistory from './MoveHistory';
 import * as gamesApi from '../api/games';
 import type { GameFull } from '../api/games';
+import { decodeMove } from '../types';
 import { reconstructPositions, getLastMoveAtPosition, type ReplayState } from '../utils/replay';
+
+const END_TURN_MOVE = -1;
+const REPLAY_ANIMATION_MS = 500; // slower per-segment for replay visibility
 
 interface ReplayViewerProps {
   gameId: string;
@@ -60,23 +64,32 @@ export default function ReplayViewer({ gameId, onClose }: ReplayViewerProps) {
     return boundaries;
   }, [positions]);
 
-  // Auto-play timer (steps by complete turns)
+  // Auto-play timer (steps by complete turns, paced for animation)
   useEffect(() => {
     if (!isPlaying || !gameData) return;
 
-    const interval = setInterval(() => {
+    // Compute how many non-END_TURN moves are in the current turn step
+    const nextBoundary = turnBoundaries.find(b => b > currentPly);
+    const numMoves = nextBoundary !== undefined
+      ? gameData.moves.slice(currentPly, nextBoundary).filter(m => m !== END_TURN_MOVE).length
+      : 1;
+    // Give enough time for animation + a short pause
+    const animTime = Math.max(numMoves, 1) * REPLAY_ANIMATION_MS + 200;
+    const delay = Math.max(animTime, 1000) / playSpeed;
+
+    const timeout = setTimeout(() => {
       setCurrentPly((ply) => {
-        const nextBoundary = turnBoundaries.find(b => b > ply);
-        if (nextBoundary === undefined) {
+        const next = turnBoundaries.find(b => b > ply);
+        if (next === undefined) {
           setIsPlaying(false);
           return ply;
         }
-        return nextBoundary;
+        return next;
       });
-    }, 1000 / playSpeed);
+    }, delay);
 
-    return () => clearInterval(interval);
-  }, [isPlaying, gameData, playSpeed, turnBoundaries]);
+    return () => clearTimeout(timeout);
+  }, [isPlaying, gameData, playSpeed, turnBoundaries, currentPly]);
 
   const handleFirst = useCallback(() => {
     setCurrentPly(0);
@@ -120,11 +133,42 @@ export default function ReplayViewer({ gameId, onClose }: ReplayViewerProps) {
     setIsPlaying(false);
   }, []);
 
+  // Track ply direction for animation
+  const prevPlyRef = useRef(0);
+  const prevPly = prevPlyRef.current;
+  prevPlyRef.current = currentPly;
+  const direction = currentPly > prevPly ? 'forward' : currentPly < prevPly ? 'backward' : 'same';
+
   // Current position
   const currentState = positions[currentPly];
-  const lastMove = currentPly > 0 && gameData
-    ? getLastMoveAtPosition(gameData.moves, currentPly)
-    : null;
+
+  // Animation: forward shows move played, backward shows reverse of undone move
+  let lastMove: { from: number; to: number } | null = null;
+  let lastTurnMoves: { from: number; to: number }[] | undefined = undefined;
+
+  if (gameData && direction === 'forward' && currentPly > 0) {
+    // Extract all moves in this turn step (prevPly..currentPly), excluding END_TURN
+    const turnSlice = gameData.moves.slice(prevPly, currentPly);
+    const realMoves = turnSlice
+      .filter(m => m !== END_TURN_MOVE)
+      .map(m => {
+        const { src, dst } = decodeMove(m);
+        return { from: src, to: dst };
+      });
+
+    if (realMoves.length > 1) {
+      // Multi-pass: use lastTurnMoves for waypoint animation
+      lastTurnMoves = realMoves;
+    } else {
+      // Single move (knight or single pass)
+      lastMove = getLastMoveAtPosition(gameData.moves, currentPly);
+    }
+  } else if (gameData && direction === 'backward' && prevPly > 0) {
+    const undoneMove = getLastMoveAtPosition(gameData.moves, prevPly);
+    if (undoneMove) {
+      lastMove = { from: undoneMove.to, to: undoneMove.from };
+    }
+  }
 
   // Get moves up to current ply for display
   const movesUpToPly = useMemo(() => {
@@ -198,6 +242,8 @@ export default function ReplayViewer({ gameId, onClose }: ReplayViewerProps) {
               onSquareClick={() => {}}
               touchedMask={currentState.touchedMask}
               lastMove={lastMove}
+              lastTurnMoves={lastTurnMoves}
+              animationDuration={REPLAY_ANIMATION_MS}
             />
           </div>
 

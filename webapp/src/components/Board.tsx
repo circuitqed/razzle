@@ -27,6 +27,7 @@ interface BoardProps {
   lastMove?: LastMove | null; // Last move for highlighting
   lastTurnMoves?: LastMove[]; // All moves in last opponent turn (for multi-pass animation)
   animate?: boolean; // Whether to animate piece movement (default true)
+  animationDuration?: number; // ms per segment (default ANIMATION_DURATION)
 }
 
 const SQUARE_SIZE = 50;
@@ -73,6 +74,7 @@ export default function Board({
   lastMove = null,
   lastTurnMoves,
   animate = true,
+  animationDuration = ANIMATION_DURATION,
 }: BoardProps) {
   // Drag state - drag only activates after moving past threshold
   const [pendingDragSquare, setPendingDragSquare] = useState<number | null>(null);
@@ -230,7 +232,7 @@ export default function Board({
       ];
 
       const numSegments = lastTurnMoves.length;
-      const totalDuration = ANIMATION_DURATION * numSegments;
+      const totalDuration = animationDuration * numSegments;
       const startTime = performance.now();
 
       const animateFn = (currentTime: number) => {
@@ -284,7 +286,7 @@ export default function Board({
         lastDragDropRef.current = null;
       }
 
-      const duration = ANIMATION_DURATION;
+      const duration = animationDuration;
       const startTime = performance.now();
 
       const animateFn = (currentTime: number) => {
@@ -318,7 +320,7 @@ export default function Board({
         setAnimatingPiece(null);
       }
     };
-  }, [lastMove, lastTurnMoves, board]);
+  }, [lastMove, lastTurnMoves, board, animationDuration]);
 
   // Get destinations for the selected piece (knight moves and passes)
   const legalDestinations = useMemo(() => {
