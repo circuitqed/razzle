@@ -900,8 +900,8 @@ def list_games(
     params = []
 
     if player_id:
-        conditions.append("(player1_user_id = ? OR player2_user_id = ?)")
-        params.extend([player_id, player_id])
+        conditions.append("(player1_user_id = ? OR player2_user_id = ? OR g.player1_player_id = ? OR g.player2_player_id = ?)")
+        params.extend([player_id, player_id, player_id, player_id])
 
     if date_from:
         conditions.append("created_at >= ?")

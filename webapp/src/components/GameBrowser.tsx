@@ -1,7 +1,9 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import * as gamesApi from '../api/games';
 import type { GameSummary } from '../api/games';
 import { useAuth } from '../contexts/AuthContext';
+import { getPlayers } from '../api/leaderboard';
+import type { PlayerProfile } from '../types';
 
 interface GameBrowserProps {
   isOpen: boolean;
@@ -22,6 +24,49 @@ export default function GameBrowser({ isOpen, onClose, onSelectGame }: GameBrows
   const [resultFilter, setResultFilter] = useState<string>('');
   const [myGamesOnly, setMyGamesOnly] = useState(!!user);
 
+  // Player search
+  const [allPlayers, setAllPlayers] = useState<PlayerProfile[]>([]);
+  const [playerQuery, setPlayerQuery] = useState('');
+  const [selectedPlayer, setSelectedPlayer] = useState<PlayerProfile | null>(null);
+  const [showDropdown, setShowDropdown] = useState(false);
+  const searchRef = useRef<HTMLDivElement>(null);
+
+  // Load players list once when browser opens
+  useEffect(() => {
+    if (isOpen && allPlayers.length === 0) {
+      getPlayers(undefined, 200, 1).then(setAllPlayers).catch(() => {});
+    }
+  }, [isOpen, allPlayers.length]);
+
+  // Close dropdown on outside click
+  useEffect(() => {
+    const handleClick = (e: MouseEvent) => {
+      if (searchRef.current && !searchRef.current.contains(e.target as Node)) {
+        setShowDropdown(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClick);
+    return () => document.removeEventListener('mousedown', handleClick);
+  }, []);
+
+  const filteredPlayers = playerQuery.length > 0
+    ? allPlayers.filter(p =>
+        p.display_name.toLowerCase().includes(playerQuery.toLowerCase())
+      ).slice(0, 8)
+    : [];
+
+  const handleSelectPlayer = (player: PlayerProfile) => {
+    setSelectedPlayer(player);
+    setPlayerQuery(player.display_name);
+    setShowDropdown(false);
+    setMyGamesOnly(false);
+  };
+
+  const handleClearPlayer = () => {
+    setSelectedPlayer(null);
+    setPlayerQuery('');
+  };
+
   const fetchGames = useCallback(async () => {
     setIsLoading(true);
     setError(null);
@@ -38,7 +83,10 @@ export default function GameBrowser({ isOpen, onClose, onSelectGame }: GameBrows
       if (resultFilter) {
         params.winner = parseInt(resultFilter);
       }
-      if (myGamesOnly && user) {
+      if (selectedPlayer) {
+        // Use player_id for filtering (works for both human and AI players)
+        params.player_id = selectedPlayer.user_id || selectedPlayer.player_id;
+      } else if (myGamesOnly && user) {
         params.player_id = user.user_id;
       }
 
@@ -50,7 +98,7 @@ export default function GameBrowser({ isOpen, onClose, onSelectGame }: GameBrows
     } finally {
       setIsLoading(false);
     }
-  }, [page, statusFilter, resultFilter, myGamesOnly, user]);
+  }, [page, statusFilter, resultFilter, myGamesOnly, user, selectedPlayer]);
 
   // Load games when filters change
   useEffect(() => {
@@ -62,7 +110,7 @@ export default function GameBrowser({ isOpen, onClose, onSelectGame }: GameBrows
   // Reset page when filters change
   useEffect(() => {
     setPage(1);
-  }, [statusFilter, resultFilter, myGamesOnly]);
+  }, [statusFilter, resultFilter, myGamesOnly, selectedPlayer]);
 
   if (!isOpen) return null;
 
@@ -155,13 +203,61 @@ export default function GameBrowser({ isOpen, onClose, onSelectGame }: GameBrows
             </select>
           </div>
 
+          <div ref={searchRef} className="relative">
+            <label className="block text-xs text-gray-400 mb-1">Player</label>
+            <div className="flex items-center">
+              <input
+                type="text"
+                value={playerQuery}
+                onChange={(e) => {
+                  setPlayerQuery(e.target.value);
+                  setShowDropdown(true);
+                  if (selectedPlayer && e.target.value !== selectedPlayer.display_name) {
+                    setSelectedPlayer(null);
+                  }
+                }}
+                onFocus={() => playerQuery.length > 0 && setShowDropdown(true)}
+                placeholder="Search..."
+                className="px-3 py-1 bg-gray-700 text-white rounded border border-gray-600 text-sm w-40"
+              />
+              {selectedPlayer && (
+                <button
+                  onClick={handleClearPlayer}
+                  className="ml-1 text-gray-400 hover:text-white text-sm"
+                  title="Clear"
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              )}
+            </div>
+            {showDropdown && filteredPlayers.length > 0 && (
+              <div className="absolute z-10 mt-1 w-64 bg-gray-700 border border-gray-600 rounded shadow-lg max-h-48 overflow-y-auto">
+                {filteredPlayers.map(p => (
+                  <button
+                    key={p.player_id}
+                    onClick={() => handleSelectPlayer(p)}
+                    className="w-full text-left px-3 py-1.5 text-sm text-gray-200 hover:bg-gray-600 flex justify-between items-center"
+                  >
+                    <span>{p.display_name}</span>
+                    <span className="text-xs text-gray-400">{Math.round(p.elo_rating)}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
           {user && (
             <div className="flex items-end">
               <label className="flex items-center gap-2 text-sm text-gray-300 cursor-pointer">
                 <input
                   type="checkbox"
                   checked={myGamesOnly}
-                  onChange={(e) => setMyGamesOnly(e.target.checked)}
+                  onChange={(e) => {
+                    setMyGamesOnly(e.target.checked);
+                    if (e.target.checked) handleClearPlayer();
+                  }}
                   className="rounded"
                 />
                 My Games Only
