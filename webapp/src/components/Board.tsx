@@ -58,6 +58,7 @@ interface AnimatingPiece {
   progress: number;
   fromOverride?: { x: number; y: number } | null; // SVG position override (for drag-drop)
   waypoints?: { x: number; y: number }[]; // Multi-pass path (all positions from start to end)
+  passSquares?: number[]; // Square indices for each pass: [from, mid1, mid2, ..., to]
 }
 
 export default function Board({
@@ -231,6 +232,9 @@ export default function Board({
         ...lastTurnMoves.map(m => getSquarePosition(m.to, flipped)),
       ];
 
+      // Track square indices for progressive ineligibility display
+      const passSquares = [firstFrom, ...lastTurnMoves.map(m => m.to)];
+
       const numSegments = lastTurnMoves.length;
       const totalDuration = animationDuration * numSegments;
       const startTime = performance.now();
@@ -246,6 +250,7 @@ export default function Board({
           isBallOnly: true,
           progress,
           waypoints,
+          passSquares,
         });
 
         if (progress < 1) {
@@ -386,7 +391,18 @@ export default function Board({
     const isDragging = draggingSquare === square;
 
     // Check if this piece is ineligible to receive passes
-    const isIneligible = hasPiece(touchedMask, square);
+    // During multi-pass animation, only show X after ball has left that square
+    let isIneligible = hasPiece(touchedMask, square);
+    if (isIneligible && animatingPiece?.passSquares && animatingPiece.progress < 1) {
+      const pts = animatingPiece.passSquares;
+      const numSeg = pts.length - 1;
+      const completedSeg = Math.floor(animatingPiece.progress * numSeg);
+      // Square is revealed only if ball has departed it (it's at index <= completedSeg)
+      const sqIdx = pts.indexOf(square);
+      if (sqIdx >= 0 && sqIdx > completedSeg) {
+        isIneligible = false; // Ball hasn't left this square yet
+      }
+    }
 
     // Determine background color
     let bgColor = isLight ? '#f0d9b5' : '#b58863';
