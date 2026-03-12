@@ -146,16 +146,22 @@ def _build_trainer_onstart(
     api_key: str = '',
 ) -> str:
     """Build the onstart-cmd string for a trainer instance."""
-    return (
-        f'export TRAINING_API_KEY="{api_key}" && '
+    lines = [
+        f'export TRAINING_API_KEY="{api_key}"',
+        # Fetch latest code from GitHub (overlay on base image)
+        'cd /tmp && git clone --depth 1 https://github.com/circuitqed/razzle.git razzle_src 2>/dev/null && '
+        'cp -f /tmp/razzle_src/engine/razzle/training/*.py /workspace/razzle/training/ && '
+        'cp -f /tmp/razzle_src/engine/scripts/trainer.py /workspace/scripts/trainer.py && '
+        'rm -rf /tmp/razzle_src',
         f'mkdir -p /workspace/output && '
         f'nohup python -u /workspace/scripts/trainer.py '
         f'--api-url {api_url} --device cuda --threshold {training_threshold} '
         f'--network-size {network_size} --output /workspace/output '
         f'--batch-size {trainer_batch_size} --replay-buffer-size {replay_buffer_size} '
         f'--gamma {gamma} --td-lambda {td_lambda} --epochs {epochs} '
-        f'</dev/null >/workspace/trainer.log 2>&1 &'
-    )
+        f'</dev/null >/workspace/trainer.log 2>&1 &',
+    ]
+    return '\n'.join(lines)
 
 
 # Permanently blacklisted offers/machines that consistently fail
@@ -492,8 +498,9 @@ class DistributedOrchestrator:
         # Initialize Vast.ai
         self.vast = VastAI()
 
-        # Clean up any existing instances from previous runs
-        self._cleanup_existing_instances()
+        # Don't auto-cleanup - instances may be from a still-running training session
+        # To manually cleanup: vastai destroy instance <id>
+        # self._cleanup_existing_instances()
 
         # Only cleanup on explicit Ctrl+C, not on normal exit
         # (instances should keep running if the orchestrator disconnects)
