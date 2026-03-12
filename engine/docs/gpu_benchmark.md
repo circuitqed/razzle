@@ -1,7 +1,7 @@
 # GPU Benchmark Results for Razzle Training
 
 Date: 2026-03-12
-Budget: $1.69 spent of $10.00 limit
+Budget: ~$2.00 spent of $10.00 limit
 Run ID: bm892
 
 ## Configuration
@@ -22,13 +22,13 @@ Run ID: bm892
 | **RTX 3060 x3** | $0.041 | 626 | **15,118** | n/a | n/a | n/a | 26s |
 | RTX 3060 x1 | $0.052 | 309 | 5,981 | 28% | 97% | Yes | 15s |
 | **RTX 4090 x5** | $0.368 | **1,714** | 4,661 | 98% | 506% | No | 13s |
+| RTX 3090 x5 | $0.121 | 977 | 8,076 | 90% | 488% | Yes | 20s |
 | RTX 4090 x3 | $0.315 | 1,003 | 3,182 | 90% | 297% | Yes | 15s |
 | RTX 3090 x1 | $0.168 | - | - | - | - | - | TIMEOUT |
 | RTX 3090 x3 | $0.139 | - | - | - | - | - | TIMEOUT |
-| RTX 3090 x5 | $0.108 | - | - | - | - | - | TIMEOUT |
 | RTX 4090 x1 | $0.241 | - | - | - | - | - | TIMEOUT |
 
-Sorted by games/$. RTX 3090 instances consistently failed to boot (3/3 attempts).
+Sorted by games/$. RTX 3090 x1/x3 failed to boot (300s timeout); x5 needed 450s (8-min timeout).
 
 ## Key Findings
 
@@ -39,9 +39,10 @@ RTX 3060 instances deliver **~15,000 games/$** — roughly **3-5x better value**
 | GPU | Best games/$ | vs RTX 3060 |
 |-----|-------------|-------------|
 | RTX 3060 | 15,507 | 1.0x |
-| RTX 4090 | 4,661 | 0.3x |
+| RTX 3090 | 8,076 | 0.52x |
+| RTX 4090 | 4,661 | 0.30x |
 
-The RTX 4090 is faster in raw throughput (1,714 vs 849 games/hr) but costs ~7x more per hour.
+The RTX 4090 is faster in raw throughput (1,714 vs 849 games/hr) but costs ~7x more per hour. RTX 3090 lands in between but is still only half the value of RTX 3060.
 
 ### 2. More workers = better (up to GPU saturation)
 
@@ -66,9 +67,9 @@ The FastMCTS C extension helps but doesn't change the fundamental bottleneck —
 
 Despite having the C extension compiled, the RTX 4090 x5 instance ran Python MCTS (possibly import failure). With FastMCTS enabled, RTX 4090 x5 would likely hit ~2,500+ games/hr. However, games/$ would still be ~3x worse than RTX 3060.
 
-### 5. RTX 3090 is unreliable on vast.ai
+### 5. RTX 3090 is slow to boot but works
 
-All three RTX 3090 configurations (x1, x3, x5) failed to boot within the 300s timeout. These were different offers from different hosts. RTX 3090 availability on vast.ai appears problematic.
+RTX 3090 x1/x3 failed with a 300s boot timeout, but x5 succeeded with an extended 8-min timeout (took 450s). Once running, RTX 3090 x5 delivered 977 games/hr with FastMCTS at $0.121/hr — decent but still only half the games/$ of RTX 3060. The slow boot times make RTX 3090 less practical for spot/ephemeral workloads.
 
 ## Recommendation
 
@@ -113,6 +114,12 @@ The theoretical max with RTX 3060 on vast.ai is ~50-60 instances (limited by off
 - GPU: RTX 3060 12GB, DLP: 12.3
 - CPU: 6 cores @ 3.5GHz, 22GB RAM
 - Cost: $0.055/hr
+
+### RTX 3090 x5
+- GPU: RTX 3090 24GB, DLP: ~44
+- CPU: ~14 cores, ~38GB RAM
+- Cost: $0.121/hr
+- Note: Boot time 450s (needs extended timeout)
 
 ### RTX 4090 x3
 - GPU: RTX 4090 24GB, DLP: 100.3
