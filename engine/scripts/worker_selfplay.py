@@ -530,7 +530,13 @@ class SelfPlayWorker:
                 'draws': draws,
                 'simulations': self.simulations,
             }
-            resp = requests.post(f"{self.api_url}/arena/matches", json=data, timeout=10)
+            headers = {}
+            api_key = os.environ.get("TRAINING_API_KEY", "")
+            if api_key:
+                headers["X-API-Key"] = api_key
+            resp = requests.post(f"{self.api_url}/arena/matches", json=data, headers=headers, timeout=10)
+            if resp.status_code != 200:
+                print(f"[Worker {self.worker_id}] Arena submit failed: {resp.status_code}")
             return resp.status_code == 200
         except Exception as e:
             print(f"[Worker {self.worker_id}] Error submitting arena result: {e}")
