@@ -100,7 +100,11 @@ def _build_worker_onstart(
     Each worker gets an ID like "{run_id}_{sub_worker_id}" so the orchestrator
     can distinguish its workers from previous runs in the dashboard.
     """
-    lines = []
+    lines = [
+        # Build C MCTS extension if source is present and not yet compiled
+        'test -f /workspace/razzle_fast/libcore.so || '
+        '(python -u /workspace/razzle_fast/_build.py 2>/dev/null || true)',
+    ]
     for i in range(workers_per_instance):
         sub_worker_id = worker_id * workers_per_instance + i
         full_id = f'{run_id}_{sub_worker_id}' if run_id else str(sub_worker_id)
@@ -527,8 +531,9 @@ class DistributedOrchestrator:
         try:
             import requests
             check_interval = 60
-            # Image pull + model download can take 5-10 min on slow hosts
-            worker_inactivity_threshold = 900  # 15 min before replacing
+            # Image pull + model download can take 5-10 min on slow hosts,
+            # plus first game at 2000 sims takes 5+ min of self-play
+            worker_inactivity_threshold = 1800  # 30 min before replacing
 
             while not self.shutdown_requested:
                 time.sleep(check_interval)

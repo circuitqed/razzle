@@ -135,6 +135,7 @@ export async function createOnlineGame(
       game_mode: gameMode,
       days_per_move: daysPerMove,
       is_public: isPublic,
+      client_type: 'webapp',
     }),
   });
 }

@@ -61,6 +61,7 @@ class CreateGameRequest(BaseModel):
     bot_type: str = Field(default=DEFAULT_BOT_TYPE, description="AI bot type: 'neural', 'mcts', or 'random'")
     time_control: Optional[float] = Field(default=None, description="Total time per player in seconds. If set, enables dynamic time management.")
     increment: float = Field(default=0.0, description="Time increment per turn in seconds.")
+    client_type: Optional[str] = None
 
 
 class CreateGameResponse(BaseModel):
@@ -2194,6 +2195,7 @@ async def create_game(
         player1_user_id=player1_user_id,
         ai_model_version=model_version if request.player2_type == "ai" else None,
         bot_type=bot_type,
+        client_type=request.client_type,
     )
 
     # Update game record with player IDs
@@ -2628,6 +2630,7 @@ class CreateOnlineGameRequest(BaseModel):
     game_mode: str = Field(default="realtime", description="Game mode: 'realtime' or 'correspondence'")
     days_per_move: Optional[float] = Field(default=None, description="Days per move (correspondence only)")
     is_public: bool = Field(default=False, description="Whether the game appears in the public lobby")
+    client_type: Optional[str] = None
 
 
 class OnlineOpponentInfo(BaseModel):
@@ -2742,6 +2745,7 @@ async def create_online_game(
         game_mode=request.game_mode,
         days_per_move=request.days_per_move,
         is_public=request.is_public,
+        client_type=request.client_type,
     )
 
     # Also create an in-memory Game object for WebSocket support
@@ -3188,6 +3192,7 @@ class GameFullResponse(BaseModel):
     created_at: str
     updated_at: str
     ai_model_version: Optional[str]
+    client_type: Optional[str] = None
 
 
 @app.get("/games", response_model=GameListResponse)
@@ -3240,6 +3245,7 @@ async def get_game_full(game_id: str):
         created_at=data["created_at"],
         updated_at=data["updated_at"],
         ai_model_version=data["ai_model_version"],
+        client_type=data["client_type"],
     )
 
 
@@ -4276,6 +4282,7 @@ async def websocket_endpoint(websocket: WebSocket, game_id: str):
                     increment=game.increment,
                     game_mode=game.game_mode,
                     days_per_move=game.days_per_move,
+                    client_type="webapp",
                 )
                 new_game_id = new_result["game_id"]
 

@@ -71,6 +71,7 @@ def init_db(db_path: Path = None) -> None:
             ("ALTER TABLE games ADD COLUMN ai_model_version TEXT", None),
             ("ALTER TABLE games ADD COLUMN bot_type TEXT DEFAULT 'mcts'", None),
             ("ALTER TABLE games ADD COLUMN move_timestamps_json TEXT DEFAULT '[]'", None),
+            ("ALTER TABLE games ADD COLUMN client_type TEXT", None),
         ]
         for sql, _ in migrations:
             try:
@@ -381,6 +382,7 @@ def save_game(
     player2_user_id: Optional[str] = None,
     ai_model_version: Optional[str] = None,
     bot_type: Optional[str] = None,
+    client_type: Optional[str] = None,
     db_path: Path = None
 ) -> None:
     """Save or update a game in the database.
@@ -403,26 +405,26 @@ def save_game(
             conn.execute("""
                 INSERT INTO games (game_id, player1_type, player2_type, ai_simulations, state_json,
                                  moves_json, player1_user_id, player2_user_id, ai_model_version,
-                                 bot_type, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                 bot_type, client_type, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(game_id) DO UPDATE SET
                     state_json = excluded.state_json,
                     moves_json = excluded.moves_json,
                     updated_at = excluded.updated_at
             """, (game_id, player1_type, player2_type, ai_simulations, state_json, moves_json,
-                  player1_user_id, player2_user_id, ai_model_version, bot_type, now, now))
+                  player1_user_id, player2_user_id, ai_model_version, bot_type, client_type, now, now))
         else:
             # Update state only, don't touch moves_json (for in-game state updates)
             conn.execute("""
                 INSERT INTO games (game_id, player1_type, player2_type, ai_simulations, state_json,
                                  moves_json, player1_user_id, player2_user_id, ai_model_version,
-                                 bot_type, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, '[]', ?, ?, ?, ?, ?, ?)
+                                 bot_type, client_type, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, '[]', ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(game_id) DO UPDATE SET
                     state_json = excluded.state_json,
                     updated_at = excluded.updated_at
             """, (game_id, player1_type, player2_type, ai_simulations, state_json,
-                  player1_user_id, player2_user_id, ai_model_version, bot_type, now, now))
+                  player1_user_id, player2_user_id, ai_model_version, bot_type, client_type, now, now))
         conn.commit()
 
 
@@ -993,7 +995,8 @@ def get_game_full(game_id: str, db_path: Path = None) -> Optional[dict]:
     with get_connection(db_path) as conn:
         row = conn.execute(
             """SELECT game_id, player1_type, player2_type, player1_user_id, player2_user_id,
-                      state_json, moves_json, created_at, updated_at, ai_model_version
+                      state_json, moves_json, created_at, updated_at, ai_model_version,
+                      client_type
                FROM games WHERE game_id = ?""",
             (game_id,)
         ).fetchone()
@@ -1023,6 +1026,7 @@ def get_game_full(game_id: str, db_path: Path = None) -> Optional[dict]:
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
             "ai_model_version": row["ai_model_version"],
+            "client_type": row["client_type"],
             "state": state,
         }
 
@@ -1947,6 +1951,7 @@ def create_online_game(
     game_mode: str = "realtime",
     days_per_move: Optional[float] = None,
     is_public: bool = False,
+    client_type: Optional[str] = None,
     db_path: Path = None
 ) -> dict:
     """
@@ -1987,12 +1992,13 @@ def create_online_game(
                 game_id, player1_type, player2_type, ai_simulations,
                 state_json, moves_json, player1_user_id, player2_user_id,
                 join_code, online_status, time_control, time_remaining_json,
-                increment, game_mode, days_per_move, is_public, created_at, updated_at
+                increment, game_mode, days_per_move, is_public, client_type,
+                created_at, updated_at
             )
-            VALUES (?, 'human', 'human', 0, ?, '[]', ?, ?, ?, 'waiting', ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, 'human', 'human', 0, ?, '[]', ?, ?, ?, 'waiting', ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (game_id, state_json, player1_user_id, player2_user_id,
               join_code, time_control, time_remaining_json, increment,
-              game_mode, days_per_move, 1 if is_public else 0, now, now))
+              game_mode, days_per_move, 1 if is_public else 0, client_type, now, now))
         conn.commit()
 
     return {

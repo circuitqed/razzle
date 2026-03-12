@@ -50,6 +50,13 @@ from razzle.core.moves import get_legal_moves
 from razzle.training.api_client import TrainingAPIClient
 import math
 
+# Try to use C-backed FastMCTS for much faster tree search
+try:
+    from razzle_fast.wrapper import FastMCTS
+    HAS_FAST_MCTS = True
+except ImportError:
+    HAS_FAST_MCTS = False
+
 
 @dataclass
 class WorkerStatus:
@@ -471,20 +478,21 @@ class SelfPlayWorker:
                 temperature=temp,
                 batch_size=self.batch_size
             )
-            mcts = MCTS(ev, config)
 
-            # Search
-            root = mcts.search_batched(state, add_noise=(move_count < 6))
-
-            # Record visit counts
-            vc = {}
-            for m, child in root.children.items():
-                if child.visit_count > 0:
-                    vc[m] = child.visit_count
-            visit_counts.append(vc)
-
-            # Select and apply move
-            move = mcts.select_move(root)
+            if HAS_FAST_MCTS:
+                fast_mcts = FastMCTS(ev, config)
+                result_obj, vc = fast_mcts.search_with_visits(state, add_noise=(move_count < 6))
+                visit_counts.append(vc)
+                move = result_obj.selected_move
+            else:
+                mcts = MCTS(ev, config)
+                root = mcts.search_batched(state, add_noise=(move_count < 6))
+                vc = {}
+                for m, child in root.children.items():
+                    if child.visit_count > 0:
+                        vc[m] = child.visit_count
+                visit_counts.append(vc)
+                move = mcts.select_move(root)
             moves.append(move)
             state.apply_move(move)
 
@@ -624,20 +632,22 @@ class SelfPlayWorker:
                     temperature=temp,
                     batch_size=self.batch_size
                 )
-                mcts = MCTS(self.evaluator, config)
 
-                # Search
-                root = mcts.search_batched(state, add_noise=True)
+                if HAS_FAST_MCTS:
+                    fast_mcts = FastMCTS(self.evaluator, config)
+                    result_obj, vc = fast_mcts.search_with_visits(state, add_noise=True)
+                    visit_counts.append(vc)
+                    move = result_obj.selected_move
+                else:
+                    mcts = MCTS(self.evaluator, config)
+                    root = mcts.search_batched(state, add_noise=True)
+                    vc = {}
+                    for m, child in root.children.items():
+                        if child.visit_count > 0:
+                            vc[m] = child.visit_count
+                    visit_counts.append(vc)
+                    move = mcts.select_move(root)
 
-                # Record visit counts (sparse - only visited moves)
-                vc = {}
-                for m, child in root.children.items():
-                    if child.visit_count > 0:
-                        vc[m] = child.visit_count
-                visit_counts.append(vc)
-
-                # Select and apply move
-                move = mcts.select_move(root)
                 moves.append(move)
                 state.apply_move(move)
 
@@ -704,7 +714,8 @@ class SelfPlayWorker:
         self._status_thread = Thread(target=self._status_writer_loop, daemon=True)
         self._status_thread.start()
 
-        print(f"[Worker {self.worker_id}] Starting self-play loop (arena fraction: {self.arena_fraction:.0%})")
+        mcts_type = "FastMCTS (C)" if HAS_FAST_MCTS else "MCTS (Python)"
+        print(f"[Worker {self.worker_id}] Starting self-play loop (arena fraction: {self.arena_fraction:.0%}, engine: {mcts_type})")
 
         try:
             while not self.shutdown_event.is_set():

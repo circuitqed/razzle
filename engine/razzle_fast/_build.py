@@ -17,10 +17,18 @@ source_path = os.path.join(here, "core.c")
 output_path = os.path.join(here, "libcore.so")
 
 def build():
+    # Use -march=x86-64-v3 for broad compatibility with modern x86 CPUs
+    # (AVX2 support, covers virtually all cloud GPUs from ~2013+).
+    # Falls back to generic x86-64 if v3 isn't supported by the compiler.
+    import platform
+    if platform.machine() in ('x86_64', 'AMD64'):
+        march = '-march=x86-64-v3'
+    else:
+        march = '-march=native'
     cmd = [
         "gcc",
         "-shared", "-fPIC",
-        "-O3", "-march=native", "-std=c11",
+        "-O3", march, "-std=c11",
         "-o", output_path,
         source_path,
         "-lm",

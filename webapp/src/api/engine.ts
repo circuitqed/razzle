@@ -37,7 +37,7 @@ export async function createGame(options?: {
 }): Promise<{ game_id: string }> {
   return request('/games', {
     method: 'POST',
-    body: JSON.stringify(options || {}),
+    body: JSON.stringify({ ...options, client_type: 'webapp' }),
   });
 }
 

@@ -303,16 +303,21 @@ class FastMCTS:
 
     def search_batched(self, state, add_noise: bool = True):
         """Run MCTS search. Returns _MCTSResult with policy and selected_move."""
-        policy, value, selected_move = self._search_fast(state, add_noise)
+        policy, value, selected_move, _ = self._search_with_tree(state, add_noise)
         return _MCTSResult(policy, selected_move, value)
+
+    def search_with_visits(self, state, add_noise: bool = True):
+        """Run MCTS search. Returns (_MCTSResult, visit_counts_dict)."""
+        policy, value, selected_move, visit_counts = self._search_with_tree(state, add_noise, extract_visits=True)
+        return _MCTSResult(policy, selected_move, value), visit_counts
 
     def search_fast(self, state, add_noise: bool = True) -> tuple[np.ndarray, int]:
         """Fast path: returns (policy, selected_move) directly."""
-        policy, _, selected_move = self._search_fast(state, add_noise)
+        policy, _, selected_move, _ = self._search_with_tree(state, add_noise)
         return policy, selected_move
 
-    def _search_fast(self, state, add_noise: bool) -> tuple[np.ndarray, float, int]:
-        """Core search. Returns (policy, root_value, selected_move)."""
+    def _search_with_tree(self, state, add_noise: bool, extract_visits: bool = False):
+        """Core search. Returns (policy, root_value, selected_move, visit_counts)."""
         # Convert state
         if isinstance(state, FastState):
             cs = state._cs
@@ -329,9 +334,35 @@ class FastMCTS:
             raise MemoryError("Failed to allocate MCTS tree")
 
         try:
-            return self._run_search(tree, cs, add_noise)
+            policy, root_value, selected_move = self._run_search(tree, cs, add_noise)
+            visit_counts = None
+            if extract_visits:
+                visit_counts = self._extract_visit_counts(tree)
+            return policy, root_value, selected_move, visit_counts
         finally:
             _lib.razzle_mcts_free(tree)
+
+    def _extract_visit_counts(self, tree) -> dict[int, int]:
+        """Extract visit counts from root's children as {move: visits} dict.
+
+        Actions use the Python convention: -1 for END_TURN, src*56+dst for moves.
+        """
+        max_children = 256
+        actions = (ctypes.c_int * max_children)()
+        visits = (ctypes.c_int * max_children)()
+        priors = (ctypes.c_float * max_children)()
+        values = (ctypes.c_float * max_children)()
+
+        n = _lib.razzle_mcts_get_root_children(
+            tree, actions, visits, priors, values
+        )
+
+        vc = {}
+        for i in range(n):
+            v = int(visits[i])
+            if v > 0:
+                vc[int(actions[i])] = v
+        return vc
 
     def _run_search(self, tree, root_cs, add_noise: bool):
         cfg = self.config

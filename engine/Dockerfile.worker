@@ -1,12 +1,18 @@
 FROM pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime
 
-# Install the only dependency not in the base image
-RUN pip install --no-cache-dir requests
+# Install gcc for C extension and requests for API
+RUN apt-get update && apt-get install -y --no-install-recommends gcc && \
+    rm -rf /var/lib/apt/lists/* && \
+    pip install --no-cache-dir requests
 
 # Copy the razzle package and project config
 WORKDIR /workspace
 COPY pyproject.toml .
 COPY razzle/ razzle/
+
+# Copy C MCTS extension source (compiled at build or first boot)
+COPY razzle_fast/ razzle_fast/
+RUN python3 razzle_fast/_build.py
 
 # Install razzle package in editable mode
 RUN pip install --no-cache-dir -e .
