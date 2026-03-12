@@ -101,9 +101,14 @@ def _build_worker_onstart(
     can distinguish its workers from previous runs in the dashboard.
     """
     lines = [
-        # Build C MCTS extension if source is present and not yet compiled
-        'test -f /workspace/razzle_fast/libcore.so || '
-        '(python -u /workspace/razzle_fast/_build.py 2>/dev/null || true)',
+        # Fetch latest code from GitHub (overlay on base image)
+        'cd /tmp && git clone --depth 1 https://github.com/circuitqed/razzle.git razzle_src 2>/dev/null && '
+        'cp -r /tmp/razzle_src/engine/razzle_fast /workspace/razzle_fast && '
+        'cp /tmp/razzle_src/engine/scripts/worker_selfplay.py /workspace/scripts/worker_selfplay.py && '
+        'rm -rf /tmp/razzle_src',
+        # Build C MCTS extension (install gcc if needed)
+        'which gcc >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq gcc >/dev/null 2>&1)',
+        'python -u /workspace/razzle_fast/_build.py',
     ]
     for i in range(workers_per_instance):
         sub_worker_id = worker_id * workers_per_instance + i
