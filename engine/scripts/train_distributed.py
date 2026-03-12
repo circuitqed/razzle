@@ -108,7 +108,7 @@ def _build_worker_onstart(
         'cd /tmp && git clone --depth 1 https://github.com/circuitqed/razzle.git razzle_src 2>/dev/null && '
         'cp -r /tmp/razzle_src/engine/razzle_fast /workspace/razzle_fast && '
         'cp /tmp/razzle_src/engine/scripts/worker_selfplay.py /workspace/scripts/worker_selfplay.py && '
-        'cp -r /tmp/razzle_src/engine/razzle/training /workspace/razzle/training && '
+        'cp -f /tmp/razzle_src/engine/razzle/training/*.py /workspace/razzle/training/ && '
         'rm -rf /tmp/razzle_src',
         # Build C MCTS extension (install gcc if needed)
         'which gcc >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq gcc >/dev/null 2>&1)',
