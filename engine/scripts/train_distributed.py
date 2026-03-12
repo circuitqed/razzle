@@ -659,7 +659,10 @@ def main():
     args = parser.parse_args()
 
     # Load .env file if it exists (for TRAINING_API_KEY etc.)
+    # Check engine/.env first, then repo root .env
     env_path = Path(__file__).parent.parent / '.env'
+    if not env_path.exists():
+        env_path = Path(__file__).parent.parent.parent / '.env'
     if env_path.exists():
         with open(env_path) as f:
             for line in f:
