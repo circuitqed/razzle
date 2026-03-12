@@ -93,6 +93,7 @@ def _build_worker_onstart(
     random_opening_moves: int,
     random_opening_fraction: float,
     run_id: str = '',
+    api_key: str = '',
 ) -> str:
     """Build the onstart-cmd string for a worker instance.
 
@@ -101,6 +102,8 @@ def _build_worker_onstart(
     can distinguish its workers from previous runs in the dashboard.
     """
     lines = [
+        # Export API key so workers can authenticate
+        f'export TRAINING_API_KEY="{api_key}"',
         # Fetch latest code from GitHub (overlay on base image)
         'cd /tmp && git clone --depth 1 https://github.com/circuitqed/razzle.git razzle_src 2>/dev/null && '
         'cp -r /tmp/razzle_src/engine/razzle_fast /workspace/razzle_fast && '
@@ -139,9 +142,11 @@ def _build_trainer_onstart(
     gamma: float,
     td_lambda: float,
     epochs: int = 5,
+    api_key: str = '',
 ) -> str:
     """Build the onstart-cmd string for a trainer instance."""
     return (
+        f'export TRAINING_API_KEY="{api_key}" && '
         f'mkdir -p /workspace/output && '
         f'nohup python -u /workspace/scripts/trainer.py '
         f'--api-url {api_url} --device cuda --threshold {training_threshold} '
@@ -182,9 +187,11 @@ class DistributedOrchestrator:
         replay_buffer_size: int = 100_000,
         gamma: float = 0.99,
         td_lambda: float = 0.95,
+        api_key: str = '',
     ):
         self.num_workers = num_workers
         self.api_url = api_url
+        self.api_key = api_key or os.environ.get('TRAINING_API_KEY', '')
         self.output_dir = Path(output_dir)
         self.image = image
         self.gpu_name = gpu_name
@@ -249,6 +256,7 @@ class DistributedOrchestrator:
             random_opening_moves=self.random_opening_moves,
             random_opening_fraction=self.random_opening_fraction,
             run_id=self.run_id,
+            api_key=self.api_key,
         )
         try:
             worker.status = "creating"
@@ -280,6 +288,7 @@ class DistributedOrchestrator:
             replay_buffer_size=self.replay_buffer_size,
             gamma=self.gamma,
             td_lambda=self.td_lambda,
+            api_key=self.api_key,
         )
         try:
             trainer.status = "creating"
@@ -644,7 +653,20 @@ def main():
     parser.add_argument('--td-lambda', type=float, default=0.95,
                         help='TD(λ) trace decay (default: 0.95, 1.0=pure MC)')
 
+    parser.add_argument('--api-key', type=str, default=None,
+                        help='Training API key (default: from TRAINING_API_KEY env var or .env)')
+
     args = parser.parse_args()
+
+    # Load .env file if it exists (for TRAINING_API_KEY etc.)
+    env_path = Path(__file__).parent.parent / '.env'
+    if env_path.exists():
+        with open(env_path) as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith('#') and '=' in line:
+                    key, _, value = line.partition('=')
+                    os.environ.setdefault(key.strip(), value.strip())
 
     # Ensure unbuffered output
     os.environ['PYTHONUNBUFFERED'] = '1'
@@ -668,6 +690,7 @@ def main():
         replay_buffer_size=args.replay_buffer_size,
         gamma=args.gamma,
         td_lambda=args.td_lambda,
+        api_key=args.api_key or '',
     )
 
     # Handle signals
