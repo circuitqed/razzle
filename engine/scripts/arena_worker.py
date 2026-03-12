@@ -95,11 +95,21 @@ def get_match_game_count(
     return 0
 
 
+def _api_headers() -> dict:
+    """Get headers with API key if available."""
+    headers = {}
+    api_key = os.environ.get("TRAINING_API_KEY", "")
+    if api_key:
+        headers["X-API-Key"] = api_key
+    return headers
+
+
 def post_game_result(api_url: str, match_data: dict) -> bool:
     """POST a single game result to the arena API."""
     try:
         resp = requests.post(
-            f"{api_url}/arena/matches", json=match_data, timeout=15
+            f"{api_url}/arena/matches", json=match_data,
+            headers=_api_headers(), timeout=15
         )
         if resp.ok:
             return True
@@ -112,7 +122,10 @@ def post_game_result(api_url: str, match_data: dict) -> bool:
 def trigger_elo_compute(api_url: str):
     """Ask the server to recompute ELO ratings."""
     try:
-        resp = requests.post(f"{api_url}/arena/compute", timeout=30)
+        resp = requests.post(
+            f"{api_url}/arena/compute",
+            headers=_api_headers(), timeout=30
+        )
         if resp.ok:
             data = resp.json()
             print(f"ELO recompute done: {data.get('status', '?')}")
