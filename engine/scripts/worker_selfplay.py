@@ -258,7 +258,17 @@ class SelfPlayWorker:
         return False
 
     def _refresh_available_models(self) -> list[str]:
-        """Get benchmark models (every 10th iteration + latest) for arena matches."""
+        """Get benchmark models for arena matches.
+
+        Uses adaptive stride to keep ~15 models. Includes fixed anchor
+        models from early training so Elo ratings stay connected across
+        all generations (the models list endpoint only returns recent models).
+        """
+        # Fixed anchor models from early training for Elo continuity
+        ANCHOR_MODELS = [
+            "iter_020", "iter_100", "iter_200", "iter_300",
+            "iter_400", "iter_466",
+        ]
         try:
             import requests
             resp = requests.get(f"{self.api_url}/training/models", timeout=10)
@@ -266,7 +276,7 @@ class SelfPlayWorker:
                 data = resp.json()
                 models = data.get('models', [])
 
-                # Parse iteration numbers
+                # Parse iteration numbers from API
                 parsed = []
                 for m in models:
                     v = m.get('version', '')
@@ -286,15 +296,19 @@ class SelfPlayWorker:
                 parsed.sort(key=lambda x: x[0])
                 max_iter = parsed[-1][0]
 
-                # Adaptive stride: aim for ~15 benchmark models
-                # so arena games concentrate on fewer models
-                stride = max(10, (max_iter // 15 // 10) * 10)  # round to nearest 10
+                # Adaptive stride: aim for ~12 benchmark models from recent
+                stride = max(10, (max_iter // 12 // 10) * 10)
 
-                benchmarks = []
+                benchmarks_set = set()
+                # Add anchor models (always included for Elo continuity)
+                for v in ANCHOR_MODELS:
+                    benchmarks_set.add(v)
+                # Add strided models from API list
                 for iteration, version in parsed:
                     if iteration % stride == 0 or iteration == max_iter:
-                        benchmarks.append(version)
+                        benchmarks_set.add(version)
 
+                benchmarks = sorted(benchmarks_set, key=lambda v: self._iter_number(v))
                 self.available_models = benchmarks
                 return benchmarks
         except Exception as e:
