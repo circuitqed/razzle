@@ -537,10 +537,31 @@ class SelfPlayWorker:
             resp = requests.post(f"{self.api_url}/arena/matches", json=data, headers=headers, timeout=10)
             if resp.status_code != 200:
                 print(f"[Worker {self.worker_id}] Arena submit failed: {resp.status_code}")
-            return resp.status_code == 200
+            if resp.status_code == 200:
+                # Trigger Elo recompute every 10 arena games
+                if self.arena_games_played % 10 == 0:
+                    self._trigger_elo_compute()
+                return True
+            return False
         except Exception as e:
             print(f"[Worker {self.worker_id}] Error submitting arena result: {e}")
             return False
+
+    def _trigger_elo_compute(self):
+        """Ask the server to recompute Elo ratings."""
+        try:
+            import requests
+            headers = {}
+            api_key = os.environ.get("TRAINING_API_KEY", "")
+            if api_key:
+                headers["X-API-Key"] = api_key
+            resp = requests.post(f"{self.api_url}/arena/compute", headers=headers, timeout=30)
+            if resp.ok:
+                print(f"[Worker {self.worker_id}] Elo recompute triggered")
+            else:
+                print(f"[Worker {self.worker_id}] Elo recompute failed: {resp.status_code}")
+        except Exception as e:
+            print(f"[Worker {self.worker_id}] Elo recompute error: {e}")
 
     def _get_status(self) -> WorkerStatus:
         """Get current worker status."""
