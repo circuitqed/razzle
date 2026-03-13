@@ -286,10 +286,13 @@ class SelfPlayWorker:
                 parsed.sort(key=lambda x: x[0])
                 max_iter = parsed[-1][0]
 
-                # Keep only benchmark iterations (mod 10) + the latest
+                # Adaptive stride: aim for ~15 benchmark models
+                # so arena games concentrate on fewer models
+                stride = max(10, (max_iter // 15 // 10) * 10)  # round to nearest 10
+
                 benchmarks = []
                 for iteration, version in parsed:
-                    if iteration % 10 == 0 or iteration == max_iter:
+                    if iteration % stride == 0 or iteration == max_iter:
                         benchmarks.append(version)
 
                 self.available_models = benchmarks
