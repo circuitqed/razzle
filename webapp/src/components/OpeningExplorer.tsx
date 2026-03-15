@@ -128,6 +128,7 @@ export default function OpeningExplorer() {
     bookMoves,
     boardState,
     turns,
+    openingName,
     playMove,
     goBack,
     goForward,
@@ -203,6 +204,13 @@ export default function OpeningExplorer() {
               </span>
             )}
           </div>
+
+          {/* Opening name */}
+          {openingName && (
+            <div className="text-sm text-yellow-400/80 font-medium px-1">
+              {openingName}
+            </div>
+          )}
 
           {/* Move history (grouped by turn) */}
           <MoveHistory

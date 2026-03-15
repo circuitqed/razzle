@@ -3,6 +3,7 @@ import { OpeningBook } from '../engine/openingBook';
 import { newGame, copyState, applyMove } from '../engine/state';
 import type { EngineState } from '../engine/state';
 import { sqToAlgebraic, NUM_SQUARES, END_TURN_ACTION } from '../engine/bitboard';
+import { getOpeningName } from '../engine/openingNames';
 import type { BoardState } from '../types';
 
 export interface BookMove {
@@ -38,6 +39,7 @@ export interface OpeningExplorerState {
   boardState: BoardState;
   turns: Turn[]; // move history grouped by player turn
   currentTurnIndex: number; // which turn we're currently in/after (-1 = before any)
+  openingName: string | null; // named opening for current line, if any
   playMove: (actions: number[]) => void;
   goBack: () => void;
   goForward: () => void;
@@ -302,6 +304,12 @@ export function useOpeningExplorer(): OpeningExplorerState {
     return -1;
   }, [turns, currentIndex]);
 
+  // Named opening for current line
+  const openingName = useMemo(
+    () => getOpeningName(turns.map((t) => t.display)),
+    [turns],
+  );
+
   const playMove = useCallback((actions: number[]) => {
     setPositionStack((prev) => {
       const newStack = prev.slice(0, currentIndex + 1);
@@ -355,6 +363,7 @@ export function useOpeningExplorer(): OpeningExplorerState {
     boardState,
     turns,
     currentTurnIndex,
+    openingName,
     playMove,
     goBack,
     goForward,
