@@ -18,6 +18,7 @@ COPY razzle/ razzle/
 COPY server/ server/
 COPY cli/ cli/
 COPY scripts/ scripts/
+COPY data/ data/
 
 # Expose port
 EXPOSE 8000

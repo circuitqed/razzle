@@ -43,6 +43,10 @@ from . import persistence
 
 logger = logging.getLogger(__name__)
 
+# --- Opening Book ---
+# Book JSON served via GET /opening-book for analysis UI; not used for AI moves.
+_BOOK_PATH = Path(__file__).parent.parent / "data" / "opening_book.json"
+
 # --- Bot Types ---
 # Available AI bot types:
 # - "neural": Uses trained neural network for evaluation (strongest if trained well)
@@ -1337,6 +1341,18 @@ async def get_me(user: dict = Depends(require_auth)):
 async def health_check():
     """Health check endpoint."""
     return HealthResponse(status="ok", version="0.1.0", model=get_model_info())
+
+
+@app.get("/opening-book")
+async def get_opening_book():
+    """Serve the opening book JSON for browser inference."""
+    if not _BOOK_PATH.exists():
+        raise HTTPException(status_code=404, detail="Opening book not generated")
+    return FileResponse(
+        _BOOK_PATH,
+        media_type="application/json",
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
 
 
 class AvailableModelInfo(BaseModel):
@@ -3596,7 +3612,7 @@ async def submit_arena_match(request: ArenaSubmitMatchRequest, _=Depends(require
 @app.get("/arena/ratings", response_model=ArenaRatingsResponse)
 async def get_arena_ratings(
     simulations: Optional[int] = None,
-    limit: int = 100,
+    limit: int = 1000,
 ):
     """
     Get arena ELO ratings sorted by rating (descending).

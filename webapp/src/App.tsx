@@ -12,6 +12,7 @@ import UserMenu from './components/UserMenu';
 import GameBrowser from './components/GameBrowser';
 import ReplayViewer from './components/ReplayViewer';
 import AnalysisBoard from './components/AnalysisBoard';
+import OpeningExplorer from './components/OpeningExplorer';
 import WaitingForOpponent from './components/WaitingForOpponent';
 import OnlineGame from './components/OnlineGame';
 import NewGameDialog from './components/NewGameDialog';
@@ -405,6 +406,13 @@ function AppContent() {
         <div className="w-20" /> {/* Spacer for balance */}
         <h1 className="text-xl sm:text-2xl font-bold">Razzle Dazzle</h1>
         <div className="flex items-center gap-2">
+          <a
+            href="/openings"
+            className="p-1.5 text-gray-400 hover:text-white transition-colors"
+            title="Opening explorer"
+          >
+{'\u{1F4D6}'}
+          </a>
           <button
             onClick={() => setShowGameBrowser(true)}
             className="p-1.5 text-gray-400 hover:text-white transition-colors"
@@ -771,6 +779,7 @@ export default function App() {
         <AuthProvider>
           <Routes>
             <Route path="/" element={<AppContentWrapper />} />
+            <Route path="/openings" element={<OpeningExplorer />} />
             <Route path="/dashboard" element={<TrainingDashboardPage />} />
             <Route path="/online/:gameId" element={<OnlineGamePage />} />
             <Route path="/join/:code" element={<JoinGamePage />} />
