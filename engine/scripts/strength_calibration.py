@@ -127,6 +127,7 @@ def get_match_game_count(api_url: str, m1: str, m2: str) -> int:
 def post_game_result(api_url: str, m1: str, m2: str,
                      m1_wins: int, m2_wins: int, draws: int) -> bool:
     try:
+        headers = _api_headers()
         resp = requests.post(
             f"{api_url}/arena/matches",
             json={
@@ -137,9 +138,11 @@ def post_game_result(api_url: str, m1: str, m2: str,
                 "draws": draws,
                 "simulations": SIMS_TAG,
             },
-            headers=_api_headers(),
+            headers=headers,
             timeout=15,
         )
+        if not resp.ok:
+            print(f"    POST failed ({resp.status_code}): {resp.text[:200]}")
         return resp.ok
     except Exception as e:
         print(f"    POST failed: {e}")
