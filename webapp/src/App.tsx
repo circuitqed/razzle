@@ -15,6 +15,7 @@ import AnalysisBoard from './components/AnalysisBoard';
 import OpeningExplorer from './components/OpeningExplorer';
 import WaitingForOpponent from './components/WaitingForOpponent';
 import OnlineGame from './components/OnlineGame';
+import { TermsPage, PrivacyPage } from './components/LegalPages';
 import NewGameDialog from './components/NewGameDialog';
 import type { NewGameSettings } from './components/NewGameDialog';
 import { useGame } from './hooks/useGame';
@@ -357,6 +358,26 @@ function AppContent() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [gameState, isLoading, aiThinking, canEndTurn, showNewGameDialog, showResignConfirm, showRules, isViewingHistory]);
 
+  // Tab title: show "(Your Turn)" when it's the human's turn in AI mode
+  useEffect(() => {
+    const isPlayerTurn =
+      gameState?.status === 'playing' &&
+      settings.mode === 'ai' &&
+      gameState.current_player === playerColor;
+    document.title = isPlayerTurn ? '(Your Turn) KnightBall' : 'KnightBall';
+
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        document.title = 'KnightBall';
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibility);
+      document.title = 'KnightBall';
+    };
+  }, [gameState?.status, gameState?.current_player, settings.mode, playerColor]);
+
   const handleSelectGameForReplay = (gameId: string) => {
     setShowGameBrowser(false);
     setReplayGameId(gameId);
@@ -394,7 +415,7 @@ function AppContent() {
         navigate(`/online/${waitingGame.gameId}`);
       },
       onError: (error) => console.error('WebSocket error:', error),
-      onClose: () => console.log('WebSocket closed'),
+      onClose: () => {},
     });
     return () => { ws.close(); };
   }, [waitingGame, navigate]);
@@ -559,6 +580,11 @@ function AppContent() {
             Keys: N=New Game, U=Undo, E=End Turn, F=Flip, M=Mute, ?=Rules, {'\u{2190}\u{2192}'}=History
           </p>
         </div>
+        <div className="mt-2 text-xs text-gray-700">
+          <a href="/terms" className="hover:text-gray-500">Terms</a>
+          {' \u00B7 '}
+          <a href="/privacy" className="hover:text-gray-500">Privacy</a>
+        </div>
       </main>
 
       {/* New Game Dialog */}
@@ -678,9 +704,7 @@ function OnlineGamePage() {
   return (
     <OnlineGame
       gameId={gameId}
-      onGameEnd={(winner, reason) => {
-        console.log('Game ended:', { winner, reason });
-      }}
+      onGameEnd={() => {}}
     />
   );
 }
@@ -783,6 +807,8 @@ export default function App() {
             <Route path="/dashboard" element={<TrainingDashboardPage />} />
             <Route path="/online/:gameId" element={<OnlineGamePage />} />
             <Route path="/join/:code" element={<JoinGamePage />} />
+            <Route path="/terms" element={<TermsPage />} />
+            <Route path="/privacy" element={<PrivacyPage />} />
           </Routes>
         </AuthProvider>
       </BrowserRouter>

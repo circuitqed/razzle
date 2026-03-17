@@ -38,9 +38,7 @@ export default function OnlineGame({ gameId, onGameEnd }: OnlineGameProps) {
     [onGameEnd]
   );
 
-  const handleOpponentJoined = useCallback((opponent: OnlineOpponentInfo) => {
-    console.log('Opponent joined:', opponent);
-  }, []);
+  const handleOpponentJoined = useCallback((_opponent: OnlineOpponentInfo) => {}, []);
 
   const {
     gameState,
@@ -240,6 +238,23 @@ export default function OnlineGame({ gameId, onGameEnd }: OnlineGameProps) {
       navigate(`/online/${rematchGameId}`);
     }
   }, [rematchGameId, navigate]);
+
+  // Tab title: show "(Your Turn)" in online games
+  useEffect(() => {
+    const showNotification = isMyTurn && gameState?.status === 'playing';
+    document.title = showNotification ? '(Your Turn) KnightBall' : 'KnightBall';
+
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        document.title = 'KnightBall';
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibility);
+      document.title = 'KnightBall';
+    };
+  }, [isMyTurn, gameState?.status]);
 
   const topClock = useMemo(() => {
     if (myColor === null) return undefined;
