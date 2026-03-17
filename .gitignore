@@ -78,3 +78,15 @@ Thumbs.db
 engine/server/games.db
 engine/razzle.db
 *.tar.gz
+
+# Playwright / E2E testing
+.playwright-mcp/
+webapp/e2e/
+webapp/playwright.config.ts
+webapp/test-results/
+# Screenshot artifacts from Playwright testing
+webapp/*.png
+engine/*.png
+
+# Engine data (generated)
+engine/data/
