@@ -21,7 +21,10 @@ export default function RulesModal({ isOpen, onClose }: RulesModalProps) {
           &times;
         </button>
 
-        <h2 className="text-2xl font-bold mb-4">Razzle Dazzle Rules</h2>
+        <h2 className="text-2xl font-bold mb-2">KnightBall Rules</h2>
+        <p className="text-gray-400 text-sm italic mb-4">
+          What do chess knights do when they're off the clock? They play ball.
+        </p>
 
         <div className="space-y-4 text-gray-300 text-sm">
           <section>
@@ -98,9 +101,13 @@ export default function RulesModal({ isOpen, onClose }: RulesModalProps) {
           </section>
         </div>
 
+        <p className="mt-6 text-xs text-gray-500 text-center">
+          KnightBall is based on Razzle Dazzle (also known as Knight's Move).
+        </p>
+
         <button
           onClick={onClose}
-          className="mt-6 w-full px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded font-medium transition-colors"
+          className="mt-4 w-full px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded font-medium transition-colors"
         >
           Got it!
         </button>

@@ -21,7 +21,7 @@ export default defineConfig({
   server: {
     port: 7492,
     host: true,
-    allowedHosts: ['razzledazzle.lazybrains.com'],
+    allowedHosts: ['knightball.org'],
     proxy: {
       '/api': {
         target: 'http://localhost:8000',

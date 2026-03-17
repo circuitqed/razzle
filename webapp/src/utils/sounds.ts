@@ -5,7 +5,7 @@ let audioContext: AudioContext | null = null;
 // Load preference from localStorage, default to OFF
 let soundEnabled = (() => {
   try {
-    const stored = localStorage.getItem('razzle_sound');
+    const stored = localStorage.getItem('knightball_sound');
     return stored === 'true';
   } catch {
     return false;
@@ -21,7 +21,7 @@ function getAudioContext(): AudioContext {
 
 export function setSoundEnabled(enabled: boolean) {
   soundEnabled = enabled;
-  try { localStorage.setItem('razzle_sound', String(enabled)); } catch { /* ignore */ }
+  try { localStorage.setItem('knightball_sound', String(enabled)); } catch { /* ignore */ }
 }
 
 export function isSoundEnabled(): boolean {

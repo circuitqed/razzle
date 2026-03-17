@@ -1,10 +1,12 @@
-# Razzle Dazzle - Official Rules
+# KnightBall - Official Rules
 
-*Based on the original rules from [SuperDuperGames](https://superdupergames.org/rules/razzle.pdf)*
+*KnightBall is based on [Razzle Dazzle](https://superdupergames.org/rules/razzle.pdf) (also known as Knight's Move).*
 
 ## Overview
 
-Razzle Dazzle is a two-player abstract strategy game played on an 8×7 board. Each player controls 5 pieces that move like chess knights, plus a ball. The objective is to advance your ball to your opponent's back row.
+What happens when chess knights clock out and hit the field? KnightBall.
+
+Each player controls 5 pieces that move like chess knights, plus a ball, on an 8×7 board. The objective is to advance your ball to your opponent's back row. No kings to protect, no pawns to push — just knights doing what they do best (but with a ball this time).
 
 ## Board Setup
 

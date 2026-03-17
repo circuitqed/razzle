@@ -5,7 +5,7 @@ services:
     build:
       context: ./engine
       dockerfile: Dockerfile
-    container_name: razzle-engine
+    container_name: knightball-engine
     expose:
       - "8000"
     volumes:
@@ -16,14 +16,14 @@ services:
       - JWT_SECRET=${JWT_SECRET:-change-me-in-production}
       - TRAINING_API_KEY=${TRAINING_API_KEY:-}
       - RAZZLE_MODELS_DIR=/app/models
-      - ALLOWED_ORIGINS=https://razzledazzle.lazybrains.com,http://localhost:5173,http://localhost:7492
+      - ALLOWED_ORIGINS=https://knightball.org,http://localhost:5173,http://localhost:7492
     restart: unless-stopped
 
   webapp:
     build:
       context: ./webapp
       dockerfile: Dockerfile
-    container_name: razzle-webapp
+    container_name: knightball-webapp
     ports:
       - "7492:5000"
     depends_on:

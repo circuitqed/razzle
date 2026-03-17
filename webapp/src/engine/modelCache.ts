@@ -4,7 +4,7 @@
  * Avoids re-downloading the model on every page load.
  */
 
-const DB_NAME = 'razzle-ai-models';
+const DB_NAME = 'knightball-ai-models';
 const STORE_NAME = 'models';
 const DB_VERSION = 1;
 

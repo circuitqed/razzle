@@ -1,10 +1,10 @@
-# Razzle Dazzle Web Application
+# KnightBall Web Application
 
-This is the web frontend for the Razzle Dazzle project.
+This is the web frontend for the KnightBall project.
 
 ## Project Overview
 
-A React-based web interface for playing Razzle Dazzle against the AI or other players. Supports both server-side and client-side (in-browser) AI inference.
+A React-based web interface for playing KnightBall against the AI or other players. Supports both server-side and client-side (in-browser) AI inference.
 
 ## Responsibilities
 

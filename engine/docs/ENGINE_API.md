@@ -1,11 +1,11 @@
 # Engine API Documentation
 
-This document describes the REST and WebSocket APIs provided by the Razzle Dazzle game engine server.
+This document describes the REST and WebSocket APIs provided by the KnightBall game engine server.
 
 ## Base URL
 
 Development: `http://localhost:8000`
-Production: `https://razzledazzle.lazybrains.com`
+Production: `https://knightball.org`
 
 ## Bot Types
 

@@ -129,7 +129,7 @@ class Logger {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `razzle-logs-${new Date().toISOString().replace(/[:.]/g, '-')}.txt`;
+    a.download = `knightball-logs-${new Date().toISOString().replace(/[:.]/g, '-')}.txt`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -152,5 +152,5 @@ export const logger = new Logger();
 
 // Expose to window for debugging
 if (typeof window !== 'undefined') {
-  (window as unknown as { razzleLogger: Logger }).razzleLogger = logger;
+  (window as unknown as { knightballLogger: Logger }).knightballLogger = logger;
 }

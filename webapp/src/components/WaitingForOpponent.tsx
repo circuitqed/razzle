@@ -50,11 +50,11 @@ export default function WaitingForOpponent({
 
   const handleShare = async () => {
     const url = `${window.location.origin}/join/${joinCode}`;
-    const text = `Join my Razzle Dazzle game! Code: ${joinCode}`;
+    const text = `Join my KnightBall game! Code: ${joinCode}`;
 
     if (navigator.share) {
       try {
-        await navigator.share({ title: 'Razzle Dazzle', text, url });
+        await navigator.share({ title: 'KnightBall', text, url });
       } catch {
         // User cancelled or share failed
       }

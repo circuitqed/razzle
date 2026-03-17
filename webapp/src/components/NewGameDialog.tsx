@@ -17,7 +17,7 @@ const LOBBY_FILTER_LABELS: Record<LobbyFilterCategory, string> = {
   correspondence: 'Corr.',
 };
 
-const LOBBY_FILTERS_STORAGE_KEY = 'razzle_lobby_filters';
+const LOBBY_FILTERS_STORAGE_KEY = 'knightball_lobby_filters';
 
 function loadSavedLobbyFilters(): Set<LobbyFilterCategory> {
   try {

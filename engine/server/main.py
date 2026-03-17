@@ -200,8 +200,8 @@ class AuthResponse(BaseModel):
 JWT_SECRET = os.environ.get("JWT_SECRET", secrets.token_hex(32))
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRY_HOURS = 24
-AUTH_COOKIE_NAME = "razzle_auth"
-ANON_COOKIE_NAME = "razzle_anon"
+AUTH_COOKIE_NAME = "knightball_auth"
+ANON_COOKIE_NAME = "knightball_anon"
 
 # API key for training/arena worker endpoints (set in docker-compose or env)
 TRAINING_API_KEY = os.environ.get("TRAINING_API_KEY", "")
@@ -1114,8 +1114,8 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Razzle Dazzle Engine",
-    description="Game engine API for Razzle Dazzle board game",
+    title="KnightBall Engine",
+    description="Game engine API for KnightBall",
     version="0.1.0",
     lifespan=lifespan
 )
@@ -2099,11 +2099,11 @@ async def reset_training(_=Depends(require_training_key)):
 
 
 # Setup client logging
-LOG_DIR = Path("/tmp/razzle-logs")
+LOG_DIR = Path("/tmp/knightball-logs")
 LOG_DIR.mkdir(exist_ok=True)
 
 # Configure file logger for client logs
-client_logger = logging.getLogger("razzle.client")
+client_logger = logging.getLogger("knightball.client")
 client_logger.setLevel(logging.DEBUG)
 client_log_handler = logging.FileHandler(LOG_DIR / "client.log")
 client_log_handler.setFormatter(logging.Formatter("%(message)s"))

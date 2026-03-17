@@ -42,7 +42,7 @@ class GameRecord:
     """Record of a complete or in-progress game."""
 
     # Metadata (PGN-style tags)
-    event: str = "Razzle Dazzle Game"
+    event: str = "KnightBall Game"
     site: str = "?"
     date: str = field(default_factory=lambda: date.today().strftime("%Y.%m.%d"))
     round: str = "?"

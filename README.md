@@ -1,10 +1,14 @@
-# Razzle Dazzle
+# KnightBall
+
+*Ever wonder what chess knights do when they're not defending their king? They play ball.*
 
 A two-player abstract strategy board game with AlphaZero-style AI.
 
 ## Game Overview
 
-Razzle Dazzle is played on an 8x7 board. Each player has 5 pieces that move like chess knights, plus a ball. The goal is to get your ball to the opponent's back row.
+KnightBall is played on an 8x7 board. Each player has 5 pieces that move like chess knights, plus a ball. The goal is to get your ball to the opponent's back row. No kings, no checkmates — just knights, a ball, and the open field.
+
+*KnightBall is based on [Razzle Dazzle](https://superdupergames.org/rules/razzle.pdf) (also known as Knight's Move).*
 
 ## Project Structure
 

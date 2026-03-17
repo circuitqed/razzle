@@ -1,10 +1,10 @@
-# Razzle Dazzle Engine
+# KnightBall Engine
 
-This is the AI/engine component of the Razzle Dazzle project.
+This is the AI/engine component of the KnightBall project.
 
 ## Project Overview
 
-Razzle Dazzle is a two-player abstract strategy board game played on an 8x7 board. Each player has 5 pieces that move like chess knights, plus a ball. The goal is to get your ball to the opponent's back row.
+KnightBall is a two-player abstract strategy board game played on an 8x7 board. Each player has 5 pieces that move like chess knights, plus a ball. The goal is to get your ball to the opponent's back row.
 
 This engine implements:
 - **Game logic** using efficient bitboards (56 squares fit in 64 bits)
@@ -106,7 +106,7 @@ The training pipeline uses a REST API architecture for distributed self-play:
 └──────────────────────────┼──────────────────────────────────┘
                            ▼
                     API Server
-              (razzledazzle.lazybrains.com)
+              (knightball.org)
 ```
 
 **Components:**
@@ -125,7 +125,7 @@ python scripts/train_distributed.py --workers 4
 # Or with custom settings
 python scripts/train_distributed.py \
     --workers 8 \
-    --api-url https://razzledazzle.lazybrains.com \
+    --api-url https://knightball.org \
     --gpu RTX_3060 \
     --max-price 0.10 \
     --threshold 100

@@ -23,7 +23,7 @@ import { listModels, type ModelInfo } from './api/engine';
 import * as onlineApi from './api/online';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 
-const GAME_STORAGE_KEY = 'razzle_current_game';
+const GAME_STORAGE_KEY = 'knightball_current_game';
 
 function readSavedGame(): { gameId: string; settings: NewGameSettings; playerColor: number } | null {
   try {
@@ -404,7 +404,7 @@ function AppContent() {
       {/* Header bar */}
       <header className="flex items-center justify-between px-4 py-2 shrink-0">
         <div className="w-20" /> {/* Spacer for balance */}
-        <h1 className="text-xl sm:text-2xl font-bold">Razzle Dazzle</h1>
+        <h1 className="text-xl sm:text-2xl font-bold">KnightBall</h1>
         <div className="flex items-center gap-2">
           <a
             href="/openings"
@@ -720,7 +720,7 @@ function JoinGamePage() {
 
   return (
     <div className="min-h-screen bg-gray-900 text-white flex flex-col items-center justify-center p-4">
-      <h1 className="text-2xl font-bold mb-4">Razzle Dazzle</h1>
+      <h1 className="text-2xl font-bold mb-4">KnightBall</h1>
       {isJoining && (
         <div className="text-center">
           <div className="w-12 h-12 border-4 border-green-500 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
