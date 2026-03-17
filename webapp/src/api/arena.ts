@@ -28,7 +28,7 @@ export async function getArenaMatches(
  */
 export async function getArenaRatings(
   simulations?: number,
-  limit: number = 100
+  limit: number = 1000
 ): Promise<ArenaRating[]> {
   const params = new URLSearchParams();
   if (simulations != null) params.set('simulations', simulations.toString());
