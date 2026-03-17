@@ -137,30 +137,39 @@ export default function GameView({
             {gameState.status === 'playing' && statusLine}
           </div>
 
-          {/* Opponent name + clock above board */}
-          {(topName || topClock) && (
-            <div className="flex items-center justify-between w-full max-w-[400px] mb-1">
-              {topName && <div className="text-xs text-gray-500">{topName}</div>}
-              {topClock && <div className="flex-shrink-0">{topClock}</div>}
-            </div>
-          )}
-
           {/* Board + eval meter + move history (desktop) row */}
           <div className="flex gap-2 items-start">
-            <Board
-              board={gameState.board}
-              currentPlayer={gameState.current_player}
-              legalMoves={gameState.legal_moves}
-              selectedSquare={selectedSquare}
-              onSquareClick={handleSquareClick}
-              onDragMove={handleDragMove}
-              touchedMask={gameState.touched_mask}
-              mustPass={mustPass}
-              flipped={flipped}
-              lastMove={lastMove}
-              lastTurnMoves={lastTurnMoves}
-              animate={!isViewingHistory}
-            />
+            {/* Board column: names + board share same width */}
+            <div className="inline-block w-full max-w-[400px] sm:max-w-none sm:w-auto">
+              {/* Opponent name + clock above board */}
+              {(topName || topClock) && (
+                <div className="flex items-center justify-between mb-1" style={{ paddingLeft: '3.846%' }}>
+                  {topName && <div className="text-xs text-gray-500">{topName}</div>}
+                  {topClock && <div className="flex-shrink-0">{topClock}</div>}
+                </div>
+              )}
+              <Board
+                board={gameState.board}
+                currentPlayer={gameState.current_player}
+                legalMoves={gameState.legal_moves}
+                selectedSquare={selectedSquare}
+                onSquareClick={handleSquareClick}
+                onDragMove={handleDragMove}
+                touchedMask={gameState.touched_mask}
+                mustPass={mustPass}
+                flipped={flipped}
+                lastMove={lastMove}
+                lastTurnMoves={lastTurnMoves}
+                animate={!isViewingHistory}
+              />
+              {/* Player name + clock below board */}
+              {(bottomName || bottomClock) && (
+                <div className="flex items-center justify-between mt-1" style={{ paddingLeft: '3.846%' }}>
+                  {bottomName && <div className="text-xs text-gray-500">{bottomName}</div>}
+                  {bottomClock && <div className="flex-shrink-0">{bottomClock}</div>}
+                </div>
+              )}
+            </div>
             {/* Eval meter - only when evaluation is provided */}
             {evaluation !== undefined && evaluation !== null && (
               <EvaluationMeter value={evaluation} flipped={flipped} playerColor={playerColor} />
@@ -204,14 +213,6 @@ export default function GameView({
               </div>
             </div>
           </div>
-
-          {/* Player name + clock below board */}
-          {(bottomName || bottomClock) && (
-            <div className="flex items-center justify-between w-full max-w-[400px] mt-1">
-              {bottomName && <div className="text-xs text-gray-500">{bottomName}</div>}
-              {bottomClock && <div className="flex-shrink-0">{bottomClock}</div>}
-            </div>
-          )}
 
           {/* Mobile: compact move history bar + navigation */}
           <div className="mt-2 w-full max-w-[400px] sm:hidden">

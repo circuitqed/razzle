@@ -1,8 +1,8 @@
 import { useEffect } from 'react';
 
 interface ReplayControlsProps {
-  currentPly: number;
-  maxPly: number;
+  currentTurn: number;
+  totalTurns: number;
   isPlaying: boolean;
   playSpeed: number;
   onFirst: () => void;
@@ -10,13 +10,13 @@ interface ReplayControlsProps {
   onNext: () => void;
   onLast: () => void;
   onTogglePlay: () => void;
-  onSeek: (ply: number) => void;
+  onSeek: (turnIndex: number) => void;
   onSpeedChange: (speed: number) => void;
 }
 
 export default function ReplayControls({
-  currentPly,
-  maxPly,
+  currentTurn,
+  totalTurns,
   isPlaying,
   playSpeed,
   onFirst,
@@ -62,7 +62,7 @@ export default function ReplayControls({
       <div className="flex justify-center items-center gap-2 mb-3">
         <button
           onClick={onFirst}
-          disabled={currentPly === 0}
+          disabled={currentTurn === 0}
           className="p-2 bg-gray-700 hover:bg-gray-600 disabled:bg-gray-800 disabled:text-gray-600 text-white rounded transition-colors"
           title="First position (Home)"
         >
@@ -73,9 +73,9 @@ export default function ReplayControls({
 
         <button
           onClick={onPrevious}
-          disabled={currentPly === 0}
+          disabled={currentTurn === 0}
           className="p-2 bg-gray-700 hover:bg-gray-600 disabled:bg-gray-800 disabled:text-gray-600 text-white rounded transition-colors"
-          title="Previous move (Left Arrow)"
+          title="Previous turn (Left Arrow)"
         >
           <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
             <path fillRule="evenodd" d="M12.707 5.293a1 1 0 010 1.414L9.414 10l3.293 3.293a1 1 0 01-1.414 1.414l-4-4a1 1 0 010-1.414l4-4a1 1 0 011.414 0z" clipRule="evenodd" />
@@ -100,9 +100,9 @@ export default function ReplayControls({
 
         <button
           onClick={onNext}
-          disabled={currentPly === maxPly}
+          disabled={currentTurn === totalTurns}
           className="p-2 bg-gray-700 hover:bg-gray-600 disabled:bg-gray-800 disabled:text-gray-600 text-white rounded transition-colors"
-          title="Next move (Right Arrow)"
+          title="Next turn (Right Arrow)"
         >
           <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
             <path fillRule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clipRule="evenodd" />
@@ -111,7 +111,7 @@ export default function ReplayControls({
 
         <button
           onClick={onLast}
-          disabled={currentPly === maxPly}
+          disabled={currentTurn === totalTurns}
           className="p-2 bg-gray-700 hover:bg-gray-600 disabled:bg-gray-800 disabled:text-gray-600 text-white rounded transition-colors"
           title="Last position (End)"
         >
@@ -127,14 +127,14 @@ export default function ReplayControls({
         <input
           type="range"
           min={0}
-          max={maxPly}
-          value={currentPly}
+          max={totalTurns}
+          value={currentTurn}
           onChange={(e) => onSeek(parseInt(e.target.value))}
           className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer"
         />
         <div className="flex justify-between text-xs text-gray-400 mt-1">
           <span>Start</span>
-          <span>Move {currentPly} / {maxPly}</span>
+          <span>Turn {currentTurn} / {totalTurns}</span>
           <span>End</span>
         </div>
       </div>

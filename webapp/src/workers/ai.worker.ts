@@ -15,6 +15,9 @@ import { createModelFromOnnx } from '../engine/inference';
 import { search, type MCTSConfig, DEFAULT_CONFIG } from '../engine/mcts';
 import type { EngineState } from '../engine/state';
 import { getCachedModel, cacheModel } from '../engine/modelCache';
+// OpeningBook is available for future use but not automatically applied —
+// MCTS with temperature already provides good opening variety.
+// import { OpeningBook } from '../engine/openingBook';
 
 // ONNX Runtime is loaded dynamically to handle import failures gracefully
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -26,6 +29,7 @@ let evaluator: OnnxEvaluator | PureTSEvaluator | RandomEvaluator | null = null;
 let abortFlag = { aborted: false };
 let activeBackend: string = 'wasm';
 let ortLoadFailed = false;
+
 
 /** Detect iOS/iPadOS (all browsers on iOS use WebKit) */
 const isIOS = /iPhone|iPad|iPod/i.test(navigator.userAgent) ||

@@ -298,7 +298,7 @@ export default function GameBrowser({ isOpen, onClose, onSelectGame }: GameBrows
                   <th className="text-left py-2 px-2">Date</th>
                   <th className="text-left py-2 px-2">Players</th>
                   <th className="text-left py-2 px-2">Result</th>
-                  <th className="text-center py-2 px-2">Moves</th>
+                  <th className="text-center py-2 px-2">Turns</th>
                   <th className="text-right py-2 px-2">Actions</th>
                 </tr>
               </thead>
@@ -320,7 +320,7 @@ export default function GameBrowser({ isOpen, onClose, onSelectGame }: GameBrows
                       {getResultText(game)}
                     </td>
                     <td className="py-2 px-2 text-center text-gray-300">
-                      {game.move_count}
+                      {game.ply}
                     </td>
                     <td className="py-2 px-2 text-right">
                       <button

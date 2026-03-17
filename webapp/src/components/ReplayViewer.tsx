@@ -6,6 +6,7 @@ import * as gamesApi from '../api/games';
 import type { GameFull } from '../api/games';
 import { decodeMove } from '../types';
 import { reconstructPositions, getLastMoveAtPosition, type ReplayState } from '../utils/replay';
+import { exportGameGif } from '../utils/exportGif';
 
 const END_TURN_MOVE = -1;
 const REPLAY_ANIMATION_MS = 500; // slower per-segment for replay visibility
@@ -23,6 +24,7 @@ export default function ReplayViewer({ gameId, onClose }: ReplayViewerProps) {
   const [playSpeed, setPlaySpeed] = useState(1);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [gifProgress, setGifProgress] = useState<number | null>(null); // null = not exporting
   // Server-side analysis removed to avoid server load.
   // TODO: re-add using client-side AI (Web Worker + ONNX)
 
@@ -115,23 +117,44 @@ export default function ReplayViewer({ gameId, onClose }: ReplayViewerProps) {
   }, [turnBoundaries]);
 
   const handleLast = useCallback(() => {
-    if (!gameData) return;
-    setCurrentPly(gameData.moves.length);
+    if (turnBoundaries.length === 0) return;
+    setCurrentPly(turnBoundaries[turnBoundaries.length - 1]);
     setIsPlaying(false);
-  }, [gameData]);
+  }, [turnBoundaries]);
 
   const handleTogglePlay = useCallback(() => {
-    if (!gameData) return;
-    if (currentPly >= gameData.moves.length) {
+    if (turnBoundaries.length === 0) return;
+    const lastBoundary = turnBoundaries[turnBoundaries.length - 1];
+    if (currentPly >= lastBoundary) {
       setCurrentPly(0);
     }
     setIsPlaying((p) => !p);
-  }, [gameData, currentPly]);
+  }, [turnBoundaries, currentPly]);
 
-  const handleSeek = useCallback((ply: number) => {
+  // Seek by turn index (from slider)
+  const handleSeekTurn = useCallback((turnIndex: number) => {
+    const ply = turnBoundaries[turnIndex] ?? 0;
     setCurrentPly(ply);
     setIsPlaying(false);
-  }, []);
+  }, [turnBoundaries]);
+
+  const handleExportGif = useCallback(async () => {
+    if (positions.length === 0 || gifProgress !== null) return;
+    setGifProgress(0);
+    try {
+      const blob = await exportGameGif(positions, turnBoundaries, setGifProgress);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `game-${gameId}.gif`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error('GIF export failed:', err);
+    } finally {
+      setGifProgress(null);
+    }
+  }, [positions, turnBoundaries, gameId, gifProgress]);
 
   // Track ply direction for animation
   const prevPlyRef = useRef(0);
@@ -142,11 +165,29 @@ export default function ReplayViewer({ gameId, onClose }: ReplayViewerProps) {
   // Current position
   const currentState = positions[currentPly];
 
-  // Animation: forward shows move played, backward shows reverse of undone move
+  // Turn-based indices for display (slider, "Turn X / Y")
+  const totalTurns = turnBoundaries.length - 1;
+  const currentTurnIndex = useMemo(() => {
+    for (let i = turnBoundaries.length - 1; i >= 0; i--) {
+      if (turnBoundaries[i] <= currentPly) return i;
+    }
+    return 0;
+  }, [turnBoundaries, currentPly]);
+
+  // Animation: only animate single-turn steps (Next/Previous), not multi-turn jumps (First/Last/slider)
   let lastMove: { from: number; to: number } | null = null;
   let lastTurnMoves: { from: number; to: number }[] | undefined = undefined;
 
-  if (gameData && direction === 'forward' && currentPly > 0) {
+  // Check if this is a single-turn step by comparing turn boundary indices
+  const prevTurnIndex = (() => {
+    for (let i = turnBoundaries.length - 1; i >= 0; i--) {
+      if (turnBoundaries[i] <= prevPly) return i;
+    }
+    return 0;
+  })();
+  const isSingleTurnStep = Math.abs(currentTurnIndex - prevTurnIndex) === 1;
+
+  if (gameData && direction === 'forward' && currentPly > 0 && isSingleTurnStep) {
     // Extract all moves in this turn step (prevPly..currentPly), excluding END_TURN
     const turnSlice = gameData.moves.slice(prevPly, currentPly);
     const realMoves = turnSlice
@@ -163,7 +204,7 @@ export default function ReplayViewer({ gameId, onClose }: ReplayViewerProps) {
       // Single move (knight or single pass)
       lastMove = getLastMoveAtPosition(gameData.moves, currentPly);
     }
-  } else if (gameData && direction === 'backward' && prevPly > 0) {
+  } else if (gameData && direction === 'backward' && prevPly > 0 && isSingleTurnStep) {
     const undoneMove = getLastMoveAtPosition(gameData.moves, prevPly);
     if (undoneMove) {
       lastMove = { from: undoneMove.to, to: undoneMove.from };
@@ -220,14 +261,29 @@ export default function ReplayViewer({ gameId, onClose }: ReplayViewerProps) {
                 : 'In Progress'}
             </p>
           </div>
-          <button
-            onClick={onClose}
-            className="text-gray-400 hover:text-white transition-colors"
-          >
-            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-            </svg>
-          </button>
+          <div className="flex items-center gap-2">
+            {gifProgress !== null ? (
+              <span className="text-sm text-gray-400">
+                Generating GIF... {Math.round(gifProgress * 100)}%
+              </span>
+            ) : (
+              <button
+                onClick={handleExportGif}
+                className="px-3 py-1 text-sm bg-gray-700 hover:bg-gray-600 text-gray-300 rounded transition-colors"
+                title="Export as animated GIF"
+              >
+                Export GIF
+              </button>
+            )}
+            <button
+              onClick={onClose}
+              className="text-gray-400 hover:text-white transition-colors"
+            >
+              <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
         </div>
 
         {/* Main content */}
@@ -259,8 +315,8 @@ export default function ReplayViewer({ gameId, onClose }: ReplayViewerProps) {
         {/* Controls */}
         <div className="mt-4 flex justify-center">
           <ReplayControls
-            currentPly={currentPly}
-            maxPly={gameData.moves.length}
+            currentTurn={currentTurnIndex}
+            totalTurns={totalTurns}
             isPlaying={isPlaying}
             playSpeed={playSpeed}
             onFirst={handleFirst}
@@ -268,7 +324,7 @@ export default function ReplayViewer({ gameId, onClose }: ReplayViewerProps) {
             onNext={handleNext}
             onLast={handleLast}
             onTogglePlay={handleTogglePlay}
-            onSeek={handleSeek}
+            onSeek={handleSeekTurn}
             onSpeedChange={setPlaySpeed}
           />
         </div>
