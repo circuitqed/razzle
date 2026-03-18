@@ -32,10 +32,14 @@ webapp/
 │   │   ├── bitboard.ts    # BigInt bitboard ops, KNIGHT_ATTACKS table
 │   │   ├── state.ts       # EngineState interface, applyMove
 │   │   ├── moves.ts       # getLegalMoves, getPassMoves, getKnightMoves
-│   │   ├── tensor.ts      # stateToTensor for ONNX inference
+│   │   ├── tensor.ts      # stateToTensor for neural net inference
 │   │   ├── symmetry.ts    # MOVE_ROTATION_MAP, rotatePolicy180
 │   │   ├── mcts.ts        # PUCT search with pass quiescence
-│   │   ├── evaluator.ts   # OnnxEvaluator, RandomEvaluator
+│   │   ├── evaluator.ts   # OnnxEvaluator, PureTSEvaluator, GPUEvaluator
+│   │   ├── inference.ts   # Pure TypeScript NN forward pass (tiled GEMM)
+│   │   ├── onnxWeights.ts # ONNX protobuf parser (handles field 9)
+│   │   ├── webglForwardPass.ts  # GPU-resident forward pass (WebGL2 shaders)
+│   │   ├── webglGemm.ts   # WebGL2 GEMM (standalone, used for testing)
 │   │   └── modelCache.ts  # IndexedDB cache for ONNX models
 │   ├── workers/
 │   │   └── ai.worker.ts   # Web Worker for off-thread AI search
@@ -59,13 +63,30 @@ The webapp includes a full TypeScript port of the game engine and MCTS, enabling
 ### How it works
 1. On game start, the webapp fetches ONNX model info from `/api/models/onnx/latest` (or `/api/models/onnx/by-name/{name}` for a specific model)
 2. The ONNX model is downloaded and cached in IndexedDB
-3. A Web Worker runs MCTS using onnxruntime-web for neural net evaluation
+3. A Web Worker runs MCTS with neural net evaluation
 4. When the user switches models, the new ONNX is fetched (exported on-demand server-side if needed)
+
+### Backend selection (per platform)
+- **Desktop (WebGPU)**: ONNX Runtime with WebGPU backend (~250 sims/sec). Worker stays alive between searches (no recycling needed).
+- **Desktop (WASM fallback)**: ONNX Runtime with WASM SIMD. Worker is recycled after each search to free WASM linear memory.
+- **iOS (GPU)**: Custom WebGL2 forward pass via OffscreenCanvas (~25 sims/sec). Fragment shaders for conv3x3, conv1x1, residual add. Activations stay on GPU; only policy/value are read back. No WASM, no ONNX Runtime.
+- **iOS (pure-TS fallback)**: If WebGL2 unavailable, uses pure TypeScript inference with tiled GEMM (~6 sims/sec).
+
+### Why not ONNX Runtime on iOS?
+- **WASM**: Linear memory grows monotonically. iOS kills tabs that exceed memory limits after a few searches.
+- **ONNX Runtime WebGL**: Fast but produces **inaccurate results** (verified: AI plays randomly). Cause unknown — likely precision or operator implementation issues.
+- **WebGPU**: Not available in iOS Safari Web Workers.
 
 ### Model loading
 - Models are loaded reactively when `aiModel` changes in useGame
 - `random_weights` uses a RandomEvaluator (no ONNX needed)
-- Falls back to server-side AI if client model isn't loaded yet
+- ONNX protobuf parser handles PyTorch field 9 (opset 17+) for tensor data
+
+### Testing
+- `test-webgl-inference.html` — self-contained browser test comparing CPU vs GPU inference + Python reference
+- `test-mcts.html` — full MCTS comparison (CPU vs GPU, visit counts)
+- `src/engine/__tests__/inference-fixtures.json` — 20 positions with Python reference outputs
+- Run via Playwright: `mcr.microsoft.com/playwright:v1.58.2-noble`
 
 ## Engine API
 
