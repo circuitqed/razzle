@@ -1,0 +1,1397 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>WebGL Neural Net Forward Pass Test</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+body { font-family: monospace; padding: 10px; background: #111; color: #ddd; font-size: 12px; }
+.pass { color: #4f4; }
+.fail { color: #f44; }
+.warn { color: #ff4; }
+.info { color: #8af; }
+.dim { color: #888; }
+pre { white-space: pre-wrap; word-wrap: break-word; }
+h2 { color: #fff; margin-bottom: 4px; }
+hr { border-color: #333; }
+table { border-collapse: collapse; margin: 4px 0; }
+td, th { padding: 2px 8px; text-align: right; border: 1px solid #333; }
+th { background: #222; }
+.summary { font-size: 14px; padding: 8px; margin: 8px 0; border: 2px solid; }
+.summary.pass { border-color: #4f4; }
+.summary.fail { border-color: #f44; }
+</style>
+</head>
+<body>
+<h2>WebGL vs CPU Neural Net Forward Pass Comparison</h2>
+<p class="dim">Tests full forward pass: ONNX parse -> CPU (PureTSModel) vs GPU (GPUForwardPass) on fixture positions.</p>
+<pre id="log"></pre>
+<div id="result" data-status="running"></div>
+
+<script>
+// ============================================================
+// Logging
+// ============================================================
+const logEl = document.getElementById('log');
+const resultEl = document.getElementById('result');
+const allLogs = [];
+
+function p(msg, cls) {
+  const d = document.createElement('div');
+  d.textContent = msg;
+  if (cls) d.className = cls;
+  logEl.appendChild(d);
+  allLogs.push({ msg, cls: cls || '' });
+  // Auto-scroll
+  window.scrollTo(0, document.body.scrollHeight);
+}
+
+function phtml(html) {
+  const d = document.createElement('div');
+  d.innerHTML = html;
+  logEl.appendChild(d);
+}
+
+// ============================================================
+// ONNX Protobuf Parser (from onnxWeights.ts)
+// ============================================================
+
+function readVarint(buf, pos) {
+  let result = 0;
+  let shift = 0;
+  let p = pos;
+  while (p < buf.length) {
+    const byte = buf[p++];
+    result |= (byte & 0x7f) << shift;
+    if (shift >= 28) {
+      result += (byte & 0x7f) * (2 ** shift);
+      result -= (byte & 0x7f) << shift;
+    }
+    if ((byte & 0x80) === 0) break;
+    shift += 7;
+  }
+  return [result >>> 0, p];
+}
+
+function readVarint64(buf, pos) {
+  let result = 0;
+  let shift = 0;
+  let p = pos;
+  while (p < buf.length) {
+    const byte = buf[p++];
+    if (shift < 53) {
+      result += (byte & 0x7f) * (2 ** shift);
+    }
+    if ((byte & 0x80) === 0) break;
+    shift += 7;
+  }
+  return [result, p];
+}
+
+function readTag(buf, pos) {
+  const [v, p] = readVarint(buf, pos);
+  return [v >>> 3, v & 7, p];
+}
+
+function readLengthDelimited(buf, pos) {
+  const [len, p] = readVarint64(buf, pos);
+  return [buf.subarray(p, p + len), p + len];
+}
+
+function skipField(buf, pos, wireType) {
+  switch (wireType) {
+    case 0: {
+      let p = pos;
+      while (p < buf.length && (buf[p++] & 0x80) !== 0) {}
+      return p;
+    }
+    case 1: return pos + 8;
+    case 2: {
+      const [len, p] = readVarint64(buf, pos);
+      return p + len;
+    }
+    case 5: return pos + 4;
+    default: throw new Error('Unknown wire type ' + wireType);
+  }
+}
+
+function parseTensorProto(buf) {
+  let pos = 0;
+  let name = '';
+  const dims = [];
+  let dataType = 0;
+  let rawData = null;
+  let floatData = null;
+
+  while (pos < buf.length) {
+    const [fieldNumber, wireType, tagEnd] = readTag(buf, pos);
+    pos = tagEnd;
+
+    switch (fieldNumber) {
+      case 1:
+        if (wireType === 2) {
+          const [packed, pEnd] = readLengthDelimited(buf, pos);
+          pos = pEnd;
+          let pp = 0;
+          while (pp < packed.length) {
+            const [dim, np] = readVarint64(packed, pp);
+            dims.push(dim);
+            pp = np;
+          }
+        } else {
+          const [dim, np] = readVarint64(buf, pos);
+          dims.push(dim);
+          pos = np;
+        }
+        break;
+      case 2: {
+        const [dt, np] = readVarint(buf, pos);
+        dataType = dt;
+        pos = np;
+        break;
+      }
+      case 4:
+        if (wireType === 2) {
+          const [packed, pEnd] = readLengthDelimited(buf, pos);
+          pos = pEnd;
+          const aligned = new Uint8Array(packed.length);
+          aligned.set(packed);
+          floatData = new Float32Array(aligned.buffer, 0, packed.length / 4);
+        } else {
+          pos = skipField(buf, pos, wireType);
+        }
+        break;
+      case 8: {
+        const [nameBytes, nEnd] = readLengthDelimited(buf, pos);
+        pos = nEnd;
+        name = new TextDecoder().decode(nameBytes);
+        break;
+      }
+      case 9:
+      case 13: {
+        const [raw, rEnd] = readLengthDelimited(buf, pos);
+        pos = rEnd;
+        rawData = raw;
+        break;
+      }
+      default:
+        pos = skipField(buf, pos, wireType);
+    }
+  }
+
+  if (dataType !== 1 || (!rawData && !floatData)) {
+    return { name, dataType, dims, debug: true };
+  }
+
+  let data;
+  if (rawData) {
+    const aligned = new Uint8Array(rawData.length);
+    aligned.set(rawData);
+    data = new Float32Array(aligned.buffer, 0, rawData.length / 4);
+  } else {
+    data = floatData;
+  }
+  return { name, shape: dims, data };
+}
+
+function parseOnnxWeights(buffer) {
+  const buf = new Uint8Array(buffer);
+  let pos = 0;
+  let graphBytes = null;
+
+  while (pos < buf.length) {
+    const [fieldNumber, wireType, tagEnd] = readTag(buf, pos);
+    pos = tagEnd;
+    if (fieldNumber === 7 && wireType === 2) {
+      const [data, end] = readLengthDelimited(buf, pos);
+      graphBytes = data;
+      pos = end;
+    } else {
+      pos = skipField(buf, pos, wireType);
+    }
+  }
+
+  if (!graphBytes) throw new Error('No graph found in ONNX model');
+
+  const tensors = [];
+  pos = 0;
+  while (pos < graphBytes.length) {
+    const [fieldNumber, wireType, tagEnd] = readTag(graphBytes, pos);
+    pos = tagEnd;
+    if (fieldNumber === 5 && wireType === 2) {
+      const [data, end] = readLengthDelimited(graphBytes, pos);
+      pos = end;
+      const result = parseTensorProto(data);
+      if (result.shape && result.data) {
+        tensors.push(result);
+      }
+    } else {
+      pos = skipField(graphBytes, pos, wireType);
+    }
+  }
+
+  if (tensors.length === 0) {
+    throw new Error('ONNX parse failed: 0 tensors. bufSize=' + buf.length + ' graphSize=' + graphBytes.length);
+  }
+  return tensors;
+}
+
+// ============================================================
+// Infer model config from weight tensors
+// ============================================================
+
+function inferConfig(tensors, tensorMap) {
+  const convTensors = tensors.filter(function(t) { return t.name.startsWith('onnx::Conv_'); });
+  const firstConv = convTensors.find(function(t) { return t.shape.length === 4 && t.shape[1] !== t.shape[0]; });
+  const numFilters = firstConv ? firstConv.shape[0] : 96;
+
+  const conv3x3Count = convTensors.filter(function(t) { return t.shape.length === 4 && t.shape[2] === 3; }).length;
+  const numBlocks = (conv3x3Count - 1) / 2;
+
+  const conv1x1s = convTensors.filter(function(t) { return t.shape.length === 4 && t.shape[2] === 1; });
+  const policyFilters = conv1x1s[0] ? conv1x1s[0].shape[0] : 2;
+  const valueFilters = conv1x1s[1] ? conv1x1s[1].shape[0] : 1;
+
+  const valueFc1 = tensorMap.get('value_fc1.weight');
+  const valueHidden = valueFc1 ? valueFc1.shape[0] : 256;
+
+  const policyFc1 = tensorMap.get('policy_fc1.weight');
+  const policyHidden = policyFc1 ? policyFc1.shape[0] : 0;
+
+  return { numFilters, numBlocks, policyFilters, valueFilters, valueHidden, policyHidden };
+}
+
+// ============================================================
+// CPU Forward Pass (PureTSModel from inference.ts)
+// ============================================================
+
+const ROWS = 8;
+const COLS = 7;
+const HW = ROWS * COLS; // 56
+
+function gemm(A, B, C, M, K, N) {
+  C.fill(0);
+  const TK = 64;
+  const N4 = N - (N % 4);
+  for (let kt = 0; kt < K; kt += TK) {
+    const kEnd = Math.min(kt + TK, K);
+    for (let m = 0; m < M; m++) {
+      const aRowOff = m * K;
+      const cRowOff = m * N;
+      let n = 0;
+      for (; n < N4; n += 4) {
+        const ci = cRowOff + n;
+        let c0 = C[ci], c1 = C[ci + 1], c2 = C[ci + 2], c3 = C[ci + 3];
+        for (let k = kt; k < kEnd; k++) {
+          const a = A[aRowOff + k];
+          const bi = k * N + n;
+          c0 += a * B[bi];
+          c1 += a * B[bi + 1];
+          c2 += a * B[bi + 2];
+          c3 += a * B[bi + 3];
+        }
+        C[ci] = c0; C[ci + 1] = c1; C[ci + 2] = c2; C[ci + 3] = c3;
+      }
+      for (; n < N; n++) {
+        let c = C[cRowOff + n];
+        for (let k = kt; k < kEnd; k++) {
+          c += A[aRowOff + k] * B[k * N + n];
+        }
+        C[cRowOff + n] = c;
+      }
+    }
+  }
+}
+
+function im2col3x3(input, C, H, W, col) {
+  const colW = H * W;
+  col.fill(0);
+  for (let c = 0; c < C; c++) {
+    const inOff = c * H * W;
+    for (let kh = 0; kh < 3; kh++) {
+      for (let kw = 0; kw < 3; kw++) {
+        const colRow = (c * 9 + kh * 3 + kw);
+        const colRowOff = colRow * colW;
+        const hStart = Math.max(0, 1 - kh);
+        const hEnd = Math.min(H, H + 1 - kh);
+        for (let h = hStart; h < hEnd; h++) {
+          const ih = h + kh - 1;
+          const wStart = Math.max(0, 1 - kw);
+          const wEnd = Math.min(W, W + 1 - kw);
+          const rowOutOff = colRowOff + h * W;
+          const rowInOff = inOff + ih * W;
+          for (let w = wStart; w < wEnd; w++) {
+            col[rowOutOff + w] = input[rowInOff + w + kw - 1];
+          }
+        }
+      }
+    }
+  }
+}
+
+function conv3x3relu(input, weight, bias, inC, outC, H, W, col, output) {
+  im2col3x3(input, inC, H, W, col);
+  gemm(weight, col, output, outC, inC * 9, H * W);
+  const hw = H * W;
+  for (let oc = 0; oc < outC; oc++) {
+    const b = bias[oc];
+    const off = oc * hw;
+    for (let i = 0; i < hw; i++) {
+      output[off + i] = Math.max(0, output[off + i] + b);
+    }
+  }
+}
+
+function conv3x3noRelu(input, weight, bias, inC, outC, H, W, col, output) {
+  im2col3x3(input, inC, H, W, col);
+  gemm(weight, col, output, outC, inC * 9, H * W);
+  const hw = H * W;
+  for (let oc = 0; oc < outC; oc++) {
+    const b = bias[oc];
+    const off = oc * hw;
+    for (let i = 0; i < hw; i++) {
+      output[off + i] += b;
+    }
+  }
+}
+
+function conv1x1(input, weight, bias, inC, outC, hw, output) {
+  gemm(weight, input, output, outC, inC, hw);
+  for (let oc = 0; oc < outC; oc++) {
+    const b = bias[oc];
+    const off = oc * hw;
+    for (let i = 0; i < hw; i++) {
+      output[off + i] = Math.max(0, output[off + i] + b);
+    }
+  }
+}
+
+function linearCPU(input, weight, bias, outFeatures, inFeatures, output) {
+  const inF4 = inFeatures - (inFeatures % 4);
+  for (let m = 0; m < outFeatures; m++) {
+    let sum = bias[m];
+    const wOff = m * inFeatures;
+    let n = 0;
+    for (; n < inF4; n += 4) {
+      sum += weight[wOff + n] * input[n]
+           + weight[wOff + n + 1] * input[n + 1]
+           + weight[wOff + n + 2] * input[n + 2]
+           + weight[wOff + n + 3] * input[n + 3];
+    }
+    for (; n < inFeatures; n++) {
+      sum += weight[wOff + n] * input[n];
+    }
+    output[m] = sum;
+  }
+}
+
+function logSoftmax(input, output, len) {
+  let max = -Infinity;
+  for (let i = 0; i < len; i++) { if (input[i] > max) max = input[i]; }
+  let sumExp = 0;
+  for (let i = 0; i < len; i++) { sumExp += Math.exp(input[i] - max); }
+  const logSumExp = max + Math.log(sumExp);
+  for (let i = 0; i < len; i++) { output[i] = input[i] - logSumExp; }
+}
+
+function createCPUModel(config, weights) {
+  const f = config.numFilters;
+
+  // Sort conv tensors by ONNX node number
+  const convTensors = [...weights.values()]
+    .filter(function(t) { return t.name.startsWith('onnx::Conv_'); })
+    .sort(function(a, b) {
+      return parseInt(a.name.split('_').pop()) - parseInt(b.name.split('_').pop());
+    });
+
+  // Pair consecutive as (weight, bias)
+  const convPairs = [];
+  for (let i = 0; i < convTensors.length; i += 2) {
+    convPairs.push({ weight: convTensors[i].data, bias: convTensors[i + 1].data });
+  }
+
+  let idx = 0;
+  const inputConv = convPairs[idx++];
+  const resBlocks = [];
+  for (let b = 0; b < config.numBlocks; b++) {
+    resBlocks.push({ conv1: convPairs[idx++], conv2: convPairs[idx++] });
+  }
+  const policyConv = convPairs[idx++];
+  const valueConv = convPairs[idx++];
+
+  // FC layers
+  function getFC(prefix) {
+    const w = weights.get(prefix + '.weight');
+    const b = weights.get(prefix + '.bias');
+    return { weight: w.data, bias: b.data, outFeatures: w.shape[0], inFeatures: w.shape[1] };
+  }
+
+  let policyFc, policyFc1;
+  if (config.policyHidden > 0) {
+    policyFc1 = getFC('policy_fc1');
+    policyFc = getFC('policy_fc2');
+  } else {
+    policyFc1 = null;
+    policyFc = getFC('policy_fc');
+  }
+  const valueFc1 = getFC('value_fc1');
+  const valueFc2 = getFC('value_fc2');
+
+  // Pre-allocate scratch buffers
+  const inputColBuf = new Float32Array(7 * 9 * HW);
+  const colBuf = new Float32Array(f * 9 * HW);
+  const towerBuf1 = new Float32Array(f * HW);
+  const towerBuf2 = new Float32Array(f * HW);
+  const headBuf = new Float32Array(Math.max(config.policyFilters * HW, config.valueFilters * HW));
+  const policyHiddenBuf = policyFc1 ? new Float32Array(policyFc1.outFeatures) : null;
+  const policyLogitsBuf = new Float32Array(policyFc.outFeatures);
+  const policyOutBuf = new Float32Array(policyFc.outFeatures);
+  const valueHiddenBuf = new Float32Array(valueFc1.outFeatures);
+  const valueOutBuf = new Float32Array(1);
+
+  return {
+    forward: function(input) {
+      // Input conv (7 -> f) + fused BN + ReLU
+      conv3x3relu(input, inputConv.weight, inputConv.bias, 7, f, ROWS, COLS, inputColBuf, towerBuf1);
+
+      // Residual tower
+      let current = towerBuf1;
+      let scratch = towerBuf2;
+      const col = colBuf;
+      const fHW = f * HW;
+
+      for (let bi = 0; bi < resBlocks.length; bi++) {
+        const block = resBlocks[bi];
+        conv3x3relu(current, block.conv1.weight, block.conv1.bias, f, f, ROWS, COLS, col, scratch);
+        conv3x3noRelu(scratch, block.conv2.weight, block.conv2.bias, f, f, ROWS, COLS, col, scratch);
+        for (let i = 0; i < fHW; i++) {
+          scratch[i] = Math.max(0, scratch[i] + current[i]);
+        }
+        const tmp = current;
+        current = scratch;
+        scratch = tmp;
+      }
+
+      // Policy head
+      const pf = config.policyFilters;
+      conv1x1(current, policyConv.weight, policyConv.bias, f, pf, HW, headBuf);
+      const policyFlat = headBuf.subarray(0, pf * HW);
+      const policyLogits = policyLogitsBuf;
+
+      if (policyFc1) {
+        const hidden = policyHiddenBuf;
+        linearCPU(policyFlat, policyFc1.weight, policyFc1.bias, policyFc1.outFeatures, policyFc1.inFeatures, hidden);
+        for (let i = 0; i < hidden.length; i++) hidden[i] = Math.max(0, hidden[i]);
+        linearCPU(hidden, policyFc.weight, policyFc.bias, policyFc.outFeatures, policyFc.inFeatures, policyLogits);
+      } else {
+        linearCPU(policyFlat, policyFc.weight, policyFc.bias, policyFc.outFeatures, policyFc.inFeatures, policyLogits);
+      }
+
+      const policy = policyOutBuf;
+      logSoftmax(policyLogits, policy, policyLogits.length);
+
+      // Value head
+      const vf = config.valueFilters;
+      conv1x1(current, valueConv.weight, valueConv.bias, f, vf, HW, headBuf);
+      const valueFlat = headBuf.subarray(0, vf * HW);
+      linearCPU(valueFlat, valueFc1.weight, valueFc1.bias, valueFc1.outFeatures, valueFc1.inFeatures, valueHiddenBuf);
+      for (let i = 0; i < valueHiddenBuf.length; i++) valueHiddenBuf[i] = Math.max(0, valueHiddenBuf[i]);
+      linearCPU(valueHiddenBuf, valueFc2.weight, valueFc2.bias, valueFc2.outFeatures, valueFc2.inFeatures, valueOutBuf);
+      const value = Math.tanh(valueOutBuf[0]);
+
+      // Copy policy so it doesn't get overwritten
+      return { policy: new Float32Array(policy), value: value };
+    }
+  };
+}
+
+// ============================================================
+// GPU Forward Pass (GPUForwardPass from webglForwardPass.ts)
+// ============================================================
+
+const VERT_SRC = '#version 300 es\nin vec2 aPosition;\nvoid main() { gl_Position = vec4(aPosition, 0.0, 1.0); }\n';
+
+const CONV3X3_RELU_SRC = `#version 300 es
+precision highp float;
+precision highp sampler2D;
+uniform sampler2D uInput;
+uniform sampler2D uWeight;
+uniform sampler2D uBias;
+uniform int uInC;
+uniform int uH;
+uniform int uW;
+out vec4 fragColor;
+void main() {
+  int hw = int(gl_FragCoord.x);
+  int oc = int(gl_FragCoord.y);
+  int h = hw / uW;
+  int w = hw - h * uW;
+  float sum = texelFetch(uBias, ivec2(oc, 0), 0).r;
+  for (int ic = 0; ic < uInC; ic++) {
+    int wBase = ic * 9;
+    for (int kh = 0; kh < 3; kh++) {
+      int ih = h + kh - 1;
+      if (ih < 0 || ih >= uH) continue;
+      for (int kw = 0; kw < 3; kw++) {
+        int iw = w + kw - 1;
+        if (iw < 0 || iw >= uW) continue;
+        sum += texelFetch(uWeight, ivec2(wBase + kh * 3 + kw, oc), 0).r
+             * texelFetch(uInput, ivec2(ih * uW + iw, ic), 0).r;
+      }
+    }
+  }
+  fragColor = vec4(max(0.0, sum), 0.0, 0.0, 1.0);
+}
+`;
+
+const CONV3X3_NORELU_SRC = `#version 300 es
+precision highp float;
+precision highp sampler2D;
+uniform sampler2D uInput;
+uniform sampler2D uWeight;
+uniform sampler2D uBias;
+uniform int uInC;
+uniform int uH;
+uniform int uW;
+out vec4 fragColor;
+void main() {
+  int hw = int(gl_FragCoord.x);
+  int oc = int(gl_FragCoord.y);
+  int h = hw / uW;
+  int w = hw - h * uW;
+  float sum = texelFetch(uBias, ivec2(oc, 0), 0).r;
+  for (int ic = 0; ic < uInC; ic++) {
+    int wBase = ic * 9;
+    for (int kh = 0; kh < 3; kh++) {
+      int ih = h + kh - 1;
+      if (ih < 0 || ih >= uH) continue;
+      for (int kw = 0; kw < 3; kw++) {
+        int iw = w + kw - 1;
+        if (iw < 0 || iw >= uW) continue;
+        sum += texelFetch(uWeight, ivec2(wBase + kh * 3 + kw, oc), 0).r
+             * texelFetch(uInput, ivec2(ih * uW + iw, ic), 0).r;
+      }
+    }
+  }
+  fragColor = vec4(sum, 0.0, 0.0, 1.0);
+}
+`;
+
+const RESIDUAL_RELU_SRC = `#version 300 es
+precision highp float;
+precision highp sampler2D;
+uniform sampler2D uA;
+uniform sampler2D uB;
+out vec4 fragColor;
+void main() {
+  ivec2 pos = ivec2(gl_FragCoord.xy);
+  float a = texelFetch(uA, pos, 0).r;
+  float b = texelFetch(uB, pos, 0).r;
+  fragColor = vec4(max(0.0, a + b), 0.0, 0.0, 1.0);
+}
+`;
+
+const CONV1X1_RELU_SRC = `#version 300 es
+precision highp float;
+precision highp sampler2D;
+uniform sampler2D uInput;
+uniform sampler2D uWeight;
+uniform sampler2D uBias;
+uniform int uInC;
+out vec4 fragColor;
+void main() {
+  int hw = int(gl_FragCoord.x);
+  int oc = int(gl_FragCoord.y);
+  float sum = texelFetch(uBias, ivec2(oc, 0), 0).r;
+  for (int ic = 0; ic < uInC; ic++) {
+    sum += texelFetch(uWeight, ivec2(ic, oc), 0).r
+         * texelFetch(uInput, ivec2(hw, ic), 0).r;
+  }
+  fragColor = vec4(max(0.0, sum), 0.0, 0.0, 1.0);
+}
+`;
+
+function createGPUModel(config, weights, canvas) {
+  const f = config.numFilters;
+
+  const cvs = canvas || document.createElement('canvas');
+  const gl = cvs.getContext('webgl2', {
+    alpha: false, depth: false, stencil: false, antialias: false,
+    premultipliedAlpha: false, preserveDrawingBuffer: false,
+  });
+  if (!gl) throw new Error('WebGL2 not available');
+  if (!gl.getExtension('EXT_color_buffer_float')) throw new Error('EXT_color_buffer_float not available');
+
+  // Return renderer info for diagnostics
+  const debugInfo = gl.getExtension('WEBGL_debug_renderer_info');
+  const rendererInfo = {
+    renderer: debugInfo ? gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER),
+    vendor: debugInfo ? gl.getParameter(debugInfo.UNMASKED_VENDOR_WEBGL) : gl.getParameter(gl.VENDOR),
+  };
+
+  // Shader compilation helpers
+  function compileShader(type, source) {
+    const shader = gl.createShader(type);
+    gl.shaderSource(shader, source);
+    gl.compileShader(shader);
+    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+      throw new Error('Shader compile failed: ' + gl.getShaderInfoLog(shader));
+    }
+    return shader;
+  }
+
+  function createShaderProgram(fsSrc, uniformNames) {
+    const vs = compileShader(gl.VERTEX_SHADER, VERT_SRC);
+    const fs = compileShader(gl.FRAGMENT_SHADER, fsSrc);
+    const prog = gl.createProgram();
+    gl.attachShader(prog, vs);
+    gl.attachShader(prog, fs);
+    gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+      throw new Error('Shader link failed: ' + gl.getProgramInfoLog(prog));
+    }
+    gl.deleteShader(vs);
+    gl.deleteShader(fs);
+    const uniforms = {};
+    for (let i = 0; i < uniformNames.length; i++) {
+      uniforms[uniformNames[i]] = gl.getUniformLocation(prog, uniformNames[i]);
+    }
+    return { program: prog, uniforms: uniforms };
+  }
+
+  // Compile all shader programs
+  const conv3x3ReluProg = createShaderProgram(CONV3X3_RELU_SRC, ['uInput', 'uWeight', 'uBias', 'uInC', 'uH', 'uW']);
+  const conv3x3NoReluProg = createShaderProgram(CONV3X3_NORELU_SRC, ['uInput', 'uWeight', 'uBias', 'uInC', 'uH', 'uW']);
+  const residualReluProg = createShaderProgram(RESIDUAL_RELU_SRC, ['uA', 'uB']);
+  const conv1x1ReluProg = createShaderProgram(CONV1X1_RELU_SRC, ['uInput', 'uWeight', 'uBias', 'uInC']);
+
+  // Full-screen quad VAO
+  const vao = gl.createVertexArray();
+  gl.bindVertexArray(vao);
+  const quadBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
+  const posLoc = gl.getAttribLocation(conv3x3ReluProg.program, 'aPosition');
+  gl.enableVertexAttribArray(posLoc);
+  gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
+  gl.bindVertexArray(null);
+
+  // Texture helpers
+  function createTex(data, width, height) {
+    const tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32F, width, height, 0, gl.RED, gl.FLOAT, data);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    return tex;
+  }
+
+  function createEmptyTex(width, height) {
+    const tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32F, width, height, 0, gl.RED, gl.FLOAT, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    return tex;
+  }
+
+  function createFb(tex) {
+    const fb = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+    const status = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+    if (status !== gl.FRAMEBUFFER_COMPLETE) {
+      throw new Error('Framebuffer incomplete: ' + status);
+    }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    return fb;
+  }
+
+  // Upload model weights to GPU
+  const convTensors = [...weights.values()]
+    .filter(function(t) { return t.name.startsWith('onnx::Conv_'); })
+    .sort(function(a, b) { return parseInt(a.name.split('_').pop()) - parseInt(b.name.split('_').pop()); });
+
+  function makeConvGPU(weightIdx) {
+    const wt = convTensors[weightIdx];
+    const bt = convTensors[weightIdx + 1];
+    const outC = wt.shape[0];
+    const inC = wt.shape.length === 4 ? wt.shape[1] : wt.data.length / (outC * (wt.shape[2] === 3 ? 9 : 1));
+    const kSize = wt.shape.length === 4 ? wt.shape[2] * wt.shape[3] : 1;
+    return {
+      weightTex: createTex(wt.data, inC * kSize, outC),
+      biasTex: createTex(bt.data, outC, 1),
+      inC: inC,
+      outC: outC,
+    };
+  }
+
+  let idx = 0;
+  const inputConv = makeConvGPU(idx); idx += 2;
+  const resBlocks = [];
+  for (let b = 0; b < config.numBlocks; b++) {
+    resBlocks.push({ conv1: makeConvGPU(idx), conv2: makeConvGPU(idx + 2) });
+    idx += 4;
+  }
+  const policyConv = makeConvGPU(idx); idx += 2;
+  const valueConv = makeConvGPU(idx); idx += 2;
+
+  // FC layers (CPU)
+  function getFC(prefix) {
+    const w = weights.get(prefix + '.weight');
+    const b = weights.get(prefix + '.bias');
+    return { weight: w.data, bias: b.data, outFeatures: w.shape[0], inFeatures: w.shape[1] };
+  }
+
+  let policyFc, policyFc1;
+  if (config.policyHidden > 0) {
+    policyFc1 = getFC('policy_fc1');
+    policyFc = getFC('policy_fc2');
+  } else {
+    policyFc1 = null;
+    policyFc = getFC('policy_fc');
+  }
+  const valueFc1 = getFC('value_fc1');
+  const valueFc2 = getFC('value_fc2');
+
+  // Activation textures
+  const maxC = Math.max(f, config.policyFilters, config.valueFilters);
+  const actTexA = createEmptyTex(HW, maxC);
+  const actTexB = createEmptyTex(HW, maxC);
+  const actFbA = createFb(actTexA);
+  const actFbB = createFb(actTexB);
+
+  const headTex = createEmptyTex(HW, maxC);
+  const headFb = createFb(headTex);
+
+  const inputTex = createEmptyTex(HW, 7);
+  const inputFb = createFb(inputTex);
+
+  // CPU readback buffers
+  const maxHeadSize = Math.max(config.policyFilters, config.valueFilters) * HW;
+  let readBuf = new Float32Array(maxHeadSize * 4);
+  const gpuPolicyHiddenBuf = policyFc1 ? new Float32Array(policyFc1.outFeatures) : null;
+  const gpuPolicyLogitsBuf = new Float32Array(policyFc.outFeatures);
+  const gpuPolicyOutBuf = new Float32Array(policyFc.outFeatures);
+  const gpuValueHiddenBuf = new Float32Array(valueFc1.outFeatures);
+  const gpuValueOutBuf = new Float32Array(1);
+
+  // GPU operations
+  function runConv3x3(shader, inTex, conv, hw, outC, outTex, outFb) {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, outFb);
+    gl.viewport(0, 0, hw, outC);
+    gl.useProgram(shader.program);
+
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, inTex);
+    gl.uniform1i(shader.uniforms.uInput, 0);
+
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, conv.weightTex);
+    gl.uniform1i(shader.uniforms.uWeight, 1);
+
+    gl.activeTexture(gl.TEXTURE2);
+    gl.bindTexture(gl.TEXTURE_2D, conv.biasTex);
+    gl.uniform1i(shader.uniforms.uBias, 2);
+
+    gl.uniform1i(shader.uniforms.uInC, conv.inC);
+    gl.uniform1i(shader.uniforms.uH, ROWS);
+    gl.uniform1i(shader.uniforms.uW, COLS);
+
+    gl.bindVertexArray(vao);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  }
+
+  function runConv1x1(inTex, conv, hw, outC, outTex, outFb) {
+    const shader = conv1x1ReluProg;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, outFb);
+    gl.viewport(0, 0, hw, outC);
+    gl.useProgram(shader.program);
+
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, inTex);
+    gl.uniform1i(shader.uniforms.uInput, 0);
+
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, conv.weightTex);
+    gl.uniform1i(shader.uniforms.uWeight, 1);
+
+    gl.activeTexture(gl.TEXTURE2);
+    gl.bindTexture(gl.TEXTURE_2D, conv.biasTex);
+    gl.uniform1i(shader.uniforms.uBias, 2);
+
+    gl.uniform1i(shader.uniforms.uInC, conv.inC);
+
+    gl.bindVertexArray(vao);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  }
+
+  function runResidualRelu(aTex, bTex, hw, channels, outTex, outFb) {
+    const shader = residualReluProg;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, outFb);
+    gl.viewport(0, 0, hw, channels);
+    gl.useProgram(shader.program);
+
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, aTex);
+    gl.uniform1i(shader.uniforms.uA, 0);
+
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, bTex);
+    gl.uniform1i(shader.uniforms.uB, 1);
+
+    gl.bindVertexArray(vao);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  }
+
+  return {
+    rendererInfo: rendererInfo,
+    forward: function(input) {
+      // Upload input (CHW order maps directly to texture layout)
+      gl.bindTexture(gl.TEXTURE_2D, inputTex);
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, HW, 7, gl.RED, gl.FLOAT, input);
+
+      // Input conv (7 -> f) + ReLU
+      runConv3x3(conv3x3ReluProg, inputTex, inputConv, HW, f, actTexA, actFbA);
+
+      // Residual tower
+      let currentTex = actTexA;
+      let currentFb = actFbA;
+      let scratchTex = actTexB;
+      let scratchFb = actFbB;
+
+      for (let bi = 0; bi < resBlocks.length; bi++) {
+        const block = resBlocks[bi];
+        runConv3x3(conv3x3ReluProg, currentTex, block.conv1, HW, f, scratchTex, scratchFb);
+        runConv3x3(conv3x3NoReluProg, scratchTex, block.conv2, HW, f, headTex, headFb);
+        runResidualRelu(headTex, currentTex, HW, f, scratchTex, scratchFb);
+
+        const tmpTex = currentTex; currentTex = scratchTex; scratchTex = tmpTex;
+        const tmpFb = currentFb; currentFb = scratchFb; scratchFb = tmpFb;
+      }
+
+      // Policy head: 1x1 conv + ReLU
+      const pf = config.policyFilters;
+      runConv1x1(currentTex, policyConv, HW, pf, headTex, headFb);
+
+      // Read back policy head
+      gl.bindFramebuffer(gl.FRAMEBUFFER, headFb);
+      const policySize = pf * HW;
+      if (readBuf.length < policySize * 4) {
+        readBuf = new Float32Array(policySize * 4);
+      }
+      gl.readPixels(0, 0, HW, pf, gl.RGBA, gl.FLOAT, readBuf);
+      const policyFlat = new Float32Array(policySize);
+      for (let i = 0; i < policySize; i++) {
+        policyFlat[i] = readBuf[i * 4];
+      }
+
+      // Value head: 1x1 conv + ReLU
+      const vf = config.valueFilters;
+      runConv1x1(currentTex, valueConv, HW, vf, headTex, headFb);
+
+      // Read back value head
+      gl.bindFramebuffer(gl.FRAMEBUFFER, headFb);
+      const valueSize = vf * HW;
+      if (readBuf.length < valueSize * 4) {
+        readBuf = new Float32Array(valueSize * 4);
+      }
+      gl.readPixels(0, 0, HW, vf, gl.RGBA, gl.FLOAT, readBuf);
+      const valueFlat = new Float32Array(valueSize);
+      for (let i = 0; i < valueSize; i++) {
+        valueFlat[i] = readBuf[i * 4];
+      }
+
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+
+      // FC layers on CPU
+      const policyLogits = gpuPolicyLogitsBuf;
+      if (policyFc1) {
+        const hidden = gpuPolicyHiddenBuf;
+        linearCPU(policyFlat, policyFc1.weight, policyFc1.bias, policyFc1.outFeatures, policyFc1.inFeatures, hidden);
+        for (let i = 0; i < hidden.length; i++) hidden[i] = Math.max(0, hidden[i]);
+        linearCPU(hidden, policyFc.weight, policyFc.bias, policyFc.outFeatures, policyFc.inFeatures, policyLogits);
+      } else {
+        linearCPU(policyFlat, policyFc.weight, policyFc.bias, policyFc.outFeatures, policyFc.inFeatures, policyLogits);
+      }
+
+      const policy = gpuPolicyOutBuf;
+      logSoftmax(policyLogits, policy, policyLogits.length);
+
+      // Value FC
+      const vh = gpuValueHiddenBuf;
+      linearCPU(valueFlat, valueFc1.weight, valueFc1.bias, valueFc1.outFeatures, valueFc1.inFeatures, vh);
+      for (let i = 0; i < vh.length; i++) vh[i] = Math.max(0, vh[i]);
+
+      const vOut = gpuValueOutBuf;
+      linearCPU(vh, valueFc2.weight, valueFc2.bias, valueFc2.outFeatures, valueFc2.inFeatures, vOut);
+      const value = Math.tanh(vOut[0]);
+
+      return { policy: new Float32Array(policy), value: value };
+    },
+    dispose: function() {
+      // Cleanup omitted for test page — page reload handles it
+    }
+  };
+}
+
+// ============================================================
+// Main test runner
+// ============================================================
+
+async function run() {
+  const startTime = performance.now();
+  const sessionId = 'webgl-test';
+  const results = {
+    session_id: sessionId,
+    timestamp: new Date().toISOString(),
+    userAgent: navigator.userAgent,
+    gpu: null,
+    config: null,
+    positions: [],
+    summary: null,
+    error: null,
+    timingMs: null,
+  };
+
+  try {
+    // ---- Step 1: Check WebGL2 availability ----
+    p('=== WebGL2 Capability Check ===', 'info');
+
+    const testCanvas = document.createElement('canvas');
+    const testGl = testCanvas.getContext('webgl2');
+    if (!testGl) {
+      throw new Error('WebGL2 not available on this device');
+    }
+    const ext = testGl.getExtension('EXT_color_buffer_float');
+    if (!ext) {
+      throw new Error('EXT_color_buffer_float not available (required for float textures)');
+    }
+
+    const debugExt = testGl.getExtension('WEBGL_debug_renderer_info');
+    const renderer = debugExt
+      ? testGl.getParameter(debugExt.UNMASKED_RENDERER_WEBGL)
+      : testGl.getParameter(testGl.RENDERER);
+    const vendor = debugExt
+      ? testGl.getParameter(debugExt.UNMASKED_VENDOR_WEBGL)
+      : testGl.getParameter(testGl.VENDOR);
+    const glVersion = testGl.getParameter(testGl.VERSION);
+    const slVersion = testGl.getParameter(testGl.SHADING_LANGUAGE_VERSION);
+    const maxTexSize = testGl.getParameter(testGl.MAX_TEXTURE_SIZE);
+    const maxTexUnits = testGl.getParameter(testGl.MAX_TEXTURE_IMAGE_UNITS);
+    const maxRbSize = testGl.getParameter(testGl.MAX_RENDERBUFFER_SIZE);
+
+    p('WebGL2: OK');
+    p('EXT_color_buffer_float: OK');
+    p('Renderer: ' + renderer, 'info');
+    p('Vendor: ' + vendor, 'info');
+    p('GL Version: ' + glVersion);
+    p('GLSL Version: ' + slVersion);
+    p('Max Texture Size: ' + maxTexSize);
+    p('Max Texture Units: ' + maxTexUnits);
+    p('Max Renderbuffer Size: ' + maxRbSize);
+    p('');
+
+    results.gpu = {
+      renderer: renderer,
+      vendor: vendor,
+      glVersion: glVersion,
+      slVersion: slVersion,
+      maxTexSize: maxTexSize,
+      maxTexUnits: maxTexUnits,
+      maxRbSize: maxRbSize,
+    };
+
+    // Lose the test context
+    const loseCtx = testGl.getExtension('WEBGL_lose_context');
+    if (loseCtx) loseCtx.loseContext();
+
+    // ---- Step 2: Download ONNX model ----
+    p('=== Downloading ONNX Model ===', 'info');
+
+    // First, get the model metadata to find the filename
+    p('Fetching model info for iter_300.pt...');
+    const infoResp = await fetch('/api/models/onnx/by-name/iter_300.pt');
+    if (!infoResp.ok) {
+      throw new Error('Failed to get model info: HTTP ' + infoResp.status + ' ' + (await infoResp.text()));
+    }
+    const modelInfo = await infoResp.json();
+    const onnxFilename = modelInfo.onnx_filename || modelInfo.filename || (modelInfo.url && modelInfo.url.split('/').pop());
+    p('ONNX filename: ' + onnxFilename);
+
+    // Download the ONNX file
+    p('Downloading ONNX model...');
+    const modelResp = await fetch('/api/models/onnx/' + onnxFilename);
+    if (!modelResp.ok) {
+      throw new Error('Failed to download model: HTTP ' + modelResp.status);
+    }
+    const modelBuffer = await modelResp.arrayBuffer();
+    p('Model downloaded: ' + (modelBuffer.byteLength / 1024 / 1024).toFixed(2) + ' MB');
+
+    // ---- Step 3: Parse ONNX weights ----
+    p('');
+    p('=== Parsing ONNX Weights ===', 'info');
+
+    const parseStart = performance.now();
+    const tensors = parseOnnxWeights(modelBuffer);
+    const parseMs = (performance.now() - parseStart).toFixed(1);
+    p('Parsed ' + tensors.length + ' weight tensors in ' + parseMs + ' ms');
+
+    const tensorMap = new Map();
+    for (let i = 0; i < tensors.length; i++) {
+      tensorMap.set(tensors[i].name, tensors[i]);
+    }
+
+    // Infer config
+    const config = inferConfig(tensors, tensorMap);
+    p('Model config: ' + JSON.stringify(config));
+    results.config = config;
+
+    // ---- Step 4: Create CPU and GPU models ----
+    p('');
+    p('=== Creating Models ===', 'info');
+
+    const cpuCreateStart = performance.now();
+    const cpuModel = createCPUModel(config, tensorMap);
+    p('CPU model created in ' + (performance.now() - cpuCreateStart).toFixed(1) + ' ms');
+
+    const gpuCreateStart = performance.now();
+    let gpuModel;
+    try {
+      gpuModel = createGPUModel(config, tensorMap);
+      p('GPU (canvas) model created in ' + (performance.now() - gpuCreateStart).toFixed(1) + ' ms');
+      p('GPU renderer: ' + gpuModel.rendererInfo.renderer, 'info');
+    } catch (e) {
+      throw new Error('GPU model creation failed: ' + e.message);
+    }
+
+    // Also test OffscreenCanvas (what the worker uses)
+    let offscreenGpuModel = null;
+    try {
+      if (typeof OffscreenCanvas !== 'undefined') {
+        const osc = new OffscreenCanvas(1, 1);
+        offscreenGpuModel = createGPUModel(config, tensorMap, osc);
+        p('GPU (OffscreenCanvas) model created', 'info');
+      } else {
+        p('OffscreenCanvas not available — skipping worker-path test', 'warn');
+      }
+    } catch (e) {
+      p('GPU (OffscreenCanvas) FAILED: ' + e.message, 'fail');
+    }
+
+    // ---- Step 5: Load fixture positions ----
+    p('');
+    p('=== Loading Fixture Positions ===', 'info');
+
+    const fixtResp = await fetch('/inference-fixtures.json');
+    if (!fixtResp.ok) {
+      throw new Error('Failed to load fixtures: HTTP ' + fixtResp.status);
+    }
+    const fixtures = await fixtResp.json();
+    p('Loaded ' + fixtures.positions.length + ' fixture positions (model: ' + fixtures.model + ')');
+
+    // ---- Step 6: Run comparisons ----
+    p('');
+    p('=== Running Forward Pass Comparisons ===', 'info');
+    p('');
+
+    const POLICY_THRESHOLD = 0.01;  // Max abs diff threshold for policy
+    const VALUE_THRESHOLD = 0.001;  // Max abs diff threshold for value
+
+    let totalPass = 0;
+    let totalFail = 0;
+    let worstPolicyDiff = 0;
+    let worstValueDiff = 0;
+    let totalCpuMs = 0;
+    let totalGpuMs = 0;
+
+    const numPositions = Math.min(fixtures.positions.length, 20);
+
+    for (let pi = 0; pi < numPositions; pi++) {
+      const pos = fixtures.positions[pi];
+      const tensor3d = pos.tensor; // [7][8][7] nested array
+
+      // Flatten tensor to CHW Float32Array
+      const inputArr = new Float32Array(7 * 8 * 7);
+      let fi = 0;
+      for (let c = 0; c < 7; c++) {
+        for (let h = 0; h < 8; h++) {
+          for (let w = 0; w < 7; w++) {
+            inputArr[fi++] = tensor3d[c][h][w];
+          }
+        }
+      }
+
+      // Run CPU forward pass
+      const cpuStart = performance.now();
+      const cpuResult = cpuModel.forward(inputArr);
+      const cpuMs = performance.now() - cpuStart;
+      totalCpuMs += cpuMs;
+
+      // Run GPU forward pass (regular canvas)
+      const gpuStart = performance.now();
+      const gpuResult = gpuModel.forward(inputArr);
+      const gpuMs = performance.now() - gpuStart;
+      totalGpuMs += gpuMs;
+
+      // Run GPU forward pass (OffscreenCanvas — worker path)
+      let oscResult = null;
+      let oscMs = 0;
+      if (offscreenGpuModel) {
+        const oscStart = performance.now();
+        oscResult = offscreenGpuModel.forward(inputArr);
+        oscMs = performance.now() - oscStart;
+      }
+
+      // Compare policies
+      let maxPolicyDiff = 0;
+      let maxPolicyDiffIdx = 0;
+      const topDiffs = []; // { idx, cpuVal, gpuVal, diff }
+
+      for (let i = 0; i < cpuResult.policy.length; i++) {
+        const diff = Math.abs(cpuResult.policy[i] - gpuResult.policy[i]);
+        if (diff > maxPolicyDiff) {
+          maxPolicyDiff = diff;
+          maxPolicyDiffIdx = i;
+        }
+        topDiffs.push({ idx: i, cpuVal: cpuResult.policy[i], gpuVal: gpuResult.policy[i], diff: diff });
+      }
+
+      // Sort and keep top 5 diffs
+      topDiffs.sort(function(a, b) { return b.diff - a.diff; });
+      const top5 = topDiffs.slice(0, 5);
+
+      // Compare values
+      const valueDiff = Math.abs(cpuResult.value - gpuResult.value);
+
+      if (maxPolicyDiff > worstPolicyDiff) worstPolicyDiff = maxPolicyDiff;
+      if (valueDiff > worstValueDiff) worstValueDiff = valueDiff;
+
+      // Also compare CPU against fixture reference
+      let maxCpuRefDiff = 0;
+      if (pos.policy) {
+        for (let i = 0; i < cpuResult.policy.length && i < pos.policy.length; i++) {
+          const diff = Math.abs(cpuResult.policy[i] - pos.policy[i]);
+          if (diff > maxCpuRefDiff) maxCpuRefDiff = diff;
+        }
+      }
+      const cpuRefValueDiff = pos.value !== undefined ? Math.abs(cpuResult.value - pos.value) : -1;
+
+      const policyPass = maxPolicyDiff <= POLICY_THRESHOLD;
+      const valuePass = valueDiff <= VALUE_THRESHOLD;
+      const posPass = policyPass && valuePass;
+      if (posPass) totalPass++; else totalFail++;
+
+      const posResult = {
+        index: pi,
+        ply: pos.ply,
+        currentPlayer: pos.current_player,
+        cpuTimeMs: parseFloat(cpuMs.toFixed(2)),
+        gpuTimeMs: parseFloat(gpuMs.toFixed(2)),
+        cpuValue: cpuResult.value,
+        gpuValue: gpuResult.value,
+        valueDiff: valueDiff,
+        maxPolicyDiff: maxPolicyDiff,
+        maxPolicyDiffIdx: maxPolicyDiffIdx,
+        cpuRefPolicyMaxDiff: maxCpuRefDiff,
+        cpuRefValueDiff: cpuRefValueDiff,
+        pass: posPass,
+        top5PolicyDiffs: top5.map(function(d) {
+          return { idx: d.idx, cpu: parseFloat(d.cpuVal.toFixed(6)), gpu: parseFloat(d.gpuVal.toFixed(6)), diff: parseFloat(d.diff.toFixed(6)) };
+        }),
+      };
+      results.positions.push(posResult);
+
+      // Display result
+      const statusCls = posPass ? 'pass' : 'fail';
+      const statusText = posPass ? 'PASS' : 'FAIL';
+      p('[Position ' + pi + '] ply=' + pos.ply + ' player=' + pos.current_player +
+        '  CPU=' + cpuMs.toFixed(1) + 'ms  GPU=' + gpuMs.toFixed(1) + 'ms  ' +
+        statusText, statusCls);
+      p('  Value:  CPU=' + cpuResult.value.toFixed(6) + '  GPU=' + gpuResult.value.toFixed(6) +
+        '  diff=' + valueDiff.toExponential(3) +
+        (valuePass ? '' : ' EXCEEDS THRESHOLD'), valuePass ? 'dim' : 'fail');
+      p('  Policy: maxDiff=' + maxPolicyDiff.toExponential(3) +
+        ' at idx=' + maxPolicyDiffIdx +
+        (policyPass ? '' : ' EXCEEDS THRESHOLD'), policyPass ? 'dim' : 'fail');
+      p('  CPU vs fixture ref: policyMaxDiff=' + maxCpuRefDiff.toExponential(3) +
+        ' valueDiff=' + (cpuRefValueDiff >= 0 ? cpuRefValueDiff.toExponential(3) : 'N/A'), 'dim');
+
+      // OffscreenCanvas comparison
+      if (oscResult) {
+        let oscMaxPDiff = 0;
+        for (let i = 0; i < cpuResult.policy.length; i++) {
+          const d = Math.abs(cpuResult.policy[i] - oscResult.policy[i]);
+          if (d > oscMaxPDiff) oscMaxPDiff = d;
+        }
+        const oscVDiff = Math.abs(cpuResult.value - oscResult.value);
+        const oscOk = oscMaxPDiff < POLICY_THRESHOLD && oscVDiff < VALUE_THRESHOLD;
+        p('  OffscreenCanvas: policyMaxDiff=' + oscMaxPDiff.toExponential(3) +
+          ' valueDiff=' + oscVDiff.toExponential(3) +
+          '  ' + (oscOk ? 'PASS' : 'FAIL') + '  ' + oscMs.toFixed(1) + 'ms',
+          oscOk ? 'dim' : 'fail');
+        if (!oscOk) {
+          // Show where they differ
+          const oscDiffs = [];
+          for (let i = 0; i < cpuResult.policy.length; i++) {
+            oscDiffs.push({idx: i, d: Math.abs(cpuResult.policy[i] - oscResult.policy[i]), cpu: cpuResult.policy[i], osc: oscResult.policy[i]});
+          }
+          oscDiffs.sort(function(a,b){return b.d - a.d});
+          for (var odi = 0; odi < 3; odi++) {
+            var od = oscDiffs[odi];
+            p('    idx=' + od.idx + ' CPU=' + od.cpu.toFixed(4) + ' OSC=' + od.osc.toFixed(4) + ' diff=' + od.d.toExponential(2), 'fail');
+          }
+        }
+      }
+
+      if (!posPass) {
+        p('  Top 5 policy differences:', 'warn');
+        for (let di = 0; di < top5.length; di++) {
+          const d = top5[di];
+          p('    idx=' + d.idx + '  CPU=' + d.cpuVal.toFixed(6) + '  GPU=' + d.gpuVal.toFixed(6) + '  diff=' + d.diff.toExponential(3), 'warn');
+        }
+      }
+
+      // 3-way comparison: Python (fixture) vs CPU (TypeScript) vs GPU (WebGL)
+      const cols = 'abcdefg';
+      function fmtMove(idx) {
+        if (idx === 3136) return 'END_TURN';
+        const src = Math.floor(idx / 56), dst = idx % 56;
+        return cols[src % 7] + (Math.floor(src / 7) + 1) + cols[dst % 7] + (Math.floor(dst / 7) + 1);
+      }
+      // Exponentiate log-probs to get probabilities
+      const cpuProbs = new Float32Array(cpuResult.policy.length);
+      const gpuProbs = new Float32Array(gpuResult.policy.length);
+      const pyProbs = new Float32Array(pos.policy.length);
+      for (let i = 0; i < cpuProbs.length; i++) {
+        cpuProbs[i] = Math.exp(cpuResult.policy[i]);
+        gpuProbs[i] = Math.exp(gpuResult.policy[i]);
+        pyProbs[i] = Math.exp(pos.policy[i]);
+      }
+      // Get top 5 by probability for each
+      function getTop(probs, n) {
+        return Array.from({length: probs.length}, function(_, i) { return i; })
+          .sort(function(a, b) { return probs[b] - probs[a]; }).slice(0, n);
+      }
+      const pyTop = getTop(pyProbs, 5);
+      const cpuTop = getTop(cpuProbs, 5);
+      const gpuTop = getTop(gpuProbs, 5);
+      const allMatch = cpuTop.every(function(v, i) { return v === gpuTop[i] && v === pyTop[i]; });
+      p('  Top 5 moves (Python vs CPU vs GPU):', allMatch ? 'dim' : 'warn');
+      for (let ti = 0; ti < 5; ti++) {
+        const pi2 = pyTop[ti], ci = cpuTop[ti], gi = gpuTop[ti];
+        const match3 = (pi2 === ci && ci === gi) ? '  ALL AGREE' : '  DIFFER!';
+        p('    #' + (ti+1) +
+          '  Py: ' + fmtMove(pi2).padEnd(7) + (pyProbs[pi2]*100).toFixed(1).padStart(5) + '%' +
+          '  CPU: ' + fmtMove(ci).padEnd(7) + (cpuProbs[ci]*100).toFixed(1).padStart(5) + '%' +
+          '  GPU: ' + fmtMove(gi).padEnd(7) + (gpuProbs[gi]*100).toFixed(1).padStart(5) + '%' +
+          match3,
+          (pi2 === ci && ci === gi) ? 'dim' : 'fail');
+      }
+      if (!allMatch) {
+        posResult.topMovesMatch = false;
+      } else {
+        posResult.topMovesMatch = true;
+      }
+
+      p('');
+    }
+
+    // ---- Summary ----
+    p('');
+    p('========================================', 'info');
+    p('=== SUMMARY ===', 'info');
+    p('========================================', 'info');
+
+    const avgCpuMs = totalCpuMs / numPositions;
+    const avgGpuMs = totalGpuMs / numPositions;
+    const speedup = avgCpuMs / avgGpuMs;
+
+    p('Positions tested: ' + numPositions);
+    p('Passed: ' + totalPass + '  Failed: ' + totalFail, totalFail === 0 ? 'pass' : 'fail');
+    p('Worst policy max diff: ' + worstPolicyDiff.toExponential(4) + ' (threshold: ' + POLICY_THRESHOLD + ')');
+    p('Worst value abs diff:  ' + worstValueDiff.toExponential(4) + ' (threshold: ' + VALUE_THRESHOLD + ')');
+    p('');
+    p('Timing (avg over ' + numPositions + ' positions):');
+    p('  CPU: ' + avgCpuMs.toFixed(2) + ' ms/forward');
+    p('  GPU: ' + avgGpuMs.toFixed(2) + ' ms/forward');
+    p('  Speedup: ' + speedup.toFixed(2) + 'x ' + (speedup > 1 ? '(GPU faster)' : '(CPU faster)'));
+    p('');
+    p('Total wall time: ' + ((performance.now() - startTime) / 1000).toFixed(1) + ' s');
+
+    results.summary = {
+      numPositions: numPositions,
+      passed: totalPass,
+      failed: totalFail,
+      worstPolicyDiff: worstPolicyDiff,
+      worstValueDiff: worstValueDiff,
+      avgCpuMs: parseFloat(avgCpuMs.toFixed(2)),
+      avgGpuMs: parseFloat(avgGpuMs.toFixed(2)),
+      speedup: parseFloat(speedup.toFixed(2)),
+      policyThreshold: POLICY_THRESHOLD,
+      valueThreshold: VALUE_THRESHOLD,
+    };
+    results.timingMs = parseFloat((performance.now() - startTime).toFixed(1));
+
+    const overallPass = totalFail === 0;
+    resultEl.dataset.status = overallPass ? 'pass' : 'fail';
+
+    // Show summary banner
+    const summaryDiv = document.createElement('div');
+    summaryDiv.className = 'summary ' + (overallPass ? 'pass' : 'fail');
+    summaryDiv.textContent = overallPass
+      ? 'ALL ' + numPositions + ' POSITIONS PASSED (max policy diff: ' + worstPolicyDiff.toExponential(3) + ', max value diff: ' + worstValueDiff.toExponential(3) + ')'
+      : totalFail + ' OF ' + numPositions + ' POSITIONS FAILED';
+    logEl.appendChild(summaryDiv);
+
+    // Cleanup GPU
+    if (gpuModel.dispose) gpuModel.dispose();
+
+  } catch (e) {
+    p('');
+    p('ERROR: ' + e.message, 'fail');
+    if (e.stack) p(e.stack, 'dim');
+    results.error = { message: e.message, stack: e.stack || null };
+    resultEl.dataset.status = 'fail';
+
+    const summaryDiv = document.createElement('div');
+    summaryDiv.className = 'summary fail';
+    summaryDiv.textContent = 'TEST FAILED: ' + e.message;
+    logEl.appendChild(summaryDiv);
+  }
+
+  // ---- Send results to server ----
+  try {
+    p('');
+    p('Sending results to /api/logs...', 'dim');
+    const resp = await fetch('/api/logs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        session_id: sessionId,
+        entries: [{
+          timestamp: new Date().toISOString(),
+          level: 'info',
+          message: '[webgl-test] Full forward pass results',
+          data: results,
+        }],
+      }),
+    });
+    if (resp.ok) {
+      p('Results sent successfully.', 'dim');
+    } else {
+      p('Failed to send results: HTTP ' + resp.status, 'warn');
+    }
+  } catch (e) {
+    p('Failed to send results: ' + e.message, 'warn');
+  }
+}
+
+// Run on load
+run();
+</script>
+</body>
+</html>

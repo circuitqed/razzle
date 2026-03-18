@@ -28,7 +28,7 @@ interface AIWorkerState {
 interface UseAIWorkerReturn extends AIWorkerState {
   loadModel: (modelUrl: string, modelVersion: string) => void;
   loadRandomEvaluator: () => void;
-  search: (state: EngineState, config?: Partial<MCTSConfig>) => Promise<{ bestMove: number; simsDone: number; value: number }>;
+  search: (state: EngineState, config?: Partial<MCTSConfig>) => Promise<{ bestMove: number; simsDone: number; value: number; searchMs?: number }>;
   abort: () => void;
   /** Resolves true when model finishes loading, false if load fails or wasn't started */
   waitForLoad: () => Promise<boolean>;
@@ -53,6 +53,7 @@ export function useAIWorker(): UseAIWorkerReturn {
   const modelInfoRef = useRef<{ url: string; version: string; isRandom: boolean } | null>(null);
   // Use refs for internal state to avoid stale closures
   const isLoadedRef = useRef(false);
+  const activeBackendRef = useRef<string | null>(null);
 
   const [state, setState] = useState<AIWorkerState>({
     isLoaded: false,
@@ -66,7 +67,7 @@ export function useAIWorker(): UseAIWorkerReturn {
 
   // Pending promise resolvers
   const searchResolverRef = useRef<{
-    resolve: (result: { bestMove: number; simsDone: number; value: number }) => void;
+    resolve: (result: { bestMove: number; simsDone: number; value: number; searchMs?: number }) => void;
     reject: (error: Error) => void;
   } | null>(null);
   const loadResolverRef = useRef<{
@@ -92,6 +93,9 @@ export function useAIWorker(): UseAIWorkerReturn {
       worker.onerror = (event) => {
         console.warn('[useAIWorker] Worker error:', event.message);
         event.preventDefault();
+        // Clear dead worker refs so waitForLoad() returns false and search() throws immediately
+        workerRef.current = null;
+        loadPromiseRef.current = null;
         isLoadedRef.current = false;
         if (mountedRef.current) {
           setState((prev) => ({
@@ -105,6 +109,14 @@ export function useAIWorker(): UseAIWorkerReturn {
         loadResolverRef.current = null;
         searchResolverRef.current?.reject(new Error(event.message || 'Worker error'));
         searchResolverRef.current = null;
+        // Auto-recover: recreate worker and reload model after a brief delay
+        if (mountedRef.current && modelInfoRef.current) {
+          setTimeout(() => {
+            if (!mountedRef.current || !modelInfoRef.current) return;
+            const newWorker = createWorker();
+            if (newWorker) sendLoadMessage(newWorker, modelInfoRef.current);
+          }, 1000);
+        }
       };
 
       worker.onmessage = (event) => {
@@ -113,13 +125,14 @@ export function useAIWorker(): UseAIWorkerReturn {
           case 'loaded':
             if (msg.success) {
               isLoadedRef.current = true;
+              activeBackendRef.current = msg.backend ?? (msg.isRandom ? 'random' : 'wasm');
               if (mountedRef.current) {
                 setState((prev) => ({
                   ...prev,
                   isLoaded: true,
                   isLoading: false,
                   isRandom: msg.isRandom ?? false,
-                  backend: msg.backend ?? (msg.isRandom ? 'random' : 'wasm'),
+                  backend: activeBackendRef.current,
                   loadError: null,
                 }));
               }
@@ -165,11 +178,13 @@ export function useAIWorker(): UseAIWorkerReturn {
                 bestMove: msg.bestMove,
                 simsDone: msg.simsDone,
                 value: msg.value,
+                searchMs: msg.searchMs,
               });
             } else {
               searchResolverRef.current?.reject(new Error(msg.error));
             }
             searchResolverRef.current = null;
+
             break;
         }
       };
@@ -216,9 +231,8 @@ export function useAIWorker(): UseAIWorkerReturn {
       workerRef.current = null;
     }
     isLoadedRef.current = false;
-    if (mountedRef.current) {
-      setState((prev) => ({ ...prev, isLoaded: false }));
-    }
+    // Don't update UI state here — the recycle is fast and the "loading model"
+    // flash is distracting. The UI will update when the new worker reports loaded.
 
     // Delay creation to let OS reclaim old worker's memory
     setTimeout(() => {
@@ -262,10 +276,16 @@ export function useAIWorker(): UseAIWorkerReturn {
       engineState: EngineState,
       config?: Partial<MCTSConfig>,
     ): Promise<{ bestMove: number; simsDone: number; value: number }> => {
-      // Wait for worker to be loaded (may be loading after a recycle)
-      if (!isLoadedRef.current && loadPromiseRef.current) {
-        const loaded = await loadPromiseRef.current;
-        if (!loaded) throw new Error('Model failed to load');
+      // Wait for worker to be loaded (may be loading after a recycle).
+      // Poll until loadPromiseRef appears (set by sendLoadMessage after recycle).
+      for (let attempt = 0; attempt < 20 && !isLoadedRef.current; attempt++) {
+        if (loadPromiseRef.current) {
+          const loaded = await loadPromiseRef.current;
+          if (!loaded) throw new Error('Model failed to load');
+          break;
+        }
+        // Worker is being recycled — wait for sendLoadMessage to set the promise
+        await new Promise(r => setTimeout(r, 100));
       }
       if (!workerRef.current || !isLoadedRef.current) {
         throw new Error('Worker not initialized or model not loaded');
@@ -286,11 +306,10 @@ export function useAIWorker(): UseAIWorkerReturn {
         },
       );
 
-      // Recycle the worker to fully release WASM memory.
-      // Without this, WASM linear memory grows monotonically and
-      // iOS kills the tab after a few moves.
-      // Skip for random evaluator (no WASM memory issue).
-      if (!modelInfoRef.current?.isRandom) {
+      // Recycle the worker to fully release WASM linear memory.
+      // Only needed for the 'wasm' backend — WASM memory grows monotonically
+      // and iOS kills the tab. WebGPU, WebGL, and pure-TS don't have this issue.
+      if (activeBackendRef.current === 'wasm') {
         recycleWorker();
       }
 

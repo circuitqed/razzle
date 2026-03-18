@@ -82,6 +82,7 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [aiThinking, setAiThinking] = useState(false);
+  const aiThinkingRef = useRef(false); // synchronous guard against double-trigger
   const [lastMove, setLastMove] = useState<LastMove | null>(null);
   const [moveHistory, setMoveHistory] = useState<MoveRecord[]>([]);
   const [rawMoves, setRawMoves] = useState<number[]>([]);
@@ -165,6 +166,10 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
   // Handle AI move - compute the FULL turn, then apply all at once.
   // AI thinks silently; only the final board state is shown.
   const handleAIMove = useCallback(async (gameId: string) => {
+    // Synchronous guard: prevent double-trigger from React batched updates
+    if (aiThinkingRef.current) return;
+    aiThinkingRef.current = true;
+
     const gen = gameGenRef.current;
     const isStale = () => gen !== gameGenRef.current;
 
@@ -186,12 +191,12 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
           break;
         }
 
-        const clientReady = aiWorker.isLoaded;
-        if (!clientReady && !aiWorker.isLoading) {
-          logger.warn('[useGame] Client-side AI not available', {
-            loadError: aiWorker.loadError,
-            backend: aiWorker.backend,
-          });
+        // Try client-side AI first; wait for model load if still in progress
+        let clientReady = aiWorkerRef.current.isLoaded;
+        if (!clientReady) {
+          // Wait for pending model load (returns immediately if already loaded/failed)
+          clientReady = await aiWorkerRef.current.waitForLoad();
+          if (isStale()) return;
         }
 
         logger.info('[useGame] AI making move...', { moveNumber: aiMoveCount, clientSide: clientReady });
@@ -201,30 +206,44 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
         if (clientReady) {
           try {
             const engineState = apiStateToEngineState(currentState);
-            const result = await aiWorker.search(engineState, {
+            const result = await aiWorkerRef.current.search(engineState, {
               numSimulations: aiSimulations,
             });
             if (isStale()) return;
             aiMove = result.bestMove;
             aiValue = result.value;
+            if (result.searchMs) {
+              const secs = (result.searchMs / 1000).toFixed(1);
+              const msPerSim = (result.searchMs / result.simsDone).toFixed(1);
+              const simsPerSec = (1000 * result.simsDone / result.searchMs).toFixed(1);
+              logger.info('[useGame] Search perf', {
+                sims: result.simsDone, secs, msPerSim, simsPerSec,
+                backend: aiWorkerRef.current.backend,
+              });
+            }
             setAiProgress(null);
-            currentState = await api.makeMove(gameId, aiMove);
+            try {
+              currentState = await api.makeMove(gameId, aiMove);
+            } catch (moveErr: any) {
+              // If server rejects the move (stale state), refetch and retry this iteration
+              if (moveErr?.status === 400) {
+                logger.warn('[useGame] AI move rejected, refetching state', { move: aiMove });
+                currentState = await api.getGameState(gameId);
+                if (isStale()) return;
+                aiMoveCount--; // don't count this failed attempt
+                continue;
+              }
+              throw moveErr;
+            }
             if (isStale()) return;
           } catch (clientErr) {
             if (isStale()) return;
-            logger.error('[useGame] Client-side AI failed, falling back to server:', clientErr);
-            const aiResponse = await api.getAIMove(gameId, { simulations: aiSimulations, model: aiModel });
-            if (isStale()) return;
-            currentState = aiResponse.game_state;
-            aiMove = aiResponse.move;
-            aiValue = aiResponse.value;
+            throw clientErr;
           }
         } else {
-          const aiResponse = await api.getAIMove(gameId, { simulations: aiSimulations, model: aiModel });
-          if (isStale()) return;
-          currentState = aiResponse.game_state;
-          aiMove = aiResponse.move;
-          aiValue = aiResponse.value;
+          // Model not ready — stop silently if still loading, throw if permanently failed
+          if (aiWorkerRef.current.isLoading) return;
+          throw new Error(`Client AI not ready: ${aiWorkerRef.current.loadError ?? 'not loaded'}`);
         }
 
         aiTurnMoves.push(aiMove);
@@ -289,7 +308,7 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
       setError(err instanceof Error ? err.message : 'AI move failed');
     } finally {
       if (!isStale()) {
-        setAiThinking(false);
+        setAiThinking(false); aiThinkingRef.current = false;
         setAiProgress(null);
       }
     }
@@ -308,8 +327,10 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
     if (!vsAI || !gameState || gameState.status !== 'playing') return;
     if (aiThinking || isLoading) return;
     if (gameState.current_player !== aiPlayer) return;
+    // Don't retry if model failed to load and isn't recovering
+    if (aiWorker.loadError && !aiWorker.isLoaded && !aiWorker.isLoading) return;
     handleAIMove(gameState.game_id);
-  }, [vsAI, gameState?.game_id, gameState?.current_player, gameState?.status, aiPlayer, aiThinking, isLoading]);
+  }, [vsAI, gameState?.game_id, gameState?.current_player, gameState?.status, aiPlayer, aiThinking, isLoading, aiWorker.loadError, aiWorker.isLoaded, aiWorker.isLoading]);
 
   // Commit a complete turn: send all sub-moves to the server, update state.
   const commitTurn = useCallback(
@@ -402,7 +423,7 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
   // Start a new game
   const startNewGame = useCallback(async () => {
     gameGenRef.current++;  // Invalidate any in-flight AI/commit operations
-    setAiThinking(false);
+    setAiThinking(false); aiThinkingRef.current = false;
     setIsLoading(true);
     setError(null);
     clearSelection();
@@ -431,7 +452,7 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
   // Resume an existing game (e.g., after page refresh)
   const resumeGame = useCallback(async (gameId: string): Promise<boolean> => {
     gameGenRef.current++;  // Invalidate any in-flight AI/commit operations
-    setAiThinking(false);
+    setAiThinking(false); aiThinkingRef.current = false;
     setIsLoading(true);
     setError(null);
     clearSelection();

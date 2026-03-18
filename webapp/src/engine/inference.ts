@@ -7,6 +7,11 @@
  *
  * This is the iOS-compatible inference path. On desktop, OnnxEvaluator
  * is preferred for its WASM SIMD acceleration.
+ *
+ * Performance optimizations:
+ * - All scratch buffers pre-allocated (zero GC pressure per forward pass)
+ * - GEMM inner loop unrolled 4x
+ * - Bias+ReLU branches hoisted out of inner loops
  */
 
 import { type WeightTensor, parseOnnxWeights } from './onnxWeights';
@@ -21,22 +26,47 @@ const HW = ROWS * COLS; // 56
 /**
  * General matrix multiply: C = A @ B
  * A: (M, K), B: (K, N), C: (M, N)
- * Uses MKN loop order for better cache behavior on B.
+ *
+ * Tiled for L1 cache: processes K in blocks of TK so that the active
+ * slice of B (~TK*N floats) fits in L1. Within each tile, accumulates
+ * 4 output elements in local variables (registers) to avoid repeated
+ * C array loads/stores in the inner loop.
  */
 function gemm(
   A: Float32Array, B: Float32Array, C: Float32Array,
   M: number, K: number, N: number,
 ): void {
   C.fill(0);
-  for (let m = 0; m < M; m++) {
-    const aRowOff = m * K;
-    const cRowOff = m * N;
-    for (let k = 0; k < K; k++) {
-      const a = A[aRowOff + k];
-      if (a === 0) continue;
-      const bRowOff = k * N;
-      for (let n = 0; n < N; n++) {
-        C[cRowOff + n] += a * B[bRowOff + n];
+  const TK = 64; // K-tile: 64 * 56 * 4 bytes = 14KB, fits in L1
+  const N4 = N - (N % 4);
+
+  for (let kt = 0; kt < K; kt += TK) {
+    const kEnd = Math.min(kt + TK, K);
+    for (let m = 0; m < M; m++) {
+      const aRowOff = m * K;
+      const cRowOff = m * N;
+      // Process 4 N-columns at a time with register accumulation
+      let n = 0;
+      for (; n < N4; n += 4) {
+        const ci = cRowOff + n;
+        let c0 = C[ci], c1 = C[ci + 1], c2 = C[ci + 2], c3 = C[ci + 3];
+        for (let k = kt; k < kEnd; k++) {
+          const a = A[aRowOff + k];
+          const bi = k * N + n;
+          c0 += a * B[bi];
+          c1 += a * B[bi + 1];
+          c2 += a * B[bi + 2];
+          c3 += a * B[bi + 3];
+        }
+        C[ci] = c0; C[ci + 1] = c1; C[ci + 2] = c2; C[ci + 3] = c3;
+      }
+      // Remainder columns
+      for (; n < N; n++) {
+        let c = C[cRowOff + n];
+        for (let k = kt; k < kEnd; k++) {
+          c += A[aRowOff + k] * B[k * N + n];
+        }
+        C[cRowOff + n] = c;
       }
     }
   }
@@ -60,13 +90,18 @@ function im2col3x3(
       for (let kw = 0; kw < 3; kw++) {
         const colRow = (c * 9 + kh * 3 + kw);
         const colRowOff = colRow * colW;
-        for (let h = 0; h < H; h++) {
+        // Clamp row range to avoid per-element bounds check
+        const hStart = Math.max(0, 1 - kh);
+        const hEnd = Math.min(H, H + 1 - kh);
+        for (let h = hStart; h < hEnd; h++) {
           const ih = h + kh - 1;
-          if (ih < 0 || ih >= H) continue;
-          for (let w = 0; w < W; w++) {
-            const iw = w + kw - 1;
-            if (iw < 0 || iw >= W) continue;
-            col[colRowOff + h * W + w] = input[inOff + ih * W + iw];
+          // Clamp col range to avoid per-element bounds check
+          const wStart = Math.max(0, 1 - kw);
+          const wEnd = Math.min(W, W + 1 - kw);
+          const rowOutOff = colRowOff + h * W;
+          const rowInOff = inOff + ih * W;
+          for (let w = wStart; w < wEnd; w++) {
+            col[rowOutOff + w] = input[rowInOff + w + kw - 1];
           }
         }
       }
@@ -75,28 +110,42 @@ function im2col3x3(
 }
 
 /**
- * Conv2d (3x3, padding=1) + bias + optional ReLU.
+ * Conv2d (3x3, padding=1) + bias + ReLU.
  * BN is already fused into weight/bias by the ONNX exporter.
  */
-function conv3x3(
+function conv3x3relu(
   input: Float32Array, weight: Float32Array, bias: Float32Array,
   inC: number, outC: number, H: number, W: number,
   col: Float32Array, output: Float32Array,
-  relu: boolean,
 ): void {
-  // im2col: input (inC, H, W) → col (inC*9, H*W)
   im2col3x3(input, inC, H, W, col);
-
-  // GEMM: weight (outC, inC*9) @ col (inC*9, H*W) → output (outC, H*W)
   gemm(weight, col, output, outC, inC * 9, H * W);
-
-  // Add bias (+ optional ReLU)
+  const hw = H * W;
   for (let oc = 0; oc < outC; oc++) {
     const b = bias[oc];
-    const off = oc * H * W;
-    for (let i = 0; i < H * W; i++) {
-      const v = output[off + i] + b;
-      output[off + i] = relu ? Math.max(0, v) : v;
+    const off = oc * hw;
+    for (let i = 0; i < hw; i++) {
+      output[off + i] = Math.max(0, output[off + i] + b);
+    }
+  }
+}
+
+/**
+ * Conv2d (3x3, padding=1) + bias (no ReLU).
+ */
+function conv3x3noRelu(
+  input: Float32Array, weight: Float32Array, bias: Float32Array,
+  inC: number, outC: number, H: number, W: number,
+  col: Float32Array, output: Float32Array,
+): void {
+  im2col3x3(input, inC, H, W, col);
+  gemm(weight, col, output, outC, inC * 9, H * W);
+  const hw = H * W;
+  for (let oc = 0; oc < outC; oc++) {
+    const b = bias[oc];
+    const off = oc * hw;
+    for (let i = 0; i < hw; i++) {
+      output[off + i] += b;
     }
   }
 }
@@ -110,10 +159,7 @@ function conv1x1(
   inC: number, outC: number, HW: number,
   output: Float32Array,
 ): void {
-  // weight: (outC, inC), input: (inC, HW) → output: (outC, HW)
   gemm(weight, input, output, outC, inC, HW);
-
-  // Add bias + ReLU
   for (let oc = 0; oc < outC; oc++) {
     const b = bias[oc];
     const off = oc * HW;
@@ -131,10 +177,18 @@ function linear(
   outFeatures: number, inFeatures: number,
   output: Float32Array,
 ): void {
+  const inF4 = inFeatures - (inFeatures % 4);
   for (let m = 0; m < outFeatures; m++) {
     let sum = bias[m];
     const wOff = m * inFeatures;
-    for (let n = 0; n < inFeatures; n++) {
+    let n = 0;
+    for (; n < inF4; n += 4) {
+      sum += weight[wOff + n] * input[n]
+           + weight[wOff + n + 1] * input[n + 1]
+           + weight[wOff + n + 2] * input[n + 2]
+           + weight[wOff + n + 3] * input[n + 3];
+    }
+    for (; n < inFeatures; n++) {
       sum += weight[wOff + n] * input[n];
     }
     output[m] = sum;
@@ -196,11 +250,17 @@ export class PureTSModel {
   private valueFc1: LinearLayer;
   private valueFc2: LinearLayer;
 
-  // Pre-allocated scratch buffers for inference
+  // Pre-allocated scratch buffers — zero allocations during forward()
+  private inputColBuf: Float32Array;
   private colBuf: Float32Array;
   private towerBuf1: Float32Array;
   private towerBuf2: Float32Array;
   private headBuf: Float32Array;
+  private policyHiddenBuf: Float32Array | null;
+  private policyLogitsBuf: Float32Array;
+  private policyOutBuf: Float32Array;
+  private valueHiddenBuf: Float32Array;
+  private valueOutBuf: Float32Array;
 
   constructor(config: ModelConfig, weights: Map<string, WeightTensor>) {
     this.config = config;
@@ -267,7 +327,8 @@ export class PureTSModel {
     this.valueFc1 = getFC('value_fc1');
     this.valueFc2 = getFC('value_fc2');
 
-    // Pre-allocate scratch buffers
+    // Pre-allocate ALL scratch buffers — forward() does zero allocations
+    this.inputColBuf = new Float32Array(7 * 9 * HW);
     this.colBuf = new Float32Array(f * 9 * HW);
     this.towerBuf1 = new Float32Array(f * HW);
     this.towerBuf2 = new Float32Array(f * HW);
@@ -275,39 +336,46 @@ export class PureTSModel {
       config.policyFilters * HW,
       config.valueFilters * HW,
     ));
+    this.policyHiddenBuf = this.policyFc1
+      ? new Float32Array(this.policyFc1.outFeatures) : null;
+    this.policyLogitsBuf = new Float32Array(this.policyFc.outFeatures);
+    this.policyOutBuf = new Float32Array(this.policyFc.outFeatures);
+    this.valueHiddenBuf = new Float32Array(this.valueFc1.outFeatures);
+    this.valueOutBuf = new Float32Array(1);
   }
 
   /**
    * Run forward pass.
    * @param input Float32Array of shape (7, 8, 7) = 392 elements in CHW order
    * @returns policy (log-probs, 3137 elements) and value (scalar in [-1, 1])
+   *
+   * NOTE: The returned policy Float32Array is reused across calls.
+   * Callers must copy it if they need to retain it.
    */
   forward(input: Float32Array): { policy: Float32Array; value: number } {
     const f = this.config.numFilters;
-    const inC = 7; // input channels
-    const col = this.colBuf;
 
     // Input conv (7 → f) + fused BN + ReLU
-    // Need larger col buffer for input conv (7 channels vs f channels)
-    const inputCol = new Float32Array(inC * 9 * HW);
-    conv3x3(input, this.inputConv.weight, this.inputConv.bias,
-      inC, f, ROWS, COLS, inputCol, this.towerBuf1, true);
+    conv3x3relu(input, this.inputConv.weight, this.inputConv.bias,
+      7, f, ROWS, COLS, this.inputColBuf, this.towerBuf1);
 
     // Residual tower
     let current = this.towerBuf1;
     let scratch = this.towerBuf2;
+    const col = this.colBuf;
+    const fHW = f * HW;
 
     for (const block of this.resBlocks) {
       // conv1 + fused BN + ReLU
-      conv3x3(current, block.conv1.weight, block.conv1.bias,
-        f, f, ROWS, COLS, col, scratch, true);
+      conv3x3relu(current, block.conv1.weight, block.conv1.bias,
+        f, f, ROWS, COLS, col, scratch);
 
       // conv2 + fused BN (no ReLU yet)
-      conv3x3(scratch, block.conv2.weight, block.conv2.bias,
-        f, f, ROWS, COLS, col, scratch, false);
+      conv3x3noRelu(scratch, block.conv2.weight, block.conv2.bias,
+        f, f, ROWS, COLS, col, scratch);
 
       // Residual add + ReLU (in-place into scratch)
-      for (let i = 0; i < f * HW; i++) {
+      for (let i = 0; i < fHW; i++) {
         scratch[i] = Math.max(0, scratch[i] + current[i]);
       }
 
@@ -325,30 +393,26 @@ export class PureTSModel {
     conv1x1(current, this.policyConv.weight, this.policyConv.bias,
       f, pf, HW, policyHead);
 
-    // Flatten: (pf, H, W) → (pf * H * W)
     const policyFlat = policyHead.subarray(0, pf * HW);
+    const policyLogits = this.policyLogitsBuf;
 
-    let policyLogits: Float32Array;
     if (this.policyFc1) {
       // Bottleneck: FC1 + ReLU + FC2
-      const hidden = new Float32Array(this.policyFc1.outFeatures);
+      const hidden = this.policyHiddenBuf!;
       linear(policyFlat, this.policyFc1.weight, this.policyFc1.bias,
         this.policyFc1.outFeatures, this.policyFc1.inFeatures, hidden);
       for (let i = 0; i < hidden.length; i++) {
         hidden[i] = Math.max(0, hidden[i]);
       }
-      policyLogits = new Float32Array(this.policyFc.outFeatures);
       linear(hidden, this.policyFc.weight, this.policyFc.bias,
         this.policyFc.outFeatures, this.policyFc.inFeatures, policyLogits);
     } else {
-      // Direct FC
-      policyLogits = new Float32Array(this.policyFc.outFeatures);
       linear(policyFlat, this.policyFc.weight, this.policyFc.bias,
         this.policyFc.outFeatures, this.policyFc.inFeatures, policyLogits);
     }
 
     // Log-softmax
-    const policy = new Float32Array(policyLogits.length);
+    const policy = this.policyOutBuf;
     logSoftmax(policyLogits, policy, policyLogits.length);
 
     // --- Value head ---
@@ -357,11 +421,10 @@ export class PureTSModel {
     conv1x1(current, this.valueConv.weight, this.valueConv.bias,
       f, vf, HW, valueHead);
 
-    // Flatten: (vf, H, W) → (vf * H * W)
     const valueFlat = valueHead.subarray(0, vf * HW);
 
     // FC1 + ReLU
-    const vh = new Float32Array(this.valueFc1.outFeatures);
+    const vh = this.valueHiddenBuf;
     linear(valueFlat, this.valueFc1.weight, this.valueFc1.bias,
       this.valueFc1.outFeatures, this.valueFc1.inFeatures, vh);
     for (let i = 0; i < vh.length; i++) {
@@ -369,7 +432,7 @@ export class PureTSModel {
     }
 
     // FC2 + tanh
-    const vOut = new Float32Array(1);
+    const vOut = this.valueOutBuf;
     linear(vh, this.valueFc2.weight, this.valueFc2.bias,
       this.valueFc2.outFeatures, this.valueFc2.inFeatures, vOut);
     const value = Math.tanh(vOut[0]);

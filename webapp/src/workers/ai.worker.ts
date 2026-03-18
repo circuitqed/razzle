@@ -5,19 +5,18 @@
  * BigInt values are serialized as strings in messages (BigInt can't cross postMessage).
  *
  * Backend selection:
- * - iOS: Pure TypeScript inference (no WASM, no SharedArrayBuffer)
+ * - iOS: MCTS in worker, inference on main thread via WebGL (RemoteEvaluator)
  * - Desktop with WebGPU: ONNX Runtime with WebGPU backend
  * - Desktop fallback: ONNX Runtime with WASM backend
  */
 
-import { OnnxEvaluator, PureTSEvaluator, RandomEvaluator } from '../engine/evaluator';
+import { OnnxEvaluator, PureTSEvaluator, GPUEvaluator, RandomEvaluator } from '../engine/evaluator';
+import type { Evaluator } from '../engine/evaluator';
 import { createModelFromOnnx } from '../engine/inference';
+import { createGPUModelFromOnnx } from '../engine/webglForwardPass';
 import { search, type MCTSConfig, DEFAULT_CONFIG } from '../engine/mcts';
 import type { EngineState } from '../engine/state';
 import { getCachedModel, cacheModel } from '../engine/modelCache';
-// OpeningBook is available for future use but not automatically applied —
-// MCTS with temperature already provides good opening variety.
-// import { OpeningBook } from '../engine/openingBook';
 
 // ONNX Runtime is loaded dynamically to handle import failures gracefully
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -25,7 +24,7 @@ let ort: any = null;
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let session: any = null;
-let evaluator: OnnxEvaluator | PureTSEvaluator | RandomEvaluator | null = null;
+let evaluator: Evaluator | null = null;
 let abortFlag = { aborted: false };
 let activeBackend: string = 'wasm';
 let ortLoadFailed = false;
@@ -41,7 +40,7 @@ const isIOS = /iPhone|iPad|iPod/i.test(navigator.userAgent) ||
  */
 async function isWebGPUUsable(): Promise<boolean> {
   if (isIOS) {
-    console.log('[ai.worker] Skipping WebGPU on iOS — using WASM backend');
+    console.log('[ai.worker] Skipping WebGPU on iOS');
     return false;
   }
   if (typeof navigator === 'undefined' || !('gpu' in navigator)) return false;
@@ -89,15 +88,6 @@ async function ensureOrt(needsWebGPU: boolean): Promise<boolean> {
   // Tell ONNX Runtime where to find WASM files (copied to root by vite-plugin-static-copy)
   ort.env.wasm.wasmPaths = '/';
 
-  // On iOS, limit WASM threads to reduce memory pressure.
-  // Default is navigator.hardwareConcurrency (6 on iPhone 15) which spawns
-  // 5 pthread workers + the AI worker = 7 JS contexts with shared memory.
-  // With numThreads=2, we get: AI worker + 1 pthread = 3 contexts total.
-  if (isIOS) {
-    ort.env.wasm.numThreads = 2;
-    console.log('[ai.worker] iOS: limiting WASM threads to 2');
-  }
-
   return true;
 }
 
@@ -113,10 +103,6 @@ interface SearchMessage {
   type: 'search';
   state: SerializedEngineState;
   config?: Partial<MCTSConfig>;
-}
-
-interface AbortMessage {
-  type: 'abort';
 }
 
 // BigInt can't be serialized via postMessage, so we use strings
@@ -162,14 +148,37 @@ async function getModelBuffer(msg: LoadMessage): Promise<ArrayBuffer> {
 }
 
 /**
- * Load model using pure TypeScript inference (no WASM).
- * Parses ONNX protobuf for weight tensors and runs inference in JS.
+ * Load model for iOS — try WebGL GEMM first (GPU-accelerated, accurate),
+ * fall back to pure TypeScript if WebGL is unavailable.
  */
-async function loadPureTS(msg: LoadMessage): Promise<void> {
+async function loadiOS(msg: LoadMessage): Promise<void> {
   const modelBuffer = await getModelBuffer(msg);
 
   self.postMessage({ type: 'loading_progress', stage: 'initializing' });
   const t0 = performance.now();
+
+  // GPU-resident forward pass: all convolutions on GPU, only 2 readPixels per forward.
+  // Accuracy verified on iOS Safari via test-webgl-inference.html (OffscreenCanvas path).
+  try {
+    if (typeof OffscreenCanvas === 'undefined') throw new Error('No OffscreenCanvas');
+    const canvas = new OffscreenCanvas(1, 1);
+    const gl = canvas.getContext('webgl2');
+    if (!gl) throw new Error('No WebGL2 in worker');
+    if (!gl.getExtension('EXT_color_buffer_float')) throw new Error('No EXT_color_buffer_float');
+
+    const gpuModel = createGPUModelFromOnnx(modelBuffer, canvas);
+    const elapsed = ((performance.now() - t0)).toFixed(0);
+    console.log(`[ai.worker] GPU forward pass model created in ${elapsed}ms:`, gpuModel.config);
+
+    evaluator = new GPUEvaluator(gpuModel);
+    activeBackend = 'gpu';
+    self.postMessage({ type: 'loaded', success: true, isRandom: false, backend: activeBackend });
+    return;
+  } catch (gpuErr) {
+    console.warn('[ai.worker] GPU forward pass unavailable, using pure TypeScript:', gpuErr);
+  }
+
+  // Fall back to pure TypeScript inference
   const model = createModelFromOnnx(modelBuffer);
   const elapsed = ((performance.now() - t0)).toFixed(0);
   console.log(`[ai.worker] Pure TS model created in ${elapsed}ms:`, model.config);
@@ -231,11 +240,9 @@ async function handleLoad(msg: LoadMessage): Promise<void> {
     }
 
     if (isIOS) {
-      // iOS: use pure TypeScript inference to avoid WASM memory issues.
-      // WASM linear memory only grows (never shrinks), and iOS kills tabs
-      // that exceed memory limits after just a few MCTS searches.
-      console.log('[ai.worker] iOS detected — using pure TypeScript inference');
-      await loadPureTS(msg);
+      // iOS: try WebGL GEMM (custom shaders, GPU-accelerated, accurate).
+      // Falls back to pure TypeScript if WebGL unavailable.
+      await loadiOS(msg);
     } else {
       // Desktop: use ONNX Runtime for WASM SIMD / WebGPU acceleration
       await loadOnnxRuntime(msg);
@@ -261,6 +268,7 @@ async function handleSearch(msg: SearchMessage): Promise<void> {
   try {
     const state = deserializeState(msg.state);
     const config = { ...DEFAULT_CONFIG, ...msg.config };
+    const searchStart = performance.now();
 
     const result = await search(state, evaluator, config, abortFlag, (progress) => {
       self.postMessage({
@@ -273,9 +281,8 @@ async function handleSearch(msg: SearchMessage): Promise<void> {
     });
 
     // Extract scalars before dropping the tree reference.
-    // The MCTS tree holds hundreds of EngineState objects with BigInt bitboards —
-    // clearing the reference immediately lets GC reclaim that memory between moves.
     const { bestMove, simsDone, value } = result;
+    const searchMs = performance.now() - searchStart;
     result.rootNode.children.clear();
 
     self.postMessage({
@@ -284,6 +291,7 @@ async function handleSearch(msg: SearchMessage): Promise<void> {
       bestMove,
       simsDone,
       value,
+      searchMs,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Search failed';
@@ -299,7 +307,7 @@ async function handleSearch(msg: SearchMessage): Promise<void> {
 self.postMessage({ type: 'worker_ready' });
 
 self.onmessage = (event: MessageEvent) => {
-  const msg = event.data as LoadMessage | SearchMessage | AbortMessage;
+  const msg = event.data;
   switch (msg.type) {
     case 'load':
       handleLoad(msg);

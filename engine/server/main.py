@@ -16,7 +16,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 from contextlib import asynccontextmanager
 
 import jwt
@@ -188,11 +188,60 @@ class UserResponse(BaseModel):
     display_name: Optional[str]
     created_at: str
     last_login_at: Optional[str] = None
+    email: Optional[str] = None
+    email_verified: bool = False
+    auth_provider: str = "local"
 
 
 class AuthResponse(BaseModel):
     user: UserResponse
     message: str
+
+
+# --- Email/OAuth Auth Models ---
+
+class EmailRegisterRequest(BaseModel):
+    email: str = Field(..., min_length=5, max_length=255)
+    username: str = Field(..., min_length=3, max_length=32, pattern=r'^[a-zA-Z0-9_]+$')
+    password: str = Field(..., min_length=6, max_length=128)
+    display_name: Optional[str] = Field(None, max_length=64)
+
+
+class EmailLoginRequest(BaseModel):
+    email: str  # Can be email or username for legacy
+    password: str
+
+
+class GoogleAuthRequest(BaseModel):
+    credential: str  # Auth code, ID token, or access token
+    redirect_uri: Optional[str] = None  # Required for auth code exchange
+
+
+class GoogleAuthResponse(BaseModel):
+    status: str  # 'logged_in' or 'needs_username'
+    user: Optional[UserResponse] = None
+    temp_token: Optional[str] = None
+    email: Optional[str] = None
+    suggested_name: Optional[str] = None
+
+
+class GoogleCompleteRequest(BaseModel):
+    temp_token: str
+    username: str = Field(..., min_length=3, max_length=32, pattern=r'^[a-zA-Z0-9_]+$')
+    display_name: Optional[str] = Field(None, max_length=64)
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: str
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str
+    password: str = Field(..., min_length=6, max_length=128)
+
+
+class VerifyEmailRequest(BaseModel):
+    token: str
 
 
 # --- JWT Configuration ---
@@ -208,6 +257,33 @@ TRAINING_API_KEY = os.environ.get("TRAINING_API_KEY", "")
 
 # Allowed origins for CORS (comma-separated, or "*" for dev)
 ALLOWED_ORIGINS = os.environ.get("ALLOWED_ORIGINS", "http://localhost:5173,http://localhost:7492").split(",")
+
+
+# --- Rate Limiting ---
+
+from collections import defaultdict
+
+class RateLimiter:
+    """Simple in-memory rate limiter by IP address."""
+    def __init__(self, max_requests: int, window_seconds: int):
+        self.max_requests = max_requests
+        self.window = window_seconds
+        self._hits: dict[str, list[float]] = defaultdict(list)
+
+    def is_allowed(self, key: str) -> bool:
+        now = time.time()
+        cutoff = now - self.window
+        hits = self._hits[key]
+        # Prune old entries
+        self._hits[key] = [t for t in hits if t > cutoff]
+        if len(self._hits[key]) >= self.max_requests:
+            return False
+        self._hits[key].append(now)
+        return True
+
+# 30 requests per minute for logs, 10 per minute for feedback
+_logs_limiter = RateLimiter(max_requests=30, window_seconds=60)
+_feedback_limiter = RateLimiter(max_requests=10, window_seconds=60)
 
 
 class TrainingIterationData(BaseModel):
@@ -350,7 +426,7 @@ class LogEntry(BaseModel):
     timestamp: str
     level: str
     message: str
-    data: Optional[dict] = None
+    data: Optional[Any] = None
 
 
 class LogRequest(BaseModel):
@@ -1045,6 +1121,41 @@ async def lifespan(app: FastAPI):
     # Pre-load evaluator
     get_evaluator()
 
+    # Daily SQLite backup
+    def _run_backup():
+        """Back up the database, keeping last 7 backups."""
+        backup_dir = Path("/app/server/data/backups")
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        db_path = persistence.DEFAULT_DB_PATH
+        if db_path.exists():
+            timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+            backup_path = backup_dir / f"games_{timestamp}.db"
+            shutil.copy2(str(db_path), str(backup_path))
+            logging.info(f"Database backed up to {backup_path}")
+
+            # Keep only last 7 backups
+            backups = sorted(backup_dir.glob("games_*.db"))
+            for old in backups[:-7]:
+                old.unlink()
+                logging.info(f"Removed old backup {old}")
+
+    # Run backup on startup
+    try:
+        _run_backup()
+    except Exception as e:
+        logging.error(f"Startup database backup failed: {e}")
+
+    async def daily_backup():
+        """Back up the database every 24 hours."""
+        while True:
+            await asyncio.sleep(86400)  # 24 hours
+            try:
+                _run_backup()
+            except Exception as e:
+                logging.error(f"Database backup failed: {e}")
+
+    backup_task = asyncio.create_task(daily_backup())
+
     # Start periodic cleanup of stale in-memory games
     async def cleanup_stale_games():
         """Remove finished or abandoned games from memory every 30 minutes.
@@ -1108,6 +1219,7 @@ async def lifespan(app: FastAPI):
 
     yield
 
+    backup_task.cancel()
     cleanup_task.cancel()
     sweep_task.cancel()
     games.clear()
@@ -1259,11 +1371,157 @@ def get_client_ip(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
+# --- Google / Email Auth Configuration ---
+
+GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")
+GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
+RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
+FRONTEND_URL = os.environ.get("FRONTEND_URL", "https://knightball.org")
+
+resend_limiter = RateLimiter(max_requests=3, window_seconds=3600)  # 3/hour for resend verification
+
+
+def verify_google_token(credential: str, redirect_uri: Optional[str] = None) -> Optional[dict]:
+    """Verify a Google credential. Accepts an auth code, ID token, or access token.
+    Returns {sub, email, name} or None."""
+    import requests as req_lib
+
+    # Try as an authorization code first (starts with "4/" typically)
+    if GOOGLE_CLIENT_SECRET and redirect_uri:
+        try:
+            resp = req_lib.post(
+                "https://oauth2.googleapis.com/token",
+                data={
+                    "code": credential,
+                    "client_id": GOOGLE_CLIENT_ID,
+                    "client_secret": GOOGLE_CLIENT_SECRET,
+                    "redirect_uri": redirect_uri,
+                    "grant_type": "authorization_code",
+                },
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                tokens = resp.json()
+                access_token = tokens.get("access_token")
+                if access_token:
+                    userinfo = req_lib.get(
+                        "https://www.googleapis.com/oauth2/v3/userinfo",
+                        headers={"Authorization": f"Bearer {access_token}"},
+                        timeout=10,
+                    )
+                    if userinfo.status_code == 200:
+                        info = userinfo.json()
+                        return {
+                            "sub": info["sub"],
+                            "email": info.get("email", ""),
+                            "name": info.get("name", ""),
+                        }
+            else:
+                logger.debug(f"Google token exchange failed: {resp.status_code} {resp.text}")
+        except Exception as e:
+            logger.debug(f"Google auth code exchange failed: {e}")
+
+    # Try as an ID token
+    try:
+        from google.oauth2 import id_token as google_id_token
+        from google.auth.transport import requests as google_requests
+        idinfo = google_id_token.verify_oauth2_token(
+            credential, google_requests.Request(), GOOGLE_CLIENT_ID
+        )
+        return {
+            "sub": idinfo["sub"],
+            "email": idinfo.get("email", ""),
+            "name": idinfo.get("name", ""),
+        }
+    except Exception:
+        pass
+
+    # Try as an access token
+    try:
+        resp = req_lib.get(
+            "https://www.googleapis.com/oauth2/v3/userinfo",
+            headers={"Authorization": f"Bearer {credential}"},
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            info = resp.json()
+            return {
+                "sub": info["sub"],
+                "email": info.get("email", ""),
+                "name": info.get("name", ""),
+            }
+    except Exception as e:
+        logger.warning(f"Google token verification failed: {e}")
+    return None
+
+
+async def send_email_via_resend(to: str, subject: str, html: str) -> None:
+    """Send an email via Resend API. Fire-and-forget with logging."""
+    if not RESEND_API_KEY:
+        logger.warning(f"RESEND_API_KEY not set, skipping email to {to}: {subject}")
+        return
+    try:
+        import httpx
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                "https://api.resend.com/emails",
+                headers={"Authorization": f"Bearer {RESEND_API_KEY}"},
+                json={
+                    "from": "KnightBall <noreply@knightball.org>",
+                    "to": [to],
+                    "subject": subject,
+                    "html": html,
+                },
+                timeout=10.0,
+            )
+            if resp.status_code >= 400:
+                logger.error(f"Resend API error {resp.status_code}: {resp.text}")
+    except Exception as e:
+        logger.error(f"Failed to send email to {to}: {e}")
+
+
+def create_temp_token(google_id: str, email: str, name: str) -> str:
+    """Create a short-lived JWT for the Google username-picker flow."""
+    payload = {
+        "purpose": "google_link",
+        "google_id": google_id,
+        "email": email,
+        "name": name,
+        "exp": datetime.utcnow() + timedelta(minutes=15),
+        "iat": datetime.utcnow(),
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
+def decode_temp_token(token: str) -> Optional[dict]:
+    """Decode a temp token for Google link flow."""
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        if payload.get("purpose") != "google_link":
+            return None
+        return payload
+    except (jwt.ExpiredSignatureError, jwt.InvalidTokenError):
+        return None
+
+
+def _set_auth_cookie(response: Response, user_id: str) -> None:
+    """Set the JWT auth cookie on a response."""
+    token = create_jwt_token(user_id)
+    response.set_cookie(
+        key=AUTH_COOKIE_NAME,
+        value=token,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+        max_age=JWT_EXPIRY_HOURS * 3600,
+    )
+
+
 # --- Auth Endpoints ---
 
 @app.post("/auth/register", response_model=AuthResponse)
 async def register(request: RegisterRequest, response: Response, req: Request = None):
-    """Register a new user account."""
+    """Register a new user account (legacy username-only)."""
     if req and not auth_limiter.check(get_client_ip(req)):
         raise HTTPException(status_code=429, detail="Too many requests. Try again later.")
     user = persistence.create_user(
@@ -1275,16 +1533,7 @@ async def register(request: RegisterRequest, response: Response, req: Request = 
     if not user:
         raise HTTPException(status_code=409, detail="Username already exists")
 
-    # Create token and set cookie
-    token = create_jwt_token(user["user_id"])
-    response.set_cookie(
-        key=AUTH_COOKIE_NAME,
-        value=token,
-        httponly=True,
-        secure=True,
-        samesite="lax",
-        max_age=JWT_EXPIRY_HOURS * 3600,
-    )
+    _set_auth_cookie(response, user["user_id"])
 
     return AuthResponse(
         user=UserResponse(**user),
@@ -1294,7 +1543,7 @@ async def register(request: RegisterRequest, response: Response, req: Request = 
 
 @app.post("/auth/login", response_model=AuthResponse)
 async def login(request: LoginRequest, response: Response, req: Request = None):
-    """Login with username and password."""
+    """Login with username and password (legacy)."""
     if req and not auth_limiter.check(get_client_ip(req)):
         raise HTTPException(status_code=429, detail="Too many requests. Try again later.")
     user = persistence.authenticate_user(
@@ -1305,16 +1554,7 @@ async def login(request: LoginRequest, response: Response, req: Request = None):
     if not user:
         raise HTTPException(status_code=401, detail="Invalid username or password")
 
-    # Create token and set cookie
-    token = create_jwt_token(user["user_id"])
-    response.set_cookie(
-        key=AUTH_COOKIE_NAME,
-        value=token,
-        httponly=True,
-        secure=True,
-        samesite="lax",
-        max_age=JWT_EXPIRY_HOURS * 3600,
-    )
+    _set_auth_cookie(response, user["user_id"])
 
     return AuthResponse(
         user=UserResponse(**user),
@@ -1333,6 +1573,219 @@ async def logout(response: Response):
 async def get_me(user: dict = Depends(require_auth)):
     """Get the current authenticated user."""
     return UserResponse(**user)
+
+
+# --- Email/OAuth Auth Endpoints ---
+
+@app.post("/auth/register/email", response_model=AuthResponse)
+async def register_email(request: EmailRegisterRequest, response: Response, req: Request = None):
+    """Register with email + username + password."""
+    if req and not auth_limiter.check(get_client_ip(req)):
+        raise HTTPException(status_code=429, detail="Too many requests. Try again later.")
+
+    # Basic email validation
+    if "@" not in request.email or "." not in request.email.split("@")[-1]:
+        raise HTTPException(status_code=422, detail="Invalid email address")
+
+    user = persistence.create_user_with_email(
+        email=request.email,
+        username=request.username,
+        password=request.password,
+        display_name=request.display_name,
+    )
+
+    if not user:
+        # Check which field conflicted
+        if persistence.get_user_by_email(request.email):
+            raise HTTPException(status_code=409, detail="Email already registered")
+        raise HTTPException(status_code=409, detail="Username already exists")
+
+    _set_auth_cookie(response, user["user_id"])
+
+    # Send verification email (fire-and-forget)
+    token = persistence.create_auth_token(user["user_id"], "email_verify", expires_hours=24)
+    verify_url = f"{FRONTEND_URL}/verify-email?token={token}"
+    await send_email_via_resend(
+        to=request.email,
+        subject="Verify your KnightBall email",
+        html=f'<p>Welcome to KnightBall!</p><p><a href="{verify_url}">Click here to verify your email</a></p><p>This link expires in 24 hours.</p>',
+    )
+
+    return AuthResponse(
+        user=UserResponse(**user),
+        message="Account created. Check your email to verify."
+    )
+
+
+@app.post("/auth/login/email", response_model=AuthResponse)
+async def login_email(request: EmailLoginRequest, response: Response, req: Request = None):
+    """Login with email or username + password."""
+    if req and not auth_limiter.check(get_client_ip(req)):
+        raise HTTPException(status_code=429, detail="Too many requests. Try again later.")
+
+    user = None
+    # If input looks like an email, try email auth first
+    if "@" in request.email:
+        user = persistence.authenticate_user_by_email(request.email, request.password)
+    else:
+        # Legacy username-based login
+        user = persistence.authenticate_user(request.email, request.password)
+
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid email/username or password")
+
+    _set_auth_cookie(response, user["user_id"])
+
+    return AuthResponse(
+        user=UserResponse(**user),
+        message="Login successful"
+    )
+
+
+@app.post("/auth/google", response_model=GoogleAuthResponse)
+async def google_auth(request: GoogleAuthRequest, response: Response, req: Request = None):
+    """Authenticate with Google. Returns logged_in or needs_username."""
+    if req and not auth_limiter.check(get_client_ip(req)):
+        raise HTTPException(status_code=429, detail="Too many requests. Try again later.")
+
+    if not GOOGLE_CLIENT_ID:
+        raise HTTPException(status_code=503, detail="Google sign-in not configured")
+
+    google_info = verify_google_token(request.credential, redirect_uri=request.redirect_uri)
+    if not google_info:
+        raise HTTPException(status_code=401, detail="Invalid Google token")
+
+    google_id = google_info["sub"]
+    email = google_info["email"]
+    name = google_info["name"]
+
+    # Check if user exists by google_id
+    user = persistence.get_user_by_google_id(google_id)
+    if user:
+        # Existing Google user -> login
+        _set_auth_cookie(response, user["user_id"])
+        return GoogleAuthResponse(status="logged_in", user=UserResponse(**user))
+
+    # Check if email matches an existing user -> link account
+    if email:
+        existing = persistence.get_user_by_email(email)
+        if existing:
+            persistence.link_google_account(existing["user_id"], google_id)
+            if not existing.get("email_verified"):
+                persistence.set_email_verified(existing["user_id"])
+            # Refresh user data
+            user = persistence.get_user_by_id(existing["user_id"])
+            _set_auth_cookie(response, user["user_id"])
+            return GoogleAuthResponse(status="logged_in", user=UserResponse(**user))
+
+    # New user - needs to pick a username
+    temp_token = create_temp_token(google_id, email, name)
+    return GoogleAuthResponse(
+        status="needs_username",
+        temp_token=temp_token,
+        email=email,
+        suggested_name=name,
+    )
+
+
+@app.post("/auth/google/complete", response_model=AuthResponse)
+async def google_complete(request: GoogleCompleteRequest, response: Response, req: Request = None):
+    """Complete Google sign-up by choosing a username."""
+    if req and not auth_limiter.check(get_client_ip(req)):
+        raise HTTPException(status_code=429, detail="Too many requests. Try again later.")
+
+    payload = decode_temp_token(request.temp_token)
+    if not payload:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    user = persistence.create_user_oauth(
+        username=request.username,
+        email=payload["email"],
+        google_id=payload["google_id"],
+        display_name=request.display_name or payload.get("name"),
+    )
+
+    if not user:
+        # Check which field conflicted
+        if persistence.get_user_by_username(request.username):
+            raise HTTPException(status_code=409, detail="Username already exists")
+        if persistence.get_user_by_email(payload["email"]):
+            raise HTTPException(status_code=409, detail="Email already registered")
+        if persistence.get_user_by_google_id(payload["google_id"]):
+            raise HTTPException(status_code=409, detail="Google account already linked")
+        raise HTTPException(status_code=409, detail="Account creation failed")
+
+    _set_auth_cookie(response, user["user_id"])
+
+    return AuthResponse(
+        user=UserResponse(**user),
+        message="Account created successfully"
+    )
+
+
+@app.post("/auth/verify-email")
+async def verify_email(request: VerifyEmailRequest):
+    """Verify email address using token from email link."""
+    user_id = persistence.validate_auth_token(request.token, "email_verify")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="Invalid or expired verification link")
+
+    persistence.set_email_verified(user_id)
+    return {"message": "Email verified successfully"}
+
+
+@app.post("/auth/resend-verification")
+async def resend_verification(req: Request, user: dict = Depends(require_auth)):
+    """Resend verification email. Rate limited to 3/hour."""
+    email = user.get("email")
+    if not email:
+        raise HTTPException(status_code=400, detail="No email address on account")
+    if user.get("email_verified"):
+        raise HTTPException(status_code=400, detail="Email already verified")
+
+    if not resend_limiter.check(user["user_id"]):
+        raise HTTPException(status_code=429, detail="Too many requests. Try again in an hour.")
+
+    token = persistence.create_auth_token(user["user_id"], "email_verify", expires_hours=24)
+    verify_url = f"{FRONTEND_URL}/verify-email?token={token}"
+    await send_email_via_resend(
+        to=email,
+        subject="Verify your KnightBall email",
+        html=f'<p>Verify your email for KnightBall:</p><p><a href="{verify_url}">Click here to verify</a></p><p>This link expires in 24 hours.</p>',
+    )
+
+    return {"message": "Verification email sent"}
+
+
+@app.post("/auth/forgot-password")
+async def forgot_password(request: ForgotPasswordRequest, req: Request = None):
+    """Send password reset email. Always returns success to avoid leaking existence."""
+    if req and not auth_limiter.check(get_client_ip(req)):
+        raise HTTPException(status_code=429, detail="Too many requests. Try again later.")
+
+    user = persistence.get_user_by_email(request.email)
+    if user:
+        token = persistence.create_auth_token(user["user_id"], "password_reset", expires_hours=1)
+        reset_url = f"{FRONTEND_URL}/reset-password?token={token}"
+        await send_email_via_resend(
+            to=request.email,
+            subject="Reset your KnightBall password",
+            html=f'<p>Reset your password:</p><p><a href="{reset_url}">Click here to reset your password</a></p><p>This link expires in 1 hour. If you didn\'t request this, ignore this email.</p>',
+        )
+
+    # Always return success
+    return {"message": "If an account exists with that email, a reset link has been sent."}
+
+
+@app.post("/auth/reset-password")
+async def reset_password(request: ResetPasswordRequest):
+    """Reset password using token from email link."""
+    user_id = persistence.validate_auth_token(request.token, "password_reset")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="Invalid or expired reset link")
+
+    persistence.update_password(user_id, request.password)
+    return {"message": "Password updated successfully"}
 
 
 # --- REST Endpoints ---
@@ -1708,7 +2161,8 @@ async def submit_training_game(request: SubmitGameRequest, _=Depends(require_tra
 async def fetch_training_games(
     status: str = "pending",
     limit: int = 100,
-    mark_used: bool = True
+    mark_used: bool = True,
+    _=Depends(require_training_key),
 ):
     """
     Fetch training games for the trainer.
@@ -1750,6 +2204,7 @@ async def fetch_training_games(
 async def get_all_training_games(
     limit: int = 500,
     offset: int = 0,
+    _=Depends(require_training_key),
 ):
     """
     Fetch all training games for analysis (both pending and used).
@@ -1860,7 +2315,7 @@ async def upload_training_model(
 
 
 @app.get("/training/models/{version}/download")
-async def download_training_model(version: str):
+async def download_training_model(version: str, _=Depends(require_training_key)):
     """Download a specific training model file."""
     model = persistence.get_training_model_by_version(version)
 
@@ -1879,8 +2334,14 @@ async def download_training_model(version: str):
 
 
 @app.get("/training/dashboard", response_model=TrainingDashboardResponse)
-async def get_training_dashboard():
-    """Get enhanced training status for the dashboard."""
+async def get_training_dashboard(
+    request: Request,
+    auth_cookie: Optional[str] = Cookie(None, alias=AUTH_COOKIE_NAME),
+):
+    """Get enhanced training status for the dashboard. Requires login."""
+    user = await get_current_user(request, auth_cookie)
+    if not user:
+        raise HTTPException(status_code=401, detail="Login required")
     stats = persistence.get_training_games_stats()
     models = persistence.list_training_models(limit=10)
     latest = persistence.get_latest_training_model()
@@ -2111,8 +2572,11 @@ client_logger.addHandler(client_log_handler)
 
 
 @app.post("/logs")
-async def receive_logs(request: LogRequest):
+async def receive_logs(request: LogRequest, http_request: Request):
     """Receive logs from the client."""
+    client_ip = http_request.client.host if http_request.client else "unknown"
+    if not _logs_limiter.is_allowed(client_ip):
+        raise HTTPException(status_code=429, detail="Too many requests")
     session_id = request.session_id or "unknown"
     for entry in request.entries:
         log_line = f"[{entry.timestamp}] [{session_id}] [{entry.level.upper()}] {entry.message}"
@@ -2139,6 +2603,9 @@ async def submit_bug_report(
     auth_cookie: Optional[str] = Cookie(None, alias=AUTH_COOKIE_NAME),
 ):
     """Submit a bug report with optional game context."""
+    client_ip = request.client.host if request.client else "unknown"
+    if not _feedback_limiter.is_allowed(client_ip):
+        raise HTTPException(status_code=429, detail="Too many requests")
     import json as _json
     user = await get_current_user(request, auth_cookie)
     user_id = user["user_id"] if user else None
@@ -2339,18 +2806,9 @@ async def get_ai_move(
     game_id: str,
     request: AIMoveRequest = None,
     auth_request: Request = None,
-    auth_cookie: Optional[str] = Cookie(None, alias=AUTH_COOKIE_NAME)
+    auth_cookie: Optional[str] = Cookie(None, alias=AUTH_COOKIE_NAME),
 ):
-    """Get AI to calculate and play a move.
-
-    Bot types:
-    - "neural": Uses trained neural network (strongest if trained well)
-    - "mcts": Pure MCTS with uniform priors (good baseline for testing)
-    - "random": Random legal moves (weakest)
-
-    If the game has time control enabled and use_time_control is True,
-    the AI will dynamically allocate simulations based on position difficulty.
-    """
+    """Get AI to calculate and play a move."""
     if request is None:
         request = AIMoveRequest()
 
@@ -2652,6 +3110,7 @@ class CreateOnlineGameRequest(BaseModel):
 class OnlineOpponentInfo(BaseModel):
     user_id: str
     display_name: Optional[str]
+    username: Optional[str] = None
     elo_rating: Optional[float] = None
 
 
@@ -2698,6 +3157,7 @@ class OnlineGameSummary(BaseModel):
     is_your_turn: bool
     ply: int
     opponent_name: Optional[str] = None
+    opponent_username: Optional[str] = None
     created_at: str
     updated_at: str
     game_mode: str = "realtime"
@@ -2713,6 +3173,7 @@ class PublicGameSummary(BaseModel):
     game_id: str
     join_code: str
     host_display_name: Optional[str]
+    host_username: Optional[str] = None
     game_mode: str
     time_control: Optional[float]
     increment: int
@@ -2861,6 +3322,7 @@ async def quick_match(
                 await broadcast_online_event(g, "player_joined", {
                     "user_id": user["user_id"],
                     "display_name": user.get("display_name") or user.get("username"),
+                    "username": user.get("username"),
                     "color": result["your_color"],
                 })
 
@@ -3713,6 +4175,7 @@ class PlayerData(BaseModel):
     player_id: str
     player_type: str  # 'human' or 'ai'
     user_id: Optional[str] = None
+    username: Optional[str] = None  # username for human players
     model_version: Optional[str] = None
     simulations: Optional[int] = None
     display_name: str

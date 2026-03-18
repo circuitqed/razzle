@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>WebGL MCTS Comparison Test</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+body { font-family: monospace; padding: 10px; background: #111; color: #ddd; font-size: 12px; }
+.pass { color: #4f4; } .fail { color: #f44; } .warn { color: #ff4; }
+.info { color: #8af; } .dim { color: #888; }
+pre { white-space: pre-wrap; word-wrap: break-word; }
+.summary { font-size: 14px; padding: 8px; margin: 8px 0; border: 2px solid; }
+.summary.pass { border-color: #4f4; } .summary.fail { border-color: #f44; }
+</style>
+</head>
+<body>
+<h2>WebGL MCTS Search Comparison</h2>
+<p style="color:#888">Runs full MCTS search (64 sims) with CPU and GPU evaluators. Compares best move, visit counts, and values.</p>
+<pre id="log"><div>Loading test script...</div></pre>
+<div id="result" data-status="running"></div>
+<script>
+window.onerror = function(msg, url, line) {
+  document.getElementById('log').textContent += '\nERROR: ' + msg + ' at ' + url + ':' + line;
+  // Send to server
+  fetch('/api/logs', {method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({session_id:'mcts-test',entries:[{timestamp:new Date().toISOString(),level:'error',message:'[mcts-test] '+msg,data:{url:url,line:line}}]})
+  }).catch(function(){});
+};
+</script>
+<script type="module" src="/src/test-webgl-entry.ts"></script>
+</body>
+</html>

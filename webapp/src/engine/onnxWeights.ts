@@ -53,7 +53,9 @@ function readTag(buf: Uint8Array, pos: number): [fieldNumber: number, wireType: 
 }
 
 function readLengthDelimited(buf: Uint8Array, pos: number): [data: Uint8Array, newPos: number] {
-  const [len, p] = readVarint(buf, pos);
+  // Use readVarint64 (multiplication-based) to correctly handle large lengths
+  // on all platforms — readVarint uses bitwise ops that overflow for lengths > 256MB
+  const [len, p] = readVarint64(buf, pos);
   return [buf.subarray(p, p + len), p + len];
 }
 
@@ -66,7 +68,7 @@ function skipField(buf: Uint8Array, pos: number, wireType: number): number {
     }
     case 1: return pos + 8; // 64-bit
     case 2: { // length-delimited
-      const [len, p] = readVarint(buf, pos);
+      const [len, p] = readVarint64(buf, pos);
       return p + len;
     }
     case 5: return pos + 4; // 32-bit
@@ -76,17 +78,29 @@ function skipField(buf: Uint8Array, pos: number, wireType: number): number {
 
 // --- TensorProto parser ---
 
-function parseTensorProto(buf: Uint8Array): WeightTensor | null {
+interface TensorDebug {
+  name: string;
+  dataType: number;
+  dims: number[];
+  bufLen: number;
+  fieldsSeen: number[];
+  rawLen: number;
+  floatLen: number;
+}
+
+function parseTensorProto(buf: Uint8Array): WeightTensor | TensorDebug {
   let pos = 0;
   let name = '';
   const dims: number[] = [];
   let dataType = 0;
   let rawData: Uint8Array | null = null;
   let floatData: Float32Array | null = null;
+  const fieldsSeen: number[] = [];
 
   while (pos < buf.length) {
     const [fieldNumber, wireType, tagEnd] = readTag(buf, pos);
     pos = tagEnd;
+    fieldsSeen.push(fieldNumber);
 
     switch (fieldNumber) {
       case 1: // dims (repeated int64)
@@ -134,6 +148,7 @@ function parseTensorProto(buf: Uint8Array): WeightTensor | null {
         break;
       }
 
+      case 9:   // raw_data variant used by PyTorch ONNX export (opset 17+)
       case 13: { // raw_data (bytes)
         const [raw, rEnd] = readLengthDelimited(buf, pos);
         pos = rEnd;
@@ -146,8 +161,18 @@ function parseTensorProto(buf: Uint8Array): WeightTensor | null {
     }
   }
 
-  // Only handle float32 tensors (data_type 1)
-  if (dataType !== 1) return null;
+  // Return debug info for non-float32 tensors or failed parses
+  if (dataType !== 1 || (!rawData && !floatData)) {
+    return {
+      name,
+      dataType,
+      dims,
+      bufLen: buf.length,
+      fieldsSeen: fieldsSeen.slice(0, 20), // first 20 field numbers seen
+      rawLen: rawData?.length ?? -1,
+      floatLen: floatData?.length ?? -1,
+    };
+  }
 
   let data: Float32Array;
   if (rawData) {
@@ -155,13 +180,15 @@ function parseTensorProto(buf: Uint8Array): WeightTensor | null {
     const aligned = new Uint8Array(rawData.length);
     aligned.set(rawData);
     data = new Float32Array(aligned.buffer, 0, rawData.length / 4);
-  } else if (floatData) {
-    data = floatData;
   } else {
-    return null;
+    data = floatData!;
   }
 
   return { name, shape: dims, data };
+}
+
+function isTensor(t: WeightTensor | TensorDebug): t is WeightTensor {
+  return 'shape' in t && 'data' in t;
 }
 
 // --- ModelProto / GraphProto parser ---
@@ -191,19 +218,33 @@ export function parseOnnxWeights(buffer: ArrayBuffer): WeightTensor[] {
 
   // Parse GraphProto — find field 5 (repeated initializer)
   const tensors: WeightTensor[] = [];
+  let initCount = 0;
+  let firstFail: TensorDebug | null = null;
   pos = 0;
   while (pos < graphBytes.length) {
     const [fieldNumber, wireType, tagEnd] = readTag(graphBytes, pos);
     pos = tagEnd;
     if (fieldNumber === 5 && wireType === 2) {
+      initCount++;
       const [data, end] = readLengthDelimited(graphBytes, pos);
       pos = end;
-      const tensor = parseTensorProto(data);
-      if (tensor) tensors.push(tensor);
+      const result = parseTensorProto(data);
+      if (isTensor(result)) {
+        tensors.push(result);
+      } else if (!firstFail) {
+        firstFail = result;
+      }
     } else {
       pos = skipField(graphBytes, pos, wireType);
     }
   }
 
+  if (tensors.length === 0) {
+    throw new Error(
+      `ONNX parse failed: 0 tensors from ${initCount} initializers. ` +
+      `bufSize=${buf.length} graphSize=${graphBytes.length} ` +
+      `firstFail=${JSON.stringify(firstFail)}`
+    );
+  }
   return tensors;
 }

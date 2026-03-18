@@ -1,28 +1,40 @@
-import { Component, useEffect, useState, useCallback, useMemo, useRef } from 'react';
+import { Component, Suspense, lazy, useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import type { ReactNode, ErrorInfo } from 'react';
 import { BrowserRouter, Routes, Route, useParams, useNavigate, useLocation } from 'react-router-dom';
+import { GoogleOAuthProvider } from '@react-oauth/google';
 import BugReportDialog from './components/BugReportDialog';
 import ConfirmDialog from './components/ConfirmDialog';
 import GameView from './components/GameView';
 import RulesModal from './components/RulesModal';
-import TrainingDashboard from './components/TrainingDashboard';
 import LoginModal from './components/LoginModal';
 import RegisterModal from './components/RegisterModal';
+import ForgotPasswordModal from './components/ForgotPasswordModal';
+import UsernamePickerModal from './components/UsernamePickerModal';
+import EmailVerificationBanner from './components/EmailVerificationBanner';
+import VerifyEmailPage from './components/VerifyEmailPage';
+import ResetPasswordPage from './components/ResetPasswordPage';
+import GoogleCallbackPage from './components/GoogleCallbackPage';
 import UserMenu from './components/UserMenu';
 import GameBrowser from './components/GameBrowser';
 import ReplayViewer from './components/ReplayViewer';
-import AnalysisBoard from './components/AnalysisBoard';
 import OpeningExplorer from './components/OpeningExplorer';
 import WaitingForOpponent from './components/WaitingForOpponent';
 import OnlineGame from './components/OnlineGame';
 import { TermsPage, PrivacyPage } from './components/LegalPages';
 import NewGameDialog from './components/NewGameDialog';
 import type { NewGameSettings } from './components/NewGameDialog';
+import { BOT_PRESETS } from './components/NewGameDialog';
 import { useGame } from './hooks/useGame';
 import { setSoundEnabled, isSoundEnabled } from './utils/sounds';
 import { listModels, type ModelInfo } from './api/engine';
 import * as onlineApi from './api/online';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
+
+// Lazy-loaded heavy routes
+const TrainingDashboard = lazy(() => import('./components/TrainingDashboard'));
+const AnalysisBoard = lazy(() => import('./components/AnalysisBoard'));
+
+const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID || '';
 
 const GAME_STORAGE_KEY = 'knightball_current_game';
 
@@ -45,6 +57,7 @@ function AppContent() {
       model: undefined,
       simulations: 256,
       colorChoice: 'random',
+      difficulty: 'medium',
     }
   );
   const [playerColor, setPlayerColor] = useState(savedGame?.playerColor ?? 0);
@@ -63,6 +76,11 @@ function AppContent() {
   // Auth modals
   const [showLoginModal, setShowLoginModal] = useState(false);
   const [showRegisterModal, setShowRegisterModal] = useState(false);
+  const [showForgotPassword, setShowForgotPassword] = useState(false);
+  const [usernamePickerData, setUsernamePickerData] = useState<{
+    tempToken: string;
+    suggestedName: string;
+  } | null>(null);
 
   // Game browser and replay
   const [showGameBrowser, setShowGameBrowser] = useState(false);
@@ -231,25 +249,30 @@ function AppContent() {
   // Player names
   const playerName = useMemo(() => {
     if (settings.mode === 'ai') {
-      return user?.display_name || user?.username || 'You';
+      return user?.username || user?.display_name || 'You';
     }
     return 'Blue';
   }, [settings.mode, user]);
 
   const opponentName = useMemo(() => {
     if (settings.mode === 'ai') {
+      // Use friendly difficulty name if available
+      if (settings.difficulty && settings.difficulty !== 'custom') {
+        const preset = BOT_PRESETS.find(p => p.id === settings.difficulty);
+        if (preset) return `AI (${preset.name})`;
+      }
+      // Custom mode: show model + sims
       let modelName: string;
       if (settings.model) {
         modelName = settings.model.split('/').pop()?.replace('.pt', '') || 'AI';
       } else {
-        // Resolve "latest" to the actual model name from available models
         const latest = availableModels.find(m => m.name !== 'random_weights');
         modelName = latest ? latest.name.replace('.pt', '') : 'AI';
       }
       return `${modelName} - ${settings.simulations} sims`;
     }
     return 'Red';
-  }, [settings.mode, settings.model, settings.simulations, availableModels]);
+  }, [settings.mode, settings.model, settings.simulations, settings.difficulty, availableModels]);
 
   // Labels positioned relative to board orientation
   // In AI mode, human is always at the bottom (shouldFlipBoard ensures this)
@@ -422,18 +445,14 @@ function AppContent() {
 
   return (
     <div className="h-[100dvh] bg-gray-900 text-white flex flex-col overflow-hidden">
+      {/* Email verification banner */}
+      <EmailVerificationBanner />
+
       {/* Header bar */}
       <header className="flex items-center justify-between px-4 py-2 shrink-0">
         <div className="w-20" /> {/* Spacer for balance */}
         <h1 className="text-xl sm:text-2xl font-bold">KnightBall</h1>
         <div className="flex items-center gap-2">
-          <a
-            href="/openings"
-            className="p-1.5 text-gray-400 hover:text-white transition-colors"
-            title="Opening explorer"
-          >
-{'\u{1F4D6}'}
-          </a>
           <button
             onClick={() => setShowGameBrowser(true)}
             className="p-1.5 text-gray-400 hover:text-white transition-colors"
@@ -633,6 +652,10 @@ function AppContent() {
           setShowLoginModal(false);
           setShowRegisterModal(true);
         }}
+        onForgotPassword={() => {
+          setShowLoginModal(false);
+          setShowForgotPassword(true);
+        }}
       />
       <RegisterModal
         isOpen={showRegisterModal}
@@ -641,6 +664,20 @@ function AppContent() {
           setShowRegisterModal(false);
           setShowLoginModal(true);
         }}
+      />
+      <ForgotPasswordModal
+        isOpen={showForgotPassword}
+        onClose={() => setShowForgotPassword(false)}
+        onSwitchToLogin={() => {
+          setShowForgotPassword(false);
+          setShowLoginModal(true);
+        }}
+      />
+      <UsernamePickerModal
+        isOpen={!!usernamePickerData}
+        onClose={() => setUsernamePickerData(null)}
+        tempToken={usernamePickerData?.tempToken || ''}
+        suggestedName={usernamePickerData?.suggestedName || ''}
       />
 
       {/* Game Browser */}
@@ -684,8 +721,38 @@ function AppContent() {
   );
 }
 
-// Standalone Training Dashboard page for /dashboard route
+// 404 page
+function NotFoundPage() {
+  const navigate = useNavigate();
+  return (
+    <div className="min-h-screen bg-gray-900 flex flex-col items-center justify-center text-white">
+      <h1 className="text-6xl font-bold mb-4">404</h1>
+      <p className="text-gray-400 mb-6">Page not found</p>
+      <button
+        onClick={() => navigate('/')}
+        className="px-6 py-2 bg-blue-600 hover:bg-blue-700 rounded font-medium transition-colors"
+      >
+        Go Home
+      </button>
+    </div>
+  );
+}
+
+// Standalone Training Dashboard page for /dashboard route (requires login)
 function TrainingDashboardPage() {
+  const { isAuthenticated, isLoading } = useAuth();
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    if (!isLoading && !isAuthenticated) {
+      navigate('/');
+    }
+  }, [isAuthenticated, isLoading, navigate]);
+
+  if (isLoading || !isAuthenticated) {
+    return <div className="min-h-screen bg-gray-900 flex items-center justify-center text-gray-400">Loading...</div>;
+  }
+
   return (
     <TrainingDashboard refreshInterval={10000} />
   );
@@ -799,19 +866,27 @@ function AppContentWrapper() {
 export default function App() {
   return (
     <ErrorBoundary>
-      <BrowserRouter>
-        <AuthProvider>
-          <Routes>
-            <Route path="/" element={<AppContentWrapper />} />
-            <Route path="/openings" element={<OpeningExplorer />} />
-            <Route path="/dashboard" element={<TrainingDashboardPage />} />
-            <Route path="/online/:gameId" element={<OnlineGamePage />} />
-            <Route path="/join/:code" element={<JoinGamePage />} />
-            <Route path="/terms" element={<TermsPage />} />
-            <Route path="/privacy" element={<PrivacyPage />} />
-          </Routes>
-        </AuthProvider>
-      </BrowserRouter>
+      <GoogleOAuthProvider clientId={GOOGLE_CLIENT_ID}>
+        <BrowserRouter>
+          <AuthProvider>
+            <Suspense fallback={<div className="min-h-screen bg-gray-900 flex items-center justify-center text-gray-400">Loading...</div>}>
+              <Routes>
+                <Route path="/" element={<AppContentWrapper />} />
+                <Route path="/openings" element={<OpeningExplorer />} />
+                <Route path="/dashboard" element={<TrainingDashboardPage />} />
+                <Route path="/online/:gameId" element={<OnlineGamePage />} />
+                <Route path="/join/:code" element={<JoinGamePage />} />
+                <Route path="/auth/google/callback" element={<GoogleCallbackPage />} />
+                <Route path="/verify-email" element={<VerifyEmailPage />} />
+                <Route path="/reset-password" element={<ResetPasswordPage />} />
+                <Route path="/terms" element={<TermsPage />} />
+                <Route path="/privacy" element={<PrivacyPage />} />
+                <Route path="*" element={<NotFoundPage />} />
+              </Routes>
+            </Suspense>
+          </AuthProvider>
+        </BrowserRouter>
+      </GoogleOAuthProvider>
     </ErrorBoundary>
   );
 }

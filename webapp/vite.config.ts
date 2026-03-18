@@ -1,8 +1,17 @@
 import { defineConfig } from 'vite'
+import { resolve } from 'path'
 import react from '@vitejs/plugin-react'
 import { viteStaticCopy } from 'vite-plugin-static-copy'
 
 export default defineConfig({
+  build: {
+    rollupOptions: {
+      input: {
+        index: resolve(__dirname, 'index.html'),
+        'test-mcts': resolve(__dirname, 'test-mcts.html'),
+      },
+    },
+  },
   plugins: [
     react(),
     viteStaticCopy({

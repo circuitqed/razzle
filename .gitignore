@@ -90,3 +90,4 @@ engine/*.png
 
 # Engine data (generated)
 engine/data/
+webapp/src/engine/__tests__/inference-fixtures-large.json

@@ -28,8 +28,9 @@ import type { EngineState } from './state';
  *
  * Returns Float32Array of length 392 (7 * 8 * 7) in CHW order.
  */
-export function stateToTensor(state: EngineState): Float32Array {
-  const data = new Float32Array(7 * ROWS * COLS);
+export function stateToTensor(state: EngineState, out?: Float32Array): Float32Array {
+  const data = out ?? new Float32Array(7 * ROWS * COLS);
+  if (out) data.fill(0);
   const p = state.currentPlayer;
   const opp = 1 - p;
 
