@@ -7,7 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from fastapi.testclient import TestClient
-from server.main import app, games
+from server.main import app, games, require_admin_for_ai
 from razzle.ai.network import NUM_ACTIONS
 
 
@@ -15,8 +15,11 @@ from razzle.ai.network import NUM_ACTIONS
 def clear_games():
     """Clear games before each test."""
     games.clear()
+    # Override admin AI gate so tests can call the AI endpoint
+    app.dependency_overrides[require_admin_for_ai] = lambda: None
     yield
     games.clear()
+    app.dependency_overrides.pop(require_admin_for_ai, None)
 
 
 @pytest.fixture
