@@ -17,6 +17,8 @@ import type { GPUForwardPass } from './webglForwardPass';
 
 export interface Evaluator {
   evaluate(state: EngineState): Promise<{ policy: Float32Array; value: number }>;
+  /** Optional batch evaluation — processes multiple states in a single GPU call. */
+  evaluateBatch?(states: EngineState[]): Promise<Array<{ policy: Float32Array; value: number }>>;
 }
 
 /**
@@ -201,6 +203,40 @@ export class GPUEvaluator implements Evaluator {
     }
 
     return { policy, value };
+  }
+
+  /**
+   * Batch evaluation: run N forward passes in a single GPU submission.
+   * All N inputs are stacked into one wide texture, processed together,
+   * and read back with just 2 readPixels calls total.
+   */
+  async evaluateBatch(
+    states: EngineState[],
+  ): Promise<Array<{ policy: Float32Array; value: number }>> {
+    if (states.length === 0) return [];
+
+    // Convert states to tensors
+    const tensors = states.map(s => {
+      const buf = new Float32Array(7 * 8 * 7);
+      stateToTensor(s, buf);
+      return buf;
+    });
+
+    // Batched GPU forward pass
+    const gpuResults = this.model.forwardBatch(tensors);
+
+    // Post-process: exp + rotation
+    return gpuResults.map((r, i) => {
+      const policy = new Float32Array(NUM_ACTIONS);
+      for (let j = 0; j < NUM_ACTIONS; j++) {
+        policy[j] = Math.exp(r.policy[j]);
+      }
+      if (states[i].currentPlayer === 1) {
+        const rotated = rotatePolicy180(policy);
+        policy.set(rotated);
+      }
+      return { policy, value: r.value };
+    });
   }
 
   dispose(): void {

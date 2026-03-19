@@ -26,6 +26,10 @@ export interface MCTSConfig {
   checkEarlyStopInterval: number;
   passQuiescence: boolean;
   passQuiescenceMaxDepth: number;
+  /** Batch size for parallel leaf collection with virtual loss. 0 = auto (~5% of numSimulations). */
+  batchSize: number;
+  /** Virtual loss applied during batched selection to encourage exploration diversity. */
+  virtualLoss: number;
 }
 
 export const DEFAULT_CONFIG: MCTSConfig = {
@@ -38,13 +42,23 @@ export const DEFAULT_CONFIG: MCTSConfig = {
   checkEarlyStopInterval: 50,
   passQuiescence: true,
   passQuiescenceMaxDepth: 10,
+  batchSize: 0,
+  virtualLoss: 3,
 };
+
+function autoBatchSize(numSims: number): number {
+  const target = numSims * 0.05;
+  if (target <= 4) return 1; // disable batching for very low sim counts
+  if (target <= 8) return 8;
+  return 1 << Math.floor(Math.log2(target));
+}
 
 export interface MCTSNode {
   state: EngineState;
   prior: number;
   visitCount: number;
   valueSum: number;
+  virtualLoss: number;
   children: Map<number, MCTSNode>;
   isExpanded: boolean;
 }
@@ -55,6 +69,7 @@ function createNode(state: EngineState, prior: number = 0): MCTSNode {
     prior,
     visitCount: 0,
     valueSum: 0,
+    virtualLoss: 0,
     children: new Map(),
     isExpanded: false,
   };
@@ -71,11 +86,13 @@ function ucbScore(
   parentPlayer: number,
   cPuct: number,
 ): number {
+  // Use adjusted visit counts (includes virtual loss) for exploration diversity
+  const adjustedChildVisits = child.visitCount + child.virtualLoss;
   const exploration =
     cPuct *
     child.prior *
     Math.sqrt(parentVisits) /
-    (1 + child.visitCount);
+    (1 + adjustedChildVisits);
   const q = nodeValue(child);
   if (child.state.currentPlayer !== parentPlayer) {
     return -q + exploration;
@@ -91,9 +108,10 @@ function selectChild(
   let bestAction = -1;
   let bestChild: MCTSNode | null = null;
   const parentPlayer = node.state.currentPlayer;
+  const adjustedParentVisits = node.visitCount + node.virtualLoss;
 
   for (const [action, child] of node.children) {
-    const score = ucbScore(child, node.visitCount, parentPlayer, cPuct);
+    const score = ucbScore(child, adjustedParentVisits, parentPlayer, cPuct);
     if (score > bestScore) {
       bestScore = score;
       bestAction = action;
@@ -198,15 +216,25 @@ export async function search(
 
   let simsDone = 0;
   const progressInterval = 50;
+  const batchSize = cfg.batchSize > 0 ? cfg.batchSize : autoBatchSize(cfg.numSimulations);
 
-  for (let i = 0; i < cfg.numSimulations; i++) {
+  while (simsDone < cfg.numSimulations) {
     if (abortSignal?.aborted) break;
 
-    await simulate(root, evaluator, cfg);
-    simsDone++;
+    const currentBatch = Math.min(batchSize, cfg.numSimulations - simsDone);
+
+    if (currentBatch <= 1) {
+      // Single simulation (no batching overhead)
+      await simulate(root, evaluator, cfg);
+      simsDone++;
+    } else {
+      // Batched: collect multiple leaves with virtual loss, evaluate together
+      await simulateBatch(root, evaluator, cfg, currentBatch);
+      simsDone += currentBatch;
+    }
 
     // Report progress periodically
-    if (onProgress && simsDone % progressInterval === 0) {
+    if (onProgress && simsDone % progressInterval < currentBatch) {
       const best = getBestMoveFromRoot(root);
       onProgress({
         simsDone,
@@ -220,7 +248,7 @@ export async function search(
     if (
       cfg.earlyTermination &&
       simsDone >= cfg.minSimsForEarlyStop &&
-      simsDone % cfg.checkEarlyStopInterval === 0
+      simsDone % cfg.checkEarlyStopInterval < currentBatch
     ) {
       if (shouldStopEarly(root, cfg)) break;
     }
@@ -298,6 +326,99 @@ async function simulate(
       n.valueSum += value;
     } else {
       n.valueSum -= value;
+    }
+  }
+}
+
+/**
+ * Batched simulation: collect multiple leaves with virtual loss, evaluate
+ * them together, then expand and backup. Mirrors the Python MCTS batching.
+ */
+async function simulateBatch(
+  root: MCTSNode,
+  evaluator: Evaluator,
+  cfg: MCTSConfig,
+  batchSize: number,
+): Promise<void> {
+  // Phase 1: SELECT — collect leaves with virtual loss
+  const paths: MCTSNode[][] = [];
+  const leaves: MCTSNode[] = [];
+  const leafPlayers: number[] = [];
+  const terminalBackups: Array<{ path: MCTSNode[]; value: number; leafPlayer: number }> = [];
+
+  for (let i = 0; i < batchSize; i++) {
+    let node = root;
+    const path: MCTSNode[] = [node];
+
+    // Traverse tree, applying virtual loss to encourage diverse exploration
+    while (node.isExpanded && node.children.size > 0) {
+      if (isTerminal(node.state)) break;
+      node.virtualLoss += cfg.virtualLoss;
+      [, node] = selectChild(node, cfg.cPuct);
+      path.push(node);
+    }
+
+    node.virtualLoss += cfg.virtualLoss;
+
+    if (isTerminal(node.state)) {
+      const leafPlayer = node.state.currentPlayer;
+      const result = getResult(node.state, leafPlayer);
+      const value = 2 * result - 1;
+      terminalBackups.push({ path, value, leafPlayer });
+    } else {
+      paths.push(path);
+      leaves.push(node);
+      leafPlayers.push(node.state.currentPlayer);
+    }
+  }
+
+  // Phase 2: EVALUATE — all non-terminal leaves (batched if supported)
+  if (leaves.length > 0) {
+    const results = evaluator.evaluateBatch
+      ? await evaluator.evaluateBatch(leaves.map(l => l.state))
+      : await Promise.all(leaves.map(l => evaluator.evaluate(l.state)));
+
+    // Phase 3: EXPAND and BACKUP
+    for (let i = 0; i < leaves.length; i++) {
+      const leaf = leaves[i];
+      const { policy, value: evalValue } = results[i];
+      const path = paths[i];
+      const leafPlayer = leafPlayers[i];
+
+      // Expand
+      if (!leaf.isExpanded) {
+        expandNode(leaf, policy);
+      }
+
+      // Pass quiescence
+      let value = evalValue;
+      if (cfg.passQuiescence && leaf.state.hasPassed) {
+        value = await quiescenceSearch(leaf, evaluator, cfg, 0);
+      }
+
+      // Backup: propagate value, remove virtual loss
+      for (const n of path) {
+        n.visitCount++;
+        n.virtualLoss -= cfg.virtualLoss;
+        if (n.state.currentPlayer === leafPlayer) {
+          n.valueSum += value;
+        } else {
+          n.valueSum -= value;
+        }
+      }
+    }
+  }
+
+  // Phase 4: BACKUP terminal paths
+  for (const { path, value, leafPlayer } of terminalBackups) {
+    for (const n of path) {
+      n.visitCount++;
+      n.virtualLoss -= cfg.virtualLoss;
+      if (n.state.currentPlayer === leafPlayer) {
+        n.valueSum += value;
+      } else {
+        n.valueSum -= value;
+      }
     }
   }
 }
