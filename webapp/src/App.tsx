@@ -36,23 +36,6 @@ const AnalysisBoard = lazy(() => import('./components/AnalysisBoard'));
 const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID || '';
 
 const GAME_STORAGE_KEY = 'knightball_current_game';
-const COOKIE_CONSENT_KEY = 'knightball_cookie_consent';
-
-function CookieBanner() {
-  const [dismissed, setDismissed] = useState(() => localStorage.getItem(COOKIE_CONSENT_KEY) === '1');
-  if (dismissed) return null;
-  return (
-    <div className="fixed bottom-0 left-0 right-0 bg-gray-800 text-gray-300 text-sm px-4 py-2 flex items-center justify-center gap-3 z-50">
-      <span>This site uses cookies for authentication.</span>
-      <button
-        onClick={() => { localStorage.setItem(COOKIE_CONSENT_KEY, '1'); setDismissed(true); }}
-        className="px-3 py-1 bg-gray-600 hover:bg-gray-500 text-white rounded text-sm transition-colors"
-      >
-        Got it
-      </button>
-    </div>
-  );
-}
 
 function readSavedGame(): { gameId: string; settings: NewGameSettings; playerColor: number } | null {
   try {
@@ -719,7 +702,6 @@ function AppContent() {
       )}
 
       {/* Cookie consent banner */}
-      <CookieBanner />
     </div>
   );
 }

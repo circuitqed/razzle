@@ -70,7 +70,7 @@
 
 - [x] Terms of service page
 - [x] Privacy policy page
-- [ ] Cookie notice (auth uses cookies)
+- [x] ~~Cookie notice~~ — removed, auth cookies don't need consent banners
 - [x] Links to legal pages from footer/registration
 
 ## Infrastructure
