@@ -64,37 +64,37 @@
 
 ## Security & Config (Must Fix)
 
-- [ ] Set `JWT_SECRET` to a persistent secret in production env
-- [ ] Set `ALLOWED_ORIGINS` to the production domain
-- [ ] Protect training data endpoints with auth
-  - [ ] `GET /training/games`, `/training/games/all`
-  - [ ] `GET /training/models/{ver}/download`
-- [ ] Rate-limit `POST /api/logs` and `POST /api/feedback`
-- [ ] Guard or remove `/dashboard` route from public access
+- [x] Set `JWT_SECRET` to a persistent secret in production env
+- [x] Set `ALLOWED_ORIGINS` to the production domain
+- [x] Protect training data endpoints with auth
+  - [x] `GET /training/games`, `/training/games/all`
+  - [x] `GET /training/models/{ver}/download`
+- [x] Rate-limit `POST /api/logs` and `POST /api/feedback`
+- [x] Guard or remove `/dashboard` route from public access
 
 ## Legal
 
-- [ ] Terms of service page
-- [ ] Privacy policy page
+- [x] Terms of service page
+- [x] Privacy policy page
 - [ ] Cookie notice (auth uses cookies)
-- [ ] Links to legal pages from footer/registration
+- [x] Links to legal pages from footer/registration
 
 ## Infrastructure
 
-- [ ] Database backups — automated backup strategy for SQLite volume
+- [x] Database backups — automated backup strategy for SQLite volume
 - [ ] Monitoring / alerting — know when the server goes down
 - [ ] Error tracking (Sentry or similar) — catch client-side crashes in production
 - [ ] Analytics — basic usage stats (games per day, active users, retention)
 - [ ] Load testing — how many concurrent WebSocket games can the server handle?
 - [ ] Disable server-side AI endpoints (`POST /games/{id}/ai`)
   - [ ] Remove or gate behind admin flag — too expensive for a single server
-  - [ ] All AI already runs client-side (ONNX + MCTS in Web Worker)
-- [ ] PWA support + offline AI play
-  - [ ] Web app manifest (`manifest.json`) — name, icons, theme color, display: standalone
-  - [ ] Service worker for offline caching (static assets, WASM files)
-  - [ ] "Add to Home Screen" prompt / install button
-  - [ ] ONNX model already cached in IndexedDB after first download
-  - [ ] Verify full offline play works: TS engine + ONNX model + MCTS all run in browser
+  - [x] All AI runs client-side (desktop: ONNX Runtime WebGPU/WASM; iOS: custom WebGL2 GPU shaders)
+- [x] PWA support + offline AI play
+  - [x] Web app manifest (`manifest.json`) — name, icons, theme color, display: standalone
+  - [x] Service worker for offline caching (static assets, WASM files)
+  - [x] "Add to Home Screen" — works on iOS Safari and Chrome
+  - [x] ONNX model cached in IndexedDB after first download
+  - [ ] Verify full offline play works end-to-end
 
 ## Anti-Abuse
 
@@ -105,23 +105,21 @@
 
 ## Code Cleanup
 
-- [ ] Remove debug `console.log` calls
-  - [ ] `App.tsx` — "WebSocket closed", "Game ended"
-  - [ ] `OnlineGame.tsx` — "Opponent joined"
-- [ ] Add 404 catch-all route (show friendly "page not found")
-- [ ] Add nginx gzip compression for JS/CSS/SVG
-- [ ] Lazy-load heavy routes (`TrainingDashboard`, `AnalysisBoard`) with `React.lazy()`
-- [ ] Consistent `VITE_API_URL` usage across all API modules (or remove the env var)
+- [x] Remove debug `console.log` calls (already cleaned up; remaining are legitimate error handlers)
+- [x] Add 404 catch-all route (show friendly "page not found")
+- [x] Add nginx gzip compression for JS/CSS/SVG
+- [x] Lazy-load heavy routes (`TrainingDashboard`, `AnalysisBoard`) with `React.lazy()`
+- [x] Consistent `VITE_API_URL` usage across all API modules (removed env var, all use `/api`)
 
 ## Auth & Accounts
 
-- [ ] Password reset flow ("Forgot password?" on login)
+- [x] Password reset flow ("Forgot password?" on login)
 - [ ] Profile editing (change display name, change password)
-- [ ] Email verification on registration (optional but recommended)
+- [x] Email verification on registration (optional but recommended)
 
 ## Player Experience Polish
 
-- [ ] Tab title notification when it's your turn ("(Your Turn) Knightball")
+- [x] Tab title notification when it's your turn ("(Your Turn) KnightBall")
 - [ ] Sound for incoming challenge / opponent joined
 - [ ] Resign confirmation dialog (prevent misclicks)
 - [ ] Client-side replay analysis (position evaluation via ONNX in Web Worker)
@@ -131,9 +129,9 @@
 
 ## SEO / Discoverability
 
-- [ ] `sitemap.xml`
-- [ ] `robots.txt`
-- [ ] Social preview image (also listed under Rebrand)
+- [x] `sitemap.xml`
+- [x] `robots.txt`
+- [x] Social preview image (also listed under Rebrand)
 
 ## Pre-Deploy Verification
 
