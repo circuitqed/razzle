@@ -1303,6 +1303,17 @@ async def require_training_key(
         raise HTTPException(status_code=403, detail="Invalid API key")
 
 
+async def require_admin_for_ai(
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+) -> None:
+    """Require admin key for server-side AI (AI now runs client-side)."""
+    if not TRAINING_API_KEY or x_api_key != TRAINING_API_KEY:
+        raise HTTPException(
+            status_code=403,
+            detail="Server-side AI is disabled. AI runs in your browser.",
+        )
+
+
 async def get_user_or_anon(
     request: Request,
     response: Response,
@@ -2807,8 +2818,9 @@ async def get_ai_move(
     request: AIMoveRequest = None,
     auth_request: Request = None,
     auth_cookie: Optional[str] = Cookie(None, alias=AUTH_COOKIE_NAME),
+    _=Depends(require_admin_for_ai),
 ):
-    """Get AI to calculate and play a move."""
+    """Get AI to calculate and play a move. Requires admin (TRAINING_API_KEY)."""
     if request is None:
         request = AIMoveRequest()
 

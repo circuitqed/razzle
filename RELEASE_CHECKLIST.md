@@ -2,18 +2,12 @@
 
 ## Rebrand
 
-- [ ] Purchase `knightball.com` (or preferred TLD)
-- [ ] Rename project references from "Razzle Dazzle" to "Knightball"
-  - [ ] `webapp/index.html` — title, meta description, og tags
-  - [ ] `webapp/src/App.tsx` — header title
-  - [ ] `webapp/src/components/RulesModal.tsx` — game name in rules text
-  - [ ] `docker-compose.yml` — service/container names
-  - [ ] `og:url` in `index.html` — update to new domain
-- [ ] New favicon / logo for Knightball
-- [ ] Social preview image (`og:image`, `twitter:image`) — design a card image for link sharing
-- [ ] Update CORS `ALLOWED_ORIGINS` to include new domain
-- [ ] DNS + SSL setup for new domain pointing to the server
-- [ ] Redirect old domain (if keeping it) to new one
+- [x] Purchase `knightball.org`
+- [x] Rename project references from "Razzle Dazzle" to "KnightBall"
+- [x] New favicon / logo
+- [x] Social preview image
+- [x] CORS + DNS + SSL
+- [x] Redirect old domain
 
 ## New Features
 

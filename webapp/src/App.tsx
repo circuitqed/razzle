@@ -3,7 +3,6 @@ import type { ReactNode, ErrorInfo } from 'react';
 import { BrowserRouter, Routes, Route, useParams, useNavigate, useLocation } from 'react-router-dom';
 import { GoogleOAuthProvider } from '@react-oauth/google';
 import BugReportDialog from './components/BugReportDialog';
-import ConfirmDialog from './components/ConfirmDialog';
 import GameView from './components/GameView';
 import RulesModal from './components/RulesModal';
 import LoginModal from './components/LoginModal';
@@ -37,6 +36,23 @@ const AnalysisBoard = lazy(() => import('./components/AnalysisBoard'));
 const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID || '';
 
 const GAME_STORAGE_KEY = 'knightball_current_game';
+const COOKIE_CONSENT_KEY = 'knightball_cookie_consent';
+
+function CookieBanner() {
+  const [dismissed, setDismissed] = useState(() => localStorage.getItem(COOKIE_CONSENT_KEY) === '1');
+  if (dismissed) return null;
+  return (
+    <div className="fixed bottom-0 left-0 right-0 bg-gray-800 text-gray-300 text-sm px-4 py-2 flex items-center justify-center gap-3 z-50">
+      <span>This site uses cookies for authentication.</span>
+      <button
+        onClick={() => { localStorage.setItem(COOKIE_CONSENT_KEY, '1'); setDismissed(true); }}
+        className="px-3 py-1 bg-gray-600 hover:bg-gray-500 text-white rounded text-sm transition-colors"
+      >
+        Got it
+      </button>
+    </div>
+  );
+}
 
 function readSavedGame(): { gameId: string; settings: NewGameSettings; playerColor: number } | null {
   try {
@@ -65,7 +81,6 @@ function AppContent() {
 
   const [flipBoard, setFlipBoard] = useState(false);
   const [soundOn, setSoundOn] = useState(isSoundEnabled());
-  const [showResignConfirm, setShowResignConfirm] = useState(false);
   const [showRules, setShowRules] = useState(false);
   const [showBugReport, setShowBugReport] = useState(false);
   const [showNewGameDialog, setShowNewGameDialog] = useState(false);
@@ -316,10 +331,9 @@ function AppContent() {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
 
-      if (showNewGameDialog || showResignConfirm || showRules) {
+      if (showNewGameDialog || showRules) {
         if (e.key === 'Escape') {
           setShowNewGameDialog(false);
-          setShowResignConfirm(false);
           setShowRules(false);
         }
         return;
@@ -379,7 +393,7 @@ function AppContent() {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [gameState, isLoading, aiThinking, canEndTurn, showNewGameDialog, showResignConfirm, showRules, isViewingHistory]);
+  }, [gameState, isLoading, aiThinking, canEndTurn, showNewGameDialog, showRules, isViewingHistory]);
 
   // Tab title: show "(Your Turn)" when it's the human's turn in AI mode
   useEffect(() => {
@@ -539,10 +553,10 @@ function AppContent() {
                 </button>
               )}
 
-              {/* Resign - only during active game */}
+              {/* Resign - only during active game, no confirmation needed vs AI */}
               {gameState && gameState.ply > 0 && gameState.status === 'playing' && !isPassing && !isViewingHistory && (
                 <button
-                  onClick={() => setShowResignConfirm(true)}
+                  onClick={() => resign()}
                   disabled={isLoading}
                   className="px-3 py-2 sm:px-4 bg-gray-600 hover:bg-red-700 text-gray-300 hover:text-white disabled:bg-gray-600 rounded font-medium transition-colors text-sm sm:text-base"
                 >
@@ -615,20 +629,6 @@ function AppContent() {
         onGameJoined={handleGameJoined}
         availableModels={availableModels}
         currentSettings={settings}
-      />
-
-      {/* Confirm Resign Dialog */}
-      <ConfirmDialog
-        isOpen={showResignConfirm}
-        title="Resign Game?"
-        message="Are you sure you want to resign? Your opponent will win."
-        confirmText="Resign"
-        cancelText="Cancel"
-        onConfirm={() => {
-          setShowResignConfirm(false);
-          resign();
-        }}
-        onCancel={() => setShowResignConfirm(false)}
       />
 
       {/* Rules Modal */}
@@ -717,6 +717,9 @@ function AppContent() {
           onCancel={handleCancelWaiting}
         />
       )}
+
+      {/* Cookie consent banner */}
+      <CookieBanner />
     </div>
   );
 }
