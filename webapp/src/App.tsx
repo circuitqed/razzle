@@ -25,6 +25,7 @@ import type { NewGameSettings } from './components/NewGameDialog';
 import { BOT_PRESETS } from './components/NewGameDialog';
 import { useGame } from './hooks/useGame';
 import { setSoundEnabled, isSoundEnabled } from './utils/sounds';
+import { adjustAfterGame, getAutoMatchLevel, getLevelLabel, getTierSettings } from './utils/autoMatch';
 import { listModels, type ModelInfo } from './api/engine';
 import * as onlineApi from './api/online';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
@@ -65,7 +66,7 @@ function AppContent() {
       model: undefined,
       simulations: 256,
       colorChoice: 'random',
-      difficulty: 'medium',
+      difficulty: 'auto',
     }
   );
   const [playerColor, setPlayerColor] = useState(savedGame?.playerColor ?? 0);
@@ -79,6 +80,9 @@ function AppContent() {
 
   // Available models from server
   const [availableModels, setAvailableModels] = useState<ModelInfo[]>([]);
+
+  // Auto-match level toast
+  const [levelToast, setLevelToast] = useState<string | null>(null);
 
   // Auth modals
   const [showLoginModal, setShowLoginModal] = useState(false);
@@ -197,6 +201,41 @@ function AppContent() {
     }
   }, [gameState?.game_id, gameState?.status, gameState?.ply, settings, playerColor]);
 
+  // Adjust auto-match level when an AI game finishes
+  const prevGameStatusRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!gameState) return;
+    const wasPlaying = prevGameStatusRef.current === 'playing';
+    prevGameStatusRef.current = gameState.status;
+
+    if (
+      wasPlaying &&
+      gameState.status === 'finished' &&
+      gameState.winner !== null &&
+      settings.mode === 'ai' &&
+      settings.difficulty === 'auto'
+    ) {
+      const won = gameState.winner === playerColor;
+      const oldLevel = getAutoMatchLevel();
+      const newLevel = adjustAfterGame(won);
+      if (newLevel !== oldLevel) {
+        const label = getLevelLabel(newLevel);
+        if (won) {
+          setLevelToast(`Level up! Now at ${label}`);
+        } else {
+          setLevelToast(`Dropped to ${label}`);
+        }
+      }
+    }
+  }, [gameState?.status, gameState?.winner, settings.mode, settings.difficulty, playerColor]);
+
+  // Auto-dismiss level toast
+  useEffect(() => {
+    if (!levelToast) return;
+    const timer = setTimeout(() => setLevelToast(null), 3000);
+    return () => clearTimeout(timer);
+  }, [levelToast]);
+
   // Resolve color choice for new games
   const resolveColor = useCallback((choice: NewGameSettings['colorChoice']) => {
     if (choice === 'random') return Math.random() < 0.5 ? 0 : 1;
@@ -238,10 +277,15 @@ function AppContent() {
     localStorage.removeItem(GAME_STORAGE_KEY);
     if (settings.mode === 'ai') {
       setPlayerColor(resolveColor(settings.colorChoice));
+      // Re-resolve auto-match tier in case level changed
+      if (settings.difficulty === 'auto') {
+        const tier = getTierSettings(getAutoMatchLevel());
+        setSettings(prev => ({ ...prev, model: tier.model, simulations: tier.sims }));
+      }
     }
-    startNewGame();
+    setGameGeneration(g => g + 1);
     fetchModels();
-  }, [settings, resolveColor, startNewGame, fetchModels]);
+  }, [settings, resolveColor, fetchModels]);
 
   // Board flipping: default is player looking up
   const shouldFlipBoard = useMemo(() => {
@@ -264,6 +308,10 @@ function AppContent() {
 
   const opponentName = useMemo(() => {
     if (settings.mode === 'ai') {
+      // Auto-match: show current level
+      if (settings.difficulty === 'auto') {
+        return `AI (${getLevelLabel(getAutoMatchLevel())})`;
+      }
       // Use friendly difficulty name if available
       if (settings.difficulty && settings.difficulty !== 'custom') {
         const preset = BOT_PRESETS.find(p => p.id === settings.difficulty);
@@ -746,6 +794,15 @@ function AppContent() {
           hostColor={waitingGame.hostColor}
           onCancel={handleCancelWaiting}
         />
+      )}
+
+      {/* Auto-match level toast */}
+      {levelToast && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50">
+          <div className="px-4 py-2 bg-gray-800 border border-gray-600 rounded-lg shadow-lg text-sm text-white whitespace-nowrap">
+            {levelToast}
+          </div>
+        </div>
       )}
 
       {/* Cookie consent banner */}

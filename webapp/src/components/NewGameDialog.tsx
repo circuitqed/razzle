@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import * as onlineApi from '../api/online';
 import type { ModelInfo } from '../api/engine';
+import { getAutoMatchLevel, getTierSettings, getLevelLabel } from '../utils/autoMatch';
 
 type GameMode = 'ai' | 'pvp' | 'online';
 type ColorChoice = 'blue' | 'red' | 'random';
@@ -60,6 +61,18 @@ const SIMULATION_OPTIONS = [
   { value: 65536, label: '64K' },
 ];
 
+// Bot difficulty presets based on strength calibration tournament
+// Each preset maps to a specific model + simulation count, calibrated by ELO
+export const BOT_PRESETS = [
+  { id: 'beginner', name: 'Beginner', model: 'iter_010.pt', sims: 1, elo: 1366 },
+  { id: 'easy', name: 'Easy', model: 'iter_075.pt', sims: 64, elo: 1547 },
+  { id: 'medium', name: 'Medium', model: 'iter_150.pt', sims: 256, elo: 2127 },
+  { id: 'hard', name: 'Hard', model: 'iter_500.pt', sims: 256, elo: 2562 },
+  { id: 'expert', name: 'Expert', model: 'iter_500.pt', sims: 2048, elo: 3124 },
+] as const;
+
+export type BotDifficulty = 'auto' | typeof BOT_PRESETS[number]['id'] | 'custom';
+
 function formatTimeControl(game: onlineApi.PublicGameSummary): string {
   if (game.game_mode === 'correspondence') {
     return `${game.days_per_move}d/move`;
@@ -97,6 +110,7 @@ export interface NewGameSettings {
   colorChoice: ColorChoice;
   timeControl?: number | null;  // seconds per player, null = untimed (PvP only)
   increment?: number;  // seconds added per turn (PvP only)
+  difficulty?: BotDifficulty;  // Named difficulty level, or 'custom' for manual selection
 }
 
 interface NewGameDialogProps {
@@ -124,6 +138,7 @@ export default function NewGameDialog({
   const [mode, setMode] = useState<GameMode>(currentSettings.mode);
   const [model, setModel] = useState<string | undefined>(currentSettings.model);
   const [simulations, setSimulations] = useState(currentSettings.simulations);
+  const [difficulty, setDifficulty] = useState<BotDifficulty>(currentSettings.difficulty ?? 'auto');
   const [colorChoice, setColorChoice] = useState<ColorChoice>(currentSettings.colorChoice);
   const [timeControl, setTimeControl] = useState<number | null>(currentSettings.timeControl ?? null);
   const [increment, setIncrement] = useState<number>(currentSettings.increment ?? 0);
@@ -200,6 +215,7 @@ export default function NewGameDialog({
       setMode(currentSettings.mode);
       setModel(currentSettings.model);
       setSimulations(currentSettings.simulations);
+      setDifficulty(currentSettings.difficulty ?? 'auto');
       setColorChoice(currentSettings.colorChoice);
       setTimeControl(currentSettings.timeControl ?? null);
       setIncrement(currentSettings.increment ?? 0);
@@ -228,7 +244,29 @@ export default function NewGameDialog({
   if (!isOpen) return null;
 
   const handleStart = () => {
-    onStartGame({ mode, model, simulations, colorChoice, timeControl: mode === 'pvp' ? timeControl : null, increment: mode === 'pvp' ? increment : 0 });
+    // Resolve model and sims from difficulty preset
+    let resolvedModel = model;
+    let resolvedSims = simulations;
+    if (difficulty === 'auto') {
+      const tier = getTierSettings(getAutoMatchLevel());
+      resolvedModel = tier.model;
+      resolvedSims = tier.sims;
+    } else if (difficulty !== 'custom') {
+      const preset = BOT_PRESETS.find(p => p.id === difficulty);
+      if (preset) {
+        resolvedModel = preset.model;
+        resolvedSims = preset.sims;
+      }
+    }
+    onStartGame({
+      mode,
+      model: resolvedModel,
+      simulations: resolvedSims,
+      colorChoice,
+      timeControl: mode === 'pvp' ? timeControl : null,
+      increment: mode === 'pvp' ? increment : 0,
+      difficulty,
+    });
   };
 
   const handleCreateGame = async () => {
@@ -412,34 +450,86 @@ export default function NewGameDialog({
         {mode === 'ai' && (
           <>
             <div className="mb-3">
-              <label className="block text-xs text-gray-400 mb-1">Model</label>
-              <select
-                value={model || ''}
-                onChange={(e) => setModel(e.target.value || undefined)}
-                className="w-full px-3 py-1.5 bg-gray-700 text-white rounded border border-gray-600 text-sm"
+              <label className="block text-xs text-gray-400 mb-2">Difficulty</label>
+              {/* Auto-match button (full width) */}
+              <button
+                onClick={() => setDifficulty('auto')}
+                className={`w-full px-2 py-2 rounded text-sm font-medium transition-colors mb-1.5 ${
+                  difficulty === 'auto'
+                    ? 'bg-green-600 text-white ring-2 ring-green-400'
+                    : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+                }`}
               >
-                <option value="">Latest</option>
-                {availableModels.map((m) => (
-                  <option key={m.path} value={m.path}>
-                    {m.name}{m.name !== 'random_weights' && !m.has_onnx ? ' *' : ''}
-                  </option>
+                Auto — {getLevelLabel(getAutoMatchLevel())}
+              </button>
+              {difficulty === 'auto' && (
+                <p className="text-xs text-gray-500 mb-1.5">
+                  Adjusts after each game. Win to level up, lose to level down.
+                </p>
+              )}
+              {/* Manual presets */}
+              <div className="grid grid-cols-3 gap-1.5">
+                {BOT_PRESETS.map((preset) => (
+                  <button
+                    key={preset.id}
+                    onClick={() => setDifficulty(preset.id)}
+                    className={`px-2 py-2 rounded text-sm font-medium transition-colors ${
+                      difficulty === preset.id
+                        ? 'bg-blue-600 text-white ring-2 ring-blue-400'
+                        : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+                    }`}
+                  >
+                    {preset.name}
+                  </button>
                 ))}
-              </select>
+                <button
+                  onClick={() => setDifficulty('custom')}
+                  className={`px-2 py-2 rounded text-sm font-medium transition-colors ${
+                    difficulty === 'custom'
+                      ? 'bg-gray-500 text-white ring-2 ring-gray-400'
+                      : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+                  }`}
+                >
+                  Custom
+                </button>
+              </div>
             </div>
-            <div className="mb-3">
-              <label className="block text-xs text-gray-400 mb-1">Simulations</label>
-              <select
-                value={simulations}
-                onChange={(e) => setSimulations(Number(e.target.value))}
-                className="w-full px-3 py-1.5 bg-gray-700 text-white rounded border border-gray-600 text-sm"
-              >
-                {SIMULATION_OPTIONS.map((opt) => (
-                  <option key={opt.value} value={opt.value}>
-                    {opt.label}
-                  </option>
-                ))}
-              </select>
-            </div>
+
+            {/* Custom model/sims controls */}
+            {difficulty === 'custom' && (
+              <>
+                <div className="mb-3">
+                  <label className="block text-xs text-gray-400 mb-1">Model</label>
+                  <select
+                    value={model || ''}
+                    onChange={(e) => setModel(e.target.value || undefined)}
+                    className="w-full px-3 py-1.5 bg-gray-700 text-white rounded border border-gray-600 text-sm"
+                  >
+                    <option value="">Latest</option>
+                    {availableModels.map((m) => (
+                      <option key={m.path} value={m.path}>
+                        {m.name}{m.name !== 'random_weights' && !m.has_onnx ? ' *' : ''}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="mb-3">
+                  <label className="block text-xs text-gray-400 mb-1">Simulations</label>
+                  <select
+                    value={simulations}
+                    onChange={(e) => setSimulations(Number(e.target.value))}
+                    className="w-full px-3 py-1.5 bg-gray-700 text-white rounded border border-gray-600 text-sm"
+                  >
+                    {SIMULATION_OPTIONS.map((opt) => (
+                      <option key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </>
+            )}
+
             <div className="mb-4">
               <label className="block text-xs text-gray-400 mb-1">Play as</label>
               <div className="flex gap-2">
@@ -853,7 +943,7 @@ export default function NewGameDialog({
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2 mb-0.5">
                           <span className="text-sm text-white font-medium truncate">
-                            {game.host_display_name || 'Anonymous'}
+                            {game.host_username || game.host_display_name || 'Anonymous'}
                           </span>
                           <span className={`text-xs px-1.5 py-0.5 rounded font-medium ${
                             game.game_mode === 'correspondence'
@@ -934,7 +1024,7 @@ export default function NewGameDialog({
                             <span className="text-xs text-amber-400" title="Correspondence">&#128197;</span>
                           )}
                           <span className="text-sm text-gray-300">
-                            vs {game.opponent_name || 'Opponent'}
+                            vs {game.opponent_username || game.opponent_name || 'Opponent'}
                           </span>
                           {game.is_your_turn && (
                             <span className="text-xs bg-green-600 px-1 rounded">Your turn</span>
