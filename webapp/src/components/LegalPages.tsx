@@ -12,6 +12,8 @@ function LegalLayout({ title, children }: { title: string; children: React.React
           {children}
         </div>
         <div className="mt-12 pt-6 border-t border-gray-800 text-xs text-gray-600">
+          <Link to="/about" className="hover:text-gray-400">About</Link>
+          {' \u00B7 '}
           <Link to="/terms" className="hover:text-gray-400">Terms</Link>
           {' \u00B7 '}
           <Link to="/privacy" className="hover:text-gray-400">Privacy</Link>

@@ -23,9 +23,9 @@
 - [x] Highlight valid moves/targets at each step with prompts
 
 ### History of the Game
-- [ ] New `/about` or `/history` page crediting Don and the origins of the game
-- [ ] Link from footer or header nav
-- [ ] Story of how the game was created and evolved
+- [x] New `/about` page crediting Don Green and the origins of the game
+- [x] Link from footer, rules modal, and legal pages
+- [x] Story of how the game was created and evolved
 
 ### AI Auto-Matching
 - [ ] Design strength-based matchmaking system

@@ -20,6 +20,7 @@ import OpeningExplorer from './components/OpeningExplorer';
 import WaitingForOpponent from './components/WaitingForOpponent';
 import OnlineGame from './components/OnlineGame';
 import { TermsPage, PrivacyPage } from './components/LegalPages';
+import AboutPage from './components/AboutPage';
 import NewGameDialog from './components/NewGameDialog';
 import type { NewGameSettings } from './components/NewGameDialog';
 import { BOT_PRESETS } from './components/NewGameDialog';
@@ -695,6 +696,8 @@ function AppContent() {
           </p>
         </div>
         <div className="mt-2 text-xs text-gray-700">
+          <a href="/about" className="hover:text-gray-500">About</a>
+          {' \u00B7 '}
           <a href="/terms" className="hover:text-gray-500">Terms</a>
           {' \u00B7 '}
           <a href="/privacy" className="hover:text-gray-500">Privacy</a>
@@ -973,6 +976,7 @@ export default function App() {
                 <Route path="/reset-password" element={<ResetPasswordPage />} />
                 <Route path="/terms" element={<TermsPage />} />
                 <Route path="/privacy" element={<PrivacyPage />} />
+                <Route path="/about" element={<AboutPage />} />
                 <Route path="*" element={<NotFoundPage />} />
               </Routes>
             </Suspense>
