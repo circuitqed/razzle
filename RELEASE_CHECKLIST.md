@@ -12,15 +12,15 @@
 ## New Features
 
 ### Interactive Tutorial
-- [ ] Guided first-game experience that teaches core mechanics step by step
-  - [ ] Move a knight
-  - [ ] Pass the ball
-  - [ ] Chain passes
-  - [ ] Forced pass mechanic
-  - [ ] Score a goal
-- [ ] Trigger for new users (first visit or "How to Play" button)
-- [ ] Skippable for returning players
-- [ ] Highlight valid moves/targets at each step with prompts
+- [x] Guided first-game experience that teaches core mechanics step by step
+  - [x] Move a knight
+  - [x] Pass the ball
+  - [x] Chain passes
+  - [x] Forced pass mechanic
+  - [x] Score a goal
+- [x] Trigger for new users (first visit or "How to Play" button)
+- [x] Skippable for returning players
+- [x] Highlight valid moves/targets at each step with prompts
 
 ### History of the Game
 - [ ] New `/about` or `/history` page crediting Don and the origins of the game
@@ -43,9 +43,9 @@
   - [ ] Show friendly difficulty label instead of "iter_275 - 256 sims"
 
 ### Landing Experience
-- [ ] First visit should get you into a game as fast as possible
-  - [ ] One-click "Play Now" → starts a game vs auto-matched AI immediately
-  - [ ] No login required to play your first game
+- [x] First visit should get you into a game as fast as possible
+  - [x] One-click "Play Now" → starts a game vs auto-matched AI immediately
+  - [x] No login required to play your first game
   - [ ] Prompt to create account after first game (to save progress/rating)
 - [ ] Brief animated game preview or tagline (not a heavy marketing page)
 
@@ -80,8 +80,8 @@
 - [ ] Error tracking (Sentry or similar) — catch client-side crashes in production
 - [ ] Analytics — basic usage stats (games per day, active users, retention)
 - [ ] Load testing — how many concurrent WebSocket games can the server handle?
-- [ ] Disable server-side AI endpoints (`POST /games/{id}/ai`)
-  - [ ] Remove or gate behind admin flag — too expensive for a single server
+- [x] Disable server-side AI endpoints (`POST /games/{id}/ai`)
+  - [x] Remove or gate behind admin flag — too expensive for a single server
   - [x] All AI runs client-side (desktop: ONNX Runtime WebGPU/WASM; iOS: custom WebGL2 GPU shaders)
 - [x] PWA support + offline AI play
   - [x] Web app manifest (`manifest.json`) — name, icons, theme color, display: standalone
@@ -115,7 +115,7 @@
 
 - [x] Tab title notification when it's your turn ("(Your Turn) KnightBall")
 - [ ] Sound for incoming challenge / opponent joined
-- [ ] Resign confirmation dialog (prevent misclicks)
+- [x] Resign confirmation dialog (prevent misclicks)
 - [ ] Client-side replay analysis (position evaluation via ONNX in Web Worker)
 - [ ] Draw offer mechanism for online games
 - [ ] Spectator mode for live games
