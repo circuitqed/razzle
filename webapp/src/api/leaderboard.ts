@@ -1,6 +1,6 @@
 import type { PlayerProfile, PlayerProfileWithGames, PlayersListResponse, LeaderboardResponse } from '../types';
 
-const API_BASE = import.meta.env.VITE_API_URL || '/api';
+const API_BASE = '/api';
 
 /**
  * Get the ELO leaderboard.
@@ -72,7 +72,7 @@ export function formatPlayerDisplay(player: PlayerProfile): string {
     const simsPart = player.simulations ? ` (${player.simulations} sims)` : '';
     return `${modelPart}${simsPart}`;
   }
-  return player.display_name;
+  return player.username || player.display_name;
 }
 
 /**

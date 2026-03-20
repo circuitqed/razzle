@@ -270,6 +270,7 @@ export interface PlayerProfile {
   player_id: string;
   player_type: 'human' | 'ai';
   user_id?: string | null;
+  username?: string | null;
   model_version?: string | null;
   simulations?: number | null;
   display_name: string;

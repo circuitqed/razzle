@@ -149,13 +149,14 @@ def update_ratings_from_match(
 def compute_all_ratings(
     matches: list[dict],
     anchor_model: str = "initial",
-    anchor_rating: float = 1000.0
+    anchor_rating: float = 1000.0,
+    iterations: int = 200,
 ) -> dict[str, EloRating]:
     """
-    Compute all ratings from match history.
+    Compute all ratings from match history using Bradley-Terry MLE.
 
-    Processes matches in chronological order, updating ratings
-    as each match is processed.
+    Uses iterative Bradley-Terry maximum likelihood estimation, which
+    converges to stable ratings regardless of match processing order.
 
     Args:
         matches: List of match dictionaries with keys:
@@ -166,41 +167,102 @@ def compute_all_ratings(
             - draws: int
         anchor_model: Model version to anchor at fixed rating
         anchor_rating: Rating to anchor the anchor_model at
+        iterations: Number of Bradley-Terry iterations (default 200)
 
     Returns:
         Dictionary mapping model version to EloRating
     """
-    ratings: dict[str, EloRating] = {}
+    import math
 
-    def get_rating(model: str) -> EloRating:
-        if model not in ratings:
-            ratings[model] = EloRating(rating=anchor_rating, games_played=0)
-        return ratings[model]
+    # Collect players and game counts
+    players: list[str] = []
+    player_set: set[str] = set()
+    games_played: dict[str, int] = {}
 
-    # Process matches in order
     for match in matches:
-        model1 = match["model1_version"]
-        model2 = match["model2_version"]
-        wins1 = match["model1_wins"]
-        wins2 = match["model2_wins"]
-        draws = match["draws"]
+        m1 = match["model1_version"]
+        m2 = match["model2_version"]
+        total = match["model1_wins"] + match["model2_wins"] + match["draws"]
+        for p in (m1, m2):
+            if p not in player_set:
+                player_set.add(p)
+                players.append(p)
+            games_played[p] = games_played.get(p, 0) + total
 
-        r1 = get_rating(model1)
-        r2 = get_rating(model2)
+    if not players:
+        return {}
 
-        new_r1, new_r2 = update_ratings_from_match(r1, r2, wins1, wins2, draws)
+    n = len(players)
+    idx = {p: i for i, p in enumerate(players)}
 
-        ratings[model1] = new_r1
-        ratings[model2] = new_r2
+    # Build win matrix: wins[i][j] = score of i against j
+    # Draws count as 0.5 for each side
+    wins = [[0.0] * n for _ in range(n)]
+    total = [[0.0] * n for _ in range(n)]
 
-    # Normalize ratings so anchor model is at anchor_rating
+    for match in matches:
+        i = idx[match["model1_version"]]
+        j = idx[match["model2_version"]]
+        w1 = match["model1_wins"]
+        w2 = match["model2_wins"]
+        d = match["draws"]
+        wins[i][j] += w1 + d * 0.5
+        wins[j][i] += w2 + d * 0.5
+        g = w1 + w2 + d
+        total[i][j] += g
+        total[j][i] += g
+
+    # Bradley-Terry iterative update
+    # strength[i] is proportional to P(i beats j) = s[i] / (s[i] + s[j])
+    strength = [1.0] * n
+
+    for _ in range(iterations):
+        new_strength = [0.0] * n
+        for i in range(n):
+            w_i = sum(wins[i])
+            if w_i == 0:
+                new_strength[i] = strength[i]
+                continue
+            denom = 0.0
+            for j in range(n):
+                if total[i][j] > 0:
+                    denom += total[i][j] / (strength[i] + strength[j])
+            new_strength[i] = w_i / denom if denom > 0 else strength[i]
+        # Normalize to geometric mean = 1
+        log_mean = sum(math.log(max(s, 1e-30)) for s in new_strength) / n
+        factor = math.exp(-log_mean)
+        strength = [s * factor for s in new_strength]
+
+    # Convert to Elo scale: Elo = 400 * log10(strength) + anchor_rating
+    ratings: dict[str, EloRating] = {}
+    for p, s in zip(players, strength):
+        elo = 400.0 * math.log10(max(s, 1e-30))
+        ratings[p] = EloRating(rating=elo, games_played=games_played[p])
+
+    # Normalize so anchor model is at anchor_rating
+    # Try exact match first, then prefix match (e.g. "initial" matches "initial_s1")
+    anchor_key = None
     if anchor_model in ratings:
-        offset = anchor_rating - ratings[anchor_model].rating
-        for model in ratings:
-            ratings[model] = EloRating(
-                rating=ratings[model].rating + offset,
-                games_played=ratings[model].games_played
-            )
+        anchor_key = anchor_model
+    else:
+        # Find lowest-rated player whose name starts with anchor_model
+        candidates = [(k, v.rating) for k, v in ratings.items()
+                      if k.startswith(anchor_model)]
+        if candidates:
+            anchor_key = min(candidates, key=lambda x: x[1])[0]
+
+    if anchor_key:
+        offset = anchor_rating - ratings[anchor_key].rating
+    else:
+        # No anchor found — center around anchor_rating
+        avg = sum(r.rating for r in ratings.values()) / len(ratings)
+        offset = anchor_rating - avg
+
+    for model in ratings:
+        ratings[model] = EloRating(
+            rating=ratings[model].rating + offset,
+            games_played=ratings[model].games_played,
+        )
 
     return ratings
 

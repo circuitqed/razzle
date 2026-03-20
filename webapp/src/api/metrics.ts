@@ -1,6 +1,6 @@
 import type { TrainingMetrics, TrainingMetricsResponse, LatestMetricsResponse, TrainingDashboardData } from '../types';
 
-const API_BASE = import.meta.env.VITE_API_URL || '/api';
+const API_BASE = '/api';
 
 class MetricsAPIError extends Error {
   constructor(public status: number, message: string) {

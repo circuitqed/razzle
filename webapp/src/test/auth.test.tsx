@@ -56,6 +56,9 @@ describe('AuthContext', () => {
       display_name: 'Existing User',
       created_at: '2024-01-01',
       last_login_at: '2024-01-01',
+      email: null,
+      email_verified: false,
+      auth_provider: 'local',
     })
 
     render(
@@ -79,6 +82,9 @@ describe('AuthContext', () => {
       display_name: 'Test User',
       created_at: '2024-01-01',
       last_login_at: '2024-01-01',
+      email: null,
+      email_verified: false,
+      auth_provider: 'local' as const,
     }
 
     vi.mocked(authApi.login).mockResolvedValue({
@@ -113,6 +119,9 @@ describe('AuthContext', () => {
       display_name: 'New User',
       created_at: '2024-01-01',
       last_login_at: null,
+      email: null,
+      email_verified: false,
+      auth_provider: 'local' as const,
     }
 
     vi.mocked(authApi.register).mockResolvedValue({
@@ -148,6 +157,9 @@ describe('AuthContext', () => {
       display_name: 'Logged User',
       created_at: '2024-01-01',
       last_login_at: '2024-01-01',
+      email: null,
+      email_verified: false,
+      auth_provider: 'local',
     })
 
     vi.mocked(authApi.logout).mockResolvedValue({ message: 'Logged out' })

@@ -126,6 +126,7 @@ export default function OnlineGame({ gameId, onGameEnd }: OnlineGameProps) {
 
   // Player names
   const opponentDisplayName = useMemo(() => {
+    if (opponent?.username) return opponent.username;
     if (opponent?.display_name) return opponent.display_name;
     return myColor === 0 ? 'Red' : 'Blue';
   }, [myColor, opponent]);
@@ -170,7 +171,7 @@ export default function OnlineGame({ gameId, onGameEnd }: OnlineGameProps) {
   ), [opponentDisplayName, opponent?.elo_rating, opponentConnected, forfeitCountdown]);
 
   const myNameEl = useMemo(() => {
-    const name = myInfo?.display_name || (myColor === 0 ? 'Blue' : 'Red');
+    const name = myInfo?.username || myInfo?.display_name || (myColor === 0 ? 'Blue' : 'Red');
     return (
       <div className="flex items-center gap-1.5">
         <span>{name}</span>
@@ -310,8 +311,8 @@ export default function OnlineGame({ gameId, onGameEnd }: OnlineGameProps) {
   const winnerDisplay = useMemo(() => {
     if (!gameState || gameState.winner === null) return null;
     const winnerName = gameState.winner === myColor
-      ? (myInfo?.display_name || 'You')
-      : (opponent?.display_name || (gameState.winner === 0 ? 'Blue' : 'Red'));
+      ? (myInfo?.username || myInfo?.display_name || 'You')
+      : (opponent?.username || opponent?.display_name || (gameState.winner === 0 ? 'Blue' : 'Red'));
     const colorClass = gameState.winner === 0 ? 'text-blue-400' : 'text-red-400';
     return { text: `${winnerName} Wins!`, colorClass };
   }, [gameState, myColor, myInfo, opponent]);

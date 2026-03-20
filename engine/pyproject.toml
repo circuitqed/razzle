@@ -35,6 +35,9 @@ server = [
     "pyjwt>=2.8.0",
     "python-multipart>=0.0.6",
     "onnx>=1.14.0",
+    "google-auth>=2.0.0",
+    "requests>=2.25.0",
+    "httpx>=0.25.0",
 ]
 all = [
     "razzle[dev,training,server]",

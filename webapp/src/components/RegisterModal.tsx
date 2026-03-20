@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useAuth } from '../contexts/AuthContext';
+import GoogleSignInButton from './GoogleSignInButton';
 
 interface RegisterModalProps {
   isOpen: boolean;
@@ -8,7 +9,8 @@ interface RegisterModalProps {
 }
 
 export default function RegisterModal({ isOpen, onClose, onSwitchToLogin }: RegisterModalProps) {
-  const { register } = useAuth();
+  const { registerWithEmail } = useAuth();
+  const [email, setEmail] = useState('');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
@@ -19,6 +21,7 @@ export default function RegisterModal({ isOpen, onClose, onSwitchToLogin }: Regi
   // Reset form when modal opens
   useEffect(() => {
     if (isOpen) {
+      setEmail('');
       setUsername('');
       setPassword('');
       setConfirmPassword('');
@@ -34,6 +37,10 @@ export default function RegisterModal({ isOpen, onClose, onSwitchToLogin }: Regi
     setError(null);
 
     // Validation
+    if (!email || !email.includes('@')) {
+      setError('Please enter a valid email address');
+      return;
+    }
     if (username.length < 3) {
       setError('Username must be at least 3 characters');
       return;
@@ -54,7 +61,7 @@ export default function RegisterModal({ isOpen, onClose, onSwitchToLogin }: Regi
     setIsLoading(true);
 
     try {
-      await register(username, password, displayName || undefined);
+      await registerWithEmail(email, username, password, displayName || undefined);
       onClose();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Registration failed');
@@ -65,7 +72,7 @@ export default function RegisterModal({ isOpen, onClose, onSwitchToLogin }: Regi
 
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-      <div className="bg-gray-800 rounded-lg p-6 max-w-sm w-full mx-4">
+      <div className="bg-gray-800 rounded-lg p-6 max-w-sm w-full mx-4 max-h-[90vh] overflow-y-auto">
         <h2 className="text-xl font-bold text-white mb-4">Create Account</h2>
 
         <form onSubmit={handleSubmit} className="space-y-4">
@@ -76,6 +83,18 @@ export default function RegisterModal({ isOpen, onClose, onSwitchToLogin }: Regi
           )}
 
           <div>
+            <label className="block text-sm text-gray-300 mb-1">Email</label>
+            <input
+              type="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              className="w-full px-3 py-2 bg-gray-700 text-white rounded border border-gray-600 focus:border-blue-500 focus:outline-none"
+              required
+              autoFocus
+            />
+          </div>
+
+          <div>
             <label className="block text-sm text-gray-300 mb-1">Username</label>
             <input
               type="text"
@@ -83,7 +102,6 @@ export default function RegisterModal({ isOpen, onClose, onSwitchToLogin }: Regi
               onChange={(e) => setUsername(e.target.value)}
               className="w-full px-3 py-2 bg-gray-700 text-white rounded border border-gray-600 focus:border-blue-500 focus:outline-none"
               required
-              autoFocus
               minLength={3}
               maxLength={32}
             />
@@ -142,6 +160,18 @@ export default function RegisterModal({ isOpen, onClose, onSwitchToLogin }: Regi
             </button>
           </div>
         </form>
+
+        {/* Divider */}
+        <div className="flex items-center gap-3 my-4">
+          <div className="flex-1 h-px bg-gray-600" />
+          <span className="text-sm text-gray-500">or</span>
+          <div className="flex-1 h-px bg-gray-600" />
+        </div>
+
+        {/* Google Sign In - redirects to Google */}
+        <div className="flex justify-center">
+          <GoogleSignInButton onError={(msg) => setError(msg)} />
+        </div>
 
         <div className="mt-4 text-center text-sm text-gray-400">
           Already have an account?{' '}

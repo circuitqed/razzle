@@ -323,6 +323,43 @@ def init_db(db_path: Path = None) -> None:
             )
         """)
 
+        # --- Auth enhancement migrations ---
+        auth_migrations = [
+            "ALTER TABLE users ADD COLUMN email TEXT",
+            "ALTER TABLE users ADD COLUMN email_verified INTEGER DEFAULT 0",
+            "ALTER TABLE users ADD COLUMN google_id TEXT",
+            "ALTER TABLE users ADD COLUMN auth_provider TEXT DEFAULT 'local'",
+        ]
+        for sql in auth_migrations:
+            try:
+                conn.execute(sql)
+            except sqlite3.OperationalError:
+                pass  # Column already exists
+
+        # Unique partial indexes for email and google_id (only non-NULL values)
+        try:
+            conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email) WHERE email IS NOT NULL")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google_id ON users(google_id) WHERE google_id IS NOT NULL")
+        except sqlite3.OperationalError:
+            pass
+
+        # Auth tokens table for email verification and password reset
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS auth_tokens (
+                token TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                token_type TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                used INTEGER DEFAULT 0
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_auth_tokens_user ON auth_tokens(user_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_auth_tokens_type ON auth_tokens(token_type)")
+
         conn.commit()
 
 
@@ -820,13 +857,30 @@ def authenticate_user(
         )
         conn.commit()
 
-        return {
-            "user_id": row["user_id"],
-            "username": row["username"],
-            "display_name": row["display_name"],
-            "created_at": row["created_at"],
-            "last_login_at": now,
-        }
+        d = _user_dict_from_row(row)
+        d["last_login_at"] = now
+        return d
+
+
+def _user_dict_from_row(row) -> dict:
+    """Build a user dict from a database row, handling missing columns."""
+    keys = row.keys()
+    d = {
+        "user_id": row["user_id"],
+        "username": row["username"],
+        "display_name": row["display_name"],
+        "created_at": row["created_at"],
+        "last_login_at": row["last_login_at"],
+    }
+    if "email" in keys:
+        d["email"] = row["email"]
+    if "email_verified" in keys:
+        d["email_verified"] = bool(row["email_verified"])
+    if "auth_provider" in keys:
+        d["auth_provider"] = row["auth_provider"] or "local"
+    if "google_id" in keys:
+        d["google_id"] = row["google_id"]
+    return d
 
 
 def get_user_by_id(
@@ -845,13 +899,7 @@ def get_user_by_id(
         if row is None:
             return None
 
-        return {
-            "user_id": row["user_id"],
-            "username": row["username"],
-            "display_name": row["display_name"],
-            "created_at": row["created_at"],
-            "last_login_at": row["last_login_at"],
-        }
+        return _user_dict_from_row(row)
 
 
 def get_user_by_username(
@@ -870,13 +918,289 @@ def get_user_by_username(
         if row is None:
             return None
 
-        return {
-            "user_id": row["user_id"],
-            "username": row["username"],
-            "display_name": row["display_name"],
-            "created_at": row["created_at"],
-            "last_login_at": row["last_login_at"],
-        }
+        return _user_dict_from_row(row)
+
+
+# --- Email/OAuth User Management ---
+
+def get_user_by_email(
+    email: str,
+    db_path: Path = None
+) -> Optional[dict]:
+    """Get a user by their email address."""
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+    with get_connection(db_path) as conn:
+        row = conn.execute(
+            "SELECT * FROM users WHERE email = ? AND is_active = 1",
+            (email.lower(),)
+        ).fetchone()
+        if row is None:
+            return None
+        return _user_dict_from_row(row)
+
+
+def get_user_by_google_id(
+    google_id: str,
+    db_path: Path = None
+) -> Optional[dict]:
+    """Get a user by their Google sub ID."""
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+    with get_connection(db_path) as conn:
+        row = conn.execute(
+            "SELECT * FROM users WHERE google_id = ? AND is_active = 1",
+            (google_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        return _user_dict_from_row(row)
+
+
+def create_user_with_email(
+    email: str,
+    username: str,
+    password: str,
+    display_name: Optional[str] = None,
+    db_path: Path = None
+) -> Optional[dict]:
+    """Create a new user with email. Returns user dict or None if email/username taken."""
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+    user_id = secrets.token_hex(8)
+    password_hash = hash_password(password)
+    now = datetime.utcnow().isoformat() + 'Z'
+
+    with get_connection(db_path) as conn:
+        try:
+            conn.execute("""
+                INSERT INTO users (user_id, username, password_hash, display_name, created_at,
+                                   email, email_verified, auth_provider)
+                VALUES (?, ?, ?, ?, ?, ?, 0, 'local')
+            """, (user_id, username.lower(), password_hash, display_name or username, now,
+                  email.lower()))
+            conn.commit()
+            return {
+                "user_id": user_id,
+                "username": username.lower(),
+                "display_name": display_name or username,
+                "created_at": now,
+                "last_login_at": None,
+                "email": email.lower(),
+                "email_verified": False,
+                "auth_provider": "local",
+            }
+        except sqlite3.IntegrityError:
+            return None
+
+
+def create_user_oauth(
+    username: str,
+    email: str,
+    google_id: str,
+    display_name: Optional[str] = None,
+    db_path: Path = None
+) -> Optional[dict]:
+    """Create a new user via Google OAuth. Password set to sentinel '!oauth!'."""
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+    user_id = secrets.token_hex(8)
+    now = datetime.utcnow().isoformat() + 'Z'
+
+    with get_connection(db_path) as conn:
+        try:
+            conn.execute("""
+                INSERT INTO users (user_id, username, password_hash, display_name, created_at,
+                                   email, email_verified, google_id, auth_provider)
+                VALUES (?, ?, '!oauth!', ?, ?, ?, 1, ?, 'google')
+            """, (user_id, username.lower(), display_name or username, now,
+                  email.lower(), google_id))
+            conn.commit()
+            return {
+                "user_id": user_id,
+                "username": username.lower(),
+                "display_name": display_name or username,
+                "created_at": now,
+                "last_login_at": None,
+                "email": email.lower(),
+                "email_verified": True,
+                "auth_provider": "google",
+                "google_id": google_id,
+            }
+        except sqlite3.IntegrityError:
+            return None
+
+
+def authenticate_user_by_email(
+    email: str,
+    password: str,
+    db_path: Path = None
+) -> Optional[dict]:
+    """Authenticate a user by email and password."""
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+    with get_connection(db_path) as conn:
+        row = conn.execute(
+            "SELECT * FROM users WHERE email = ? AND is_active = 1",
+            (email.lower(),)
+        ).fetchone()
+
+        if row is None:
+            return None
+
+        if not verify_password(password, row["password_hash"]):
+            return None
+
+        now = datetime.utcnow().isoformat() + 'Z'
+        conn.execute(
+            "UPDATE users SET last_login_at = ? WHERE user_id = ?",
+            (now, row["user_id"])
+        )
+        conn.commit()
+
+        d = _user_dict_from_row(row)
+        d["last_login_at"] = now
+        return d
+
+
+def update_user_email(
+    user_id: str,
+    email: str,
+    db_path: Path = None
+) -> bool:
+    """Add/update email on an existing user. Returns False if email already taken."""
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+    with get_connection(db_path) as conn:
+        try:
+            conn.execute(
+                "UPDATE users SET email = ?, email_verified = 0 WHERE user_id = ?",
+                (email.lower(), user_id)
+            )
+            conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            return False
+
+
+def set_email_verified(
+    user_id: str,
+    db_path: Path = None
+) -> None:
+    """Mark a user's email as verified."""
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+    with get_connection(db_path) as conn:
+        conn.execute(
+            "UPDATE users SET email_verified = 1 WHERE user_id = ?",
+            (user_id,)
+        )
+        conn.commit()
+
+
+def update_password(
+    user_id: str,
+    new_password: str,
+    db_path: Path = None
+) -> None:
+    """Update a user's password hash."""
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+    password_hash = hash_password(new_password)
+    with get_connection(db_path) as conn:
+        conn.execute(
+            "UPDATE users SET password_hash = ? WHERE user_id = ?",
+            (password_hash, user_id)
+        )
+        conn.commit()
+
+
+def link_google_account(
+    user_id: str,
+    google_id: str,
+    db_path: Path = None
+) -> bool:
+    """Link a Google account to an existing user. Returns False if google_id already linked."""
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+    with get_connection(db_path) as conn:
+        try:
+            conn.execute(
+                "UPDATE users SET google_id = ?, auth_provider = 'google' WHERE user_id = ?",
+                (google_id, user_id)
+            )
+            conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            return False
+
+
+# --- Auth Tokens ---
+
+def create_auth_token(
+    user_id: str,
+    token_type: str,
+    expires_hours: int = 24,
+    db_path: Path = None
+) -> str:
+    """Create a secure auth token (email verification or password reset)."""
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+    token = secrets.token_urlsafe(32)
+    now = datetime.utcnow()
+    expires = now + timedelta(hours=expires_hours)
+
+    with get_connection(db_path) as conn:
+        conn.execute("""
+            INSERT INTO auth_tokens (token, user_id, token_type, created_at, expires_at)
+            VALUES (?, ?, ?, ?, ?)
+        """, (token, user_id, token_type, now.isoformat() + 'Z', expires.isoformat() + 'Z'))
+        conn.commit()
+    return token
+
+
+def validate_auth_token(
+    token: str,
+    token_type: str,
+    db_path: Path = None
+) -> Optional[str]:
+    """Validate a token. Returns user_id if valid, None otherwise. Marks token as used."""
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+    now = datetime.utcnow().isoformat() + 'Z'
+
+    with get_connection(db_path) as conn:
+        row = conn.execute(
+            "SELECT * FROM auth_tokens WHERE token = ? AND token_type = ? AND used = 0 AND expires_at > ?",
+            (token, token_type, now)
+        ).fetchone()
+
+        if row is None:
+            return None
+
+        # Mark as used
+        conn.execute("UPDATE auth_tokens SET used = 1 WHERE token = ?", (token,))
+        conn.commit()
+        return row["user_id"]
+
+
+def count_recent_tokens(
+    user_id: str,
+    token_type: str,
+    hours: int = 1,
+    db_path: Path = None
+) -> int:
+    """Count tokens created in the last N hours for rate limiting."""
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+    cutoff = (datetime.utcnow() - timedelta(hours=hours)).isoformat() + 'Z'
+
+    with get_connection(db_path) as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) as cnt FROM auth_tokens WHERE user_id = ? AND token_type = ? AND created_at > ?",
+            (user_id, token_type, cutoff)
+        ).fetchone()
+        return row["cnt"]
 
 
 # --- Game Queries for Browser ---
@@ -2031,7 +2355,8 @@ def get_public_lobby_games(
                    g.increment, g.days_per_move, g.created_at,
                    g.player1_user_id, g.player2_user_id,
                    COALESCE(u1.display_name, u1.username) as p1_name,
-                   COALESCE(u2.display_name, u2.username) as p2_name
+                   COALESCE(u2.display_name, u2.username) as p2_name,
+                   u1.username as p1_username, u2.username as p2_username
             FROM games g
             LEFT JOIN users u1 ON g.player1_user_id = u1.user_id
             LEFT JOIN users u2 ON g.player2_user_id = u2.user_id
@@ -2052,10 +2377,12 @@ def get_public_lobby_games(
     for row in rows:
         # Determine host display name from whichever player slot is filled
         host_name = row["p1_name"] or row["p2_name"]
+        host_username = row["p1_username"] or row["p2_username"]
         results.append({
             "game_id": row["game_id"],
             "join_code": row["join_code"],
             "host_display_name": host_name,
+            "host_username": host_username,
             "game_mode": row["game_mode"] or "realtime",
             "time_control": row["time_control"],
             "increment": int(row["increment"] or 0),
@@ -2089,7 +2416,8 @@ def quick_match(
                    g.increment, g.days_per_move, g.created_at,
                    g.player1_user_id, g.player2_user_id,
                    COALESCE(u1.display_name, u1.username) as p1_name,
-                   COALESCE(u2.display_name, u2.username) as p2_name
+                   COALESCE(u2.display_name, u2.username) as p2_name,
+                   u1.username as p1_username, u2.username as p2_username
             FROM games g
             LEFT JOIN users u1 ON g.player1_user_id = u1.user_id
             LEFT JOIN users u2 ON g.player2_user_id = u2.user_id
@@ -2110,10 +2438,12 @@ def quick_match(
         return None
 
     host_name = row["p1_name"] or row["p2_name"]
+    host_username = row["p1_username"] or row["p2_username"]
     return {
         "game_id": row["game_id"],
         "join_code": row["join_code"],
         "host_display_name": host_name,
+        "host_username": host_username,
         "game_mode": row["game_mode"] or "realtime",
         "time_control": row["time_control"],
         "increment": int(row["increment"] or 0),
@@ -2196,7 +2526,7 @@ def join_online_game(
                 }
             else:
                 opponent_row = conn.execute("""
-                    SELECT u.user_id, u.display_name, p.elo_rating
+                    SELECT u.user_id, u.username, u.display_name, p.elo_rating
                     FROM users u
                     LEFT JOIN players p ON p.user_id = u.user_id AND p.player_type = 'human'
                     WHERE u.user_id = ?
@@ -2205,6 +2535,7 @@ def join_online_game(
                     opponent = {
                         "user_id": opponent_row["user_id"],
                         "display_name": opponent_row["display_name"],
+                        "username": opponent_row["username"],
                         "elo_rating": opponent_row["elo_rating"] or 1000.0,
                     }
 
@@ -2273,6 +2604,7 @@ def get_online_game_status(
                    g.time_control, g.increment,
                    g.game_mode, g.days_per_move, g.move_deadline,
                    u1.display_name as p1_name, u2.display_name as p2_name,
+                   u1.username as p1_username, u2.username as p2_username,
                    p1.elo_rating as p1_elo, p2.elo_rating as p2_elo
             FROM games g
             LEFT JOIN users u1 ON g.player1_user_id = u1.user_id
@@ -2300,6 +2632,7 @@ def get_online_game_status(
             your_info = {
                 "user_id": my_id,
                 "display_name": row["p1_name"] or ("Anonymous" if my_id.startswith("anon_") else my_id),
+                "username": row["p1_username"],
                 **({"elo_rating": row["p1_elo"]} if row["p1_elo"] and not my_id.startswith("anon_") else {}),
             }
         elif your_color == 1 and row["player2_user_id"]:
@@ -2307,6 +2640,7 @@ def get_online_game_status(
             your_info = {
                 "user_id": my_id,
                 "display_name": row["p2_name"] or ("Anonymous" if my_id.startswith("anon_") else my_id),
+                "username": row["p2_username"],
                 **({"elo_rating": row["p2_elo"]} if row["p2_elo"] and not my_id.startswith("anon_") else {}),
             }
 
@@ -2317,6 +2651,7 @@ def get_online_game_status(
             opponent = {
                 "user_id": opp_id,
                 "display_name": row["p2_name"] or ("Anonymous" if opp_id.startswith("anon_") else opp_id),
+                "username": row["p2_username"],
                 **({"elo_rating": row["p2_elo"]} if row["p2_elo"] and not opp_id.startswith("anon_") else {}),
             }
         elif your_color == 1 and row["player1_user_id"]:
@@ -2324,6 +2659,7 @@ def get_online_game_status(
             opponent = {
                 "user_id": opp_id,
                 "display_name": row["p1_name"] or ("Anonymous" if opp_id.startswith("anon_") else opp_id),
+                "username": row["p1_username"],
                 **({"elo_rating": row["p1_elo"]} if row["p1_elo"] and not opp_id.startswith("anon_") else {}),
             }
 
@@ -2431,7 +2767,8 @@ def get_user_online_games(
                    g.join_code, g.online_status, g.state_json, g.winner,
                    g.created_at, g.updated_at,
                    g.game_mode, g.move_deadline,
-                   u1.display_name as p1_name, u2.display_name as p2_name
+                   u1.display_name as p1_name, u2.display_name as p2_name,
+                   u1.username as p1_username, u2.username as p2_username
             FROM games g
             LEFT JOIN users u1 ON g.player1_user_id = u1.user_id
             LEFT JOIN users u2 ON g.player2_user_id = u2.user_id
@@ -2465,8 +2802,10 @@ def get_user_online_games(
             # Add opponent info if present
             if your_color == 0 and row["player2_user_id"]:
                 game_info["opponent_name"] = row["p2_name"]
+                game_info["opponent_username"] = row["p2_username"]
             elif your_color == 1 and row["player1_user_id"]:
                 game_info["opponent_name"] = row["p1_name"]
+                game_info["opponent_username"] = row["p1_username"]
 
             if row["online_status"] == "waiting":
                 waiting.append(game_info)
@@ -2631,10 +2970,12 @@ def get_player(player_id: str, db_path: Path = None) -> Optional[dict]:
         db_path = DEFAULT_DB_PATH
 
     with get_connection(db_path) as conn:
-        row = conn.execute(
-            "SELECT * FROM players WHERE player_id = ?",
-            (player_id,)
-        ).fetchone()
+        row = conn.execute("""
+            SELECT p.*, u.username
+            FROM players p
+            LEFT JOIN users u ON p.user_id = u.user_id
+            WHERE p.player_id = ?
+        """, (player_id,)).fetchone()
 
         if row is None:
             return None
@@ -2646,6 +2987,7 @@ def get_player(player_id: str, db_path: Path = None) -> Optional[dict]:
             "model_version": row["model_version"],
             "simulations": row["simulations"],
             "display_name": row["display_name"],
+            "username": row["username"] if "username" in row.keys() else None,
             "elo_rating": row["elo_rating"],
             "elo_games_played": row["elo_games_played"],
             "created_at": row["created_at"],
@@ -2809,9 +3151,11 @@ def get_leaderboard(
 
     with get_connection(db_path) as conn:
         rows = conn.execute(f"""
-            SELECT * FROM players
+            SELECT p.*, u.username
+            FROM players p
+            LEFT JOIN users u ON p.user_id = u.user_id
             WHERE {where_clause}
-            ORDER BY elo_rating DESC
+            ORDER BY p.elo_rating DESC
             LIMIT ?
         """, params + [limit]).fetchall()
 
@@ -2822,6 +3166,7 @@ def get_leaderboard(
             "model_version": row["model_version"],
             "simulations": row["simulations"],
             "display_name": row["display_name"],
+            "username": row["username"] if "username" in row.keys() else None,
             "elo_rating": row["elo_rating"],
             "elo_games_played": row["elo_games_played"],
             "created_at": row["created_at"],

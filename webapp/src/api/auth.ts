@@ -10,11 +10,22 @@ export interface User {
   display_name: string | null;
   created_at: string;
   last_login_at: string | null;
+  email: string | null;
+  email_verified: boolean;
+  auth_provider: 'local' | 'google';
 }
 
 export interface AuthResponse {
   user: User;
   message: string;
+}
+
+export interface GoogleAuthResponse {
+  status: 'logged_in' | 'needs_username';
+  user: User | null;
+  temp_token: string | null;
+  email: string | null;
+  suggested_name: string | null;
 }
 
 class AuthAPIError extends Error {
@@ -42,6 +53,7 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   return response.json();
 }
 
+// Legacy username-only registration
 export async function register(
   username: string,
   password: string,
@@ -57,10 +69,92 @@ export async function register(
   });
 }
 
+// Legacy username-only login
 export async function login(username: string, password: string): Promise<AuthResponse> {
   return request('/auth/login', {
     method: 'POST',
     body: JSON.stringify({ username, password }),
+  });
+}
+
+// Email registration
+export async function registerWithEmail(
+  email: string,
+  username: string,
+  password: string,
+  displayName?: string
+): Promise<AuthResponse> {
+  return request('/auth/register/email', {
+    method: 'POST',
+    body: JSON.stringify({
+      email,
+      username,
+      password,
+      display_name: displayName,
+    }),
+  });
+}
+
+// Email/username login
+export async function loginWithEmail(email: string, password: string): Promise<AuthResponse> {
+  return request('/auth/login/email', {
+    method: 'POST',
+    body: JSON.stringify({ email, password }),
+  });
+}
+
+// Google OAuth
+export async function googleAuth(credential: string): Promise<GoogleAuthResponse> {
+  // Include redirect_uri so backend can exchange auth codes
+  const redirectUri = `${window.location.origin}/auth/google/callback`;
+  return request('/auth/google', {
+    method: 'POST',
+    body: JSON.stringify({ credential, redirect_uri: redirectUri }),
+  });
+}
+
+// Complete Google sign-up with username
+export async function googleComplete(
+  tempToken: string,
+  username: string,
+  displayName?: string
+): Promise<AuthResponse> {
+  return request('/auth/google/complete', {
+    method: 'POST',
+    body: JSON.stringify({
+      temp_token: tempToken,
+      username,
+      display_name: displayName,
+    }),
+  });
+}
+
+// Email verification
+export async function verifyEmail(token: string): Promise<{ message: string }> {
+  return request('/auth/verify-email', {
+    method: 'POST',
+    body: JSON.stringify({ token }),
+  });
+}
+
+// Resend verification email
+export async function resendVerification(): Promise<{ message: string }> {
+  return request('/auth/resend-verification', { method: 'POST' });
+}
+
+// Forgot password
+export async function forgotPassword(email: string): Promise<{ message: string }> {
+  return request('/auth/forgot-password', {
+    method: 'POST',
+    body: JSON.stringify({ email }),
+  });
+}
+
+// Reset password
+export async function resetPassword(token: string, password: string): Promise<{ message: string }> {
+  return request('/auth/reset-password', {
+    method: 'POST',
+    body: JSON.stringify({ token, password }),
   });
 }
 

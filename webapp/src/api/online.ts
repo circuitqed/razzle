@@ -36,6 +36,7 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 export interface OnlineOpponentInfo {
   user_id: string;
   display_name: string | null;
+  username: string | null;
   elo_rating?: number;
 }
 
@@ -78,6 +79,7 @@ export interface OnlineGameSummary {
   is_your_turn: boolean;
   ply: number;
   opponent_name?: string;
+  opponent_username?: string;
   created_at: string;
   updated_at: string;
   game_mode?: string;
@@ -93,6 +95,7 @@ export interface PublicGameSummary {
   game_id: string;
   join_code: string;
   host_display_name: string | null;
+  host_username: string | null;
   game_mode: string;
   time_control: number | null;
   increment: number;
@@ -207,7 +210,7 @@ export async function getMyOnlineGames(): Promise<MyOnlineGamesResponse> {
 
 export interface OnlineWebSocketHandlers {
   onState?: (state: GameState & { online_status?: string; your_color?: number; opponent_connected?: boolean }) => void;
-  onPlayerJoined?: (data: { user_id: string; display_name: string; color: number }) => void;
+  onPlayerJoined?: (data: { user_id: string; display_name: string; username?: string; color: number }) => void;
   onOpponentDisconnected?: (data: { user_id: string; color: number; grace_period: number }) => void;
   onOpponentReconnected?: (data: { user_id: string; color: number }) => void;
   onGameOver?: (data: { winner: number | null; reason: string }) => void;

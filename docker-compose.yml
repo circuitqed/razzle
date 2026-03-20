@@ -17,12 +17,18 @@ services:
       - TRAINING_API_KEY=${TRAINING_API_KEY:-}
       - RAZZLE_MODELS_DIR=/app/models
       - ALLOWED_ORIGINS=https://knightball.org,http://localhost:5173,http://localhost:7492
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-}
+      - RESEND_API_KEY=${RESEND_API_KEY:-}
+      - FRONTEND_URL=${FRONTEND_URL:-https://knightball.org}
     restart: unless-stopped
 
   webapp:
     build:
       context: ./webapp
       dockerfile: Dockerfile
+      args:
+        VITE_GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
     container_name: knightball-webapp
     ports:
       - "7492:5000"

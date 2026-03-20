@@ -1,6 +1,6 @@
 import { createContext, useContext, useState, useEffect, useCallback, ReactNode } from 'react';
 import * as authApi from '../api/auth';
-import type { User } from '../api/auth';
+import type { User, GoogleAuthResponse } from '../api/auth';
 
 interface AuthContextType {
   user: User | null;
@@ -8,6 +8,10 @@ interface AuthContextType {
   isAuthenticated: boolean;
   login: (username: string, password: string) => Promise<void>;
   register: (username: string, password: string, displayName?: string) => Promise<void>;
+  loginWithEmail: (email: string, password: string) => Promise<void>;
+  registerWithEmail: (email: string, username: string, password: string, displayName?: string) => Promise<void>;
+  googleAuth: (credential: string) => Promise<GoogleAuthResponse>;
+  googleComplete: (tempToken: string, username: string, displayName?: string) => Promise<void>;
   logout: () => Promise<void>;
   refreshUser: () => Promise<void>;
 }
@@ -50,6 +54,29 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(response.user);
   }, []);
 
+  const loginWithEmail = useCallback(async (email: string, password: string) => {
+    const response = await authApi.loginWithEmail(email, password);
+    setUser(response.user);
+  }, []);
+
+  const registerWithEmail = useCallback(async (email: string, username: string, password: string, displayName?: string) => {
+    const response = await authApi.registerWithEmail(email, username, password, displayName);
+    setUser(response.user);
+  }, []);
+
+  const googleAuth = useCallback(async (credential: string): Promise<GoogleAuthResponse> => {
+    const response = await authApi.googleAuth(credential);
+    if (response.status === 'logged_in' && response.user) {
+      setUser(response.user);
+    }
+    return response;
+  }, []);
+
+  const googleComplete = useCallback(async (tempToken: string, username: string, displayName?: string) => {
+    const response = await authApi.googleComplete(tempToken, username, displayName);
+    setUser(response.user);
+  }, []);
+
   const logout = useCallback(async () => {
     await authApi.logout();
     setUser(null);
@@ -63,6 +90,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         isAuthenticated: !!user,
         login,
         register,
+        loginWithEmail,
+        registerWithEmail,
+        googleAuth,
+        googleComplete,
         logout,
         refreshUser,
       }}

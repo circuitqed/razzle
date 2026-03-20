@@ -50,14 +50,16 @@ export default function GameBrowser({ isOpen, onClose, onSelectGame }: GameBrows
   }, []);
 
   const filteredPlayers = playerQuery.length > 0
-    ? allPlayers.filter(p =>
-        p.display_name.toLowerCase().includes(playerQuery.toLowerCase())
-      ).slice(0, 8)
+    ? allPlayers.filter(p => {
+        const q = playerQuery.toLowerCase();
+        const name = (p.username || p.display_name).toLowerCase();
+        return name.includes(q);
+      }).slice(0, 8)
     : [];
 
   const handleSelectPlayer = (player: PlayerProfile) => {
     setSelectedPlayer(player);
-    setPlayerQuery(player.display_name);
+    setPlayerQuery(player.username || player.display_name);
     setShowDropdown(false);
     setMyGamesOnly(false);
   };
@@ -212,7 +214,7 @@ export default function GameBrowser({ isOpen, onClose, onSelectGame }: GameBrows
                 onChange={(e) => {
                   setPlayerQuery(e.target.value);
                   setShowDropdown(true);
-                  if (selectedPlayer && e.target.value !== selectedPlayer.display_name) {
+                  if (selectedPlayer && e.target.value !== (selectedPlayer.username || selectedPlayer.display_name)) {
                     setSelectedPlayer(null);
                   }
                 }}
@@ -240,7 +242,7 @@ export default function GameBrowser({ isOpen, onClose, onSelectGame }: GameBrows
                     onClick={() => handleSelectPlayer(p)}
                     className="w-full text-left px-3 py-1.5 text-sm text-gray-200 hover:bg-gray-600 flex justify-between items-center"
                   >
-                    <span>{p.display_name}</span>
+                    <span>{p.username || p.display_name}</span>
                     <span className="text-xs text-gray-400">{Math.round(p.elo_rating)}</span>
                   </button>
                 ))}

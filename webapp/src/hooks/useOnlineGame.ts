@@ -258,6 +258,7 @@ export function useOnlineGame(options: UseOnlineGameOptions): UseOnlineGameRetur
           onOpponentJoinedRef.current({
             user_id: data.user_id,
             display_name: data.display_name,
+            username: data.username || null,
             elo_rating: 1000,
           });
         }

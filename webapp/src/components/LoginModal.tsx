@@ -1,15 +1,17 @@
 import { useState, useEffect } from 'react';
 import { useAuth } from '../contexts/AuthContext';
+import GoogleSignInButton from './GoogleSignInButton';
 
 interface LoginModalProps {
   isOpen: boolean;
   onClose: () => void;
   onSwitchToRegister: () => void;
+  onForgotPassword: () => void;
 }
 
-export default function LoginModal({ isOpen, onClose, onSwitchToRegister }: LoginModalProps) {
-  const { login } = useAuth();
-  const [username, setUsername] = useState('');
+export default function LoginModal({ isOpen, onClose, onSwitchToRegister, onForgotPassword }: LoginModalProps) {
+  const { loginWithEmail } = useAuth();
+  const [emailOrUsername, setEmailOrUsername] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -17,7 +19,7 @@ export default function LoginModal({ isOpen, onClose, onSwitchToRegister }: Logi
   // Reset form when modal opens
   useEffect(() => {
     if (isOpen) {
-      setUsername('');
+      setEmailOrUsername('');
       setPassword('');
       setError(null);
     }
@@ -31,7 +33,7 @@ export default function LoginModal({ isOpen, onClose, onSwitchToRegister }: Logi
     setIsLoading(true);
 
     try {
-      await login(username, password);
+      await loginWithEmail(emailOrUsername, password);
       onClose();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Login failed');
@@ -53,11 +55,11 @@ export default function LoginModal({ isOpen, onClose, onSwitchToRegister }: Logi
           )}
 
           <div>
-            <label className="block text-sm text-gray-300 mb-1">Username</label>
+            <label className="block text-sm text-gray-300 mb-1">Email or Username</label>
             <input
               type="text"
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
+              value={emailOrUsername}
+              onChange={(e) => setEmailOrUsername(e.target.value)}
               className="w-full px-3 py-2 bg-gray-700 text-white rounded border border-gray-600 focus:border-blue-500 focus:outline-none"
               required
               autoFocus
@@ -65,7 +67,16 @@ export default function LoginModal({ isOpen, onClose, onSwitchToRegister }: Logi
           </div>
 
           <div>
-            <label className="block text-sm text-gray-300 mb-1">Password</label>
+            <div className="flex items-center justify-between mb-1">
+              <label className="block text-sm text-gray-300">Password</label>
+              <button
+                type="button"
+                onClick={onForgotPassword}
+                className="text-xs text-blue-400 hover:text-blue-300"
+              >
+                Forgot password?
+              </button>
+            </div>
             <input
               type="password"
               value={password}
@@ -92,6 +103,18 @@ export default function LoginModal({ isOpen, onClose, onSwitchToRegister }: Logi
             </button>
           </div>
         </form>
+
+        {/* Divider */}
+        <div className="flex items-center gap-3 my-4">
+          <div className="flex-1 h-px bg-gray-600" />
+          <span className="text-sm text-gray-500">or</span>
+          <div className="flex-1 h-px bg-gray-600" />
+        </div>
+
+        {/* Google Sign In - redirects to Google */}
+        <div className="flex justify-center">
+          <GoogleSignInButton onError={(msg) => setError(msg)} />
+        </div>
 
         <div className="mt-4 text-center text-sm text-gray-400">
           Don't have an account?{' '}

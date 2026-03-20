@@ -1208,7 +1208,7 @@ function LeaderboardTab({ players }: { players: PlayerProfile[] }) {
       const simsPart = player.simulations ? ` (${player.simulations}s)` : '';
       return `${modelPart}${simsPart}`;
     }
-    return player.display_name;
+    return player.username || player.display_name;
   };
 
   // Get ELO color

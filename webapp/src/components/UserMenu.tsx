@@ -62,10 +62,10 @@ export default function UserMenu({ onOpenLogin, onOpenRegister, onOpenBrowser }:
         className="flex items-center gap-2 px-3 py-1 rounded hover:bg-gray-700 transition-colors"
       >
         <div className="w-8 h-8 bg-blue-600 rounded-full flex items-center justify-center text-white font-medium">
-          {(user?.display_name || user?.username || '?')[0].toUpperCase()}
+          {(user?.username || user?.display_name || '?')[0].toUpperCase()}
         </div>
         <span className="text-sm text-gray-200 hidden sm:inline">
-          {user?.display_name || user?.username}
+          {user?.username || user?.display_name}
         </span>
         <svg
           className={`w-4 h-4 text-gray-400 transition-transform ${isOpen ? 'rotate-180' : ''}`}
@@ -78,10 +78,23 @@ export default function UserMenu({ onOpenLogin, onOpenRegister, onOpenBrowser }:
       </button>
 
       {isOpen && (
-        <div className="absolute right-0 mt-2 w-48 bg-gray-800 rounded-lg shadow-lg border border-gray-700 py-1 z-50">
+        <div className="absolute right-0 mt-2 w-56 bg-gray-800 rounded-lg shadow-lg border border-gray-700 py-1 z-50">
           <div className="px-4 py-2 border-b border-gray-700">
             <p className="text-sm font-medium text-white">{user?.display_name || user?.username}</p>
             <p className="text-xs text-gray-400">@{user?.username}</p>
+            {user?.email && (
+              <p className="text-xs text-gray-500 mt-1 truncate">
+                {user.email}
+                {user.email_verified ? (
+                  <span className="text-green-400 ml-1" title="Verified">{'\u2713'}</span>
+                ) : (
+                  <span className="text-yellow-400 ml-1" title="Unverified">{'\u26A0'}</span>
+                )}
+              </p>
+            )}
+            {user?.auth_provider === 'google' && (
+              <p className="text-xs text-gray-500 mt-0.5">Signed in with Google</p>
+            )}
           </div>
 
           <button

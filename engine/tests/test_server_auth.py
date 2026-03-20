@@ -51,7 +51,7 @@ class TestUserRegistration:
         assert data['user']['username'] == 'newuser'
         assert data['user']['display_name'] == 'New User'
         assert 'user_id' in data['user']
-        assert 'razzle_auth' in response.cookies
+        assert 'knightball_auth' in response.cookies
 
     def test_register_without_display_name(self, client):
         """Test registration without display name uses username."""
@@ -145,7 +145,7 @@ class TestUserLogin:
         data = response.json()
         assert data['message'] == 'Login successful'
         assert data['user']['username'] == 'logintest'
-        assert 'razzle_auth' in response.cookies
+        assert 'knightball_auth' in response.cookies
 
     def test_login_wrong_password(self, client):
         """Test login with wrong password fails."""
