@@ -3,10 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <link rel="manifest" href="/manifest.json" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="apple-mobile-web-app-capable" content="yes" />
-    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <title>KnightBall</title>
     <meta name="description" content="Ever wonder what chess knights do when they're not defending their king? They play ball. A strategy board game — play against AI or challenge friends online." />
     <meta name="theme-color" content="#111827" />
@@ -28,6 +25,21 @@
   </head>
   <body>
     <div id="root"></div>
+    <script>
+      // Auto-recover from stale service worker cache: if a bundled asset
+      // fails to load (404 because filenames changed), wait for the new
+      // service worker to activate then reload automatically.
+      (function() {
+        var reloading = false;
+        window.addEventListener('error', function(e) {
+          if (!reloading && e.target && (e.target.tagName === 'SCRIPT' || e.target.tagName === 'LINK')) {
+            reloading = true;
+            // Brief delay to let the new SW install + activate
+            setTimeout(function() { location.reload(); }, 1500);
+          }
+        }, true);
+      })();
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

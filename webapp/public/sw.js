@@ -1,4 +1,4 @@
-const CACHE_VERSION = 'knightball-v1';
+const CACHE_VERSION = 'knightball-v2';
 const STATIC_CACHE = CACHE_VERSION + '-static';
 
 // Static assets to precache on install
