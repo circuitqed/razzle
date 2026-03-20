@@ -14,7 +14,7 @@ export interface TierSettings {
   label: string;
 }
 
-const TIERS: TierSettings[] = [
+export const TIERS: TierSettings[] = [
   { model: 'iter_005.pt', sims: 1,    label: 'Level 1 — Beginner' },
   { model: 'iter_010.pt', sims: 1,    label: 'Level 2 — Beginner' },
   { model: 'iter_025.pt', sims: 32,   label: 'Level 3 — Beginner' },

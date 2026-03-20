@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import * as onlineApi from '../api/online';
 import type { ModelInfo } from '../api/engine';
-import { getAutoMatchLevel, getTierSettings, getLevelLabel } from '../utils/autoMatch';
+import { getAutoMatchLevel, setAutoMatchLevel, getTierSettings, getLevelLabel, TIERS } from '../utils/autoMatch';
 
 type GameMode = 'ai' | 'pvp' | 'online';
 type ColorChoice = 'blue' | 'red' | 'random';
@@ -451,40 +451,21 @@ export default function NewGameDialog({
           <>
             <div className="mb-3">
               <label className="block text-xs text-gray-400 mb-2">Difficulty</label>
-              {/* Auto-match button (full width) */}
-              <button
-                onClick={() => setDifficulty('auto')}
-                className={`w-full px-2 py-2 rounded text-sm font-medium transition-colors mb-1.5 ${
-                  difficulty === 'auto'
-                    ? 'bg-green-600 text-white ring-2 ring-green-400'
-                    : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
-                }`}
-              >
-                Auto — {getLevelLabel(getAutoMatchLevel())}
-              </button>
-              {difficulty === 'auto' && (
-                <p className="text-xs text-gray-500 mb-1.5">
-                  Adjusts after each game. Win to level up, lose to level down.
-                </p>
-              )}
-              {/* Manual presets */}
-              <div className="grid grid-cols-3 gap-1.5">
-                {BOT_PRESETS.map((preset) => (
-                  <button
-                    key={preset.id}
-                    onClick={() => setDifficulty(preset.id)}
-                    className={`px-2 py-2 rounded text-sm font-medium transition-colors ${
-                      difficulty === preset.id
-                        ? 'bg-blue-600 text-white ring-2 ring-blue-400'
-                        : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
-                    }`}
-                  >
-                    {preset.name}
-                  </button>
-                ))}
+              {/* Auto-match toggle */}
+              <div className="flex items-center gap-2 mb-2">
+                <button
+                  onClick={() => setDifficulty('auto')}
+                  className={`flex-1 px-2 py-2 rounded text-sm font-medium transition-colors ${
+                    difficulty === 'auto'
+                      ? 'bg-green-600 text-white ring-2 ring-green-400'
+                      : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+                  }`}
+                >
+                  Auto — {getLevelLabel(getAutoMatchLevel())}
+                </button>
                 <button
                   onClick={() => setDifficulty('custom')}
-                  className={`px-2 py-2 rounded text-sm font-medium transition-colors ${
+                  className={`px-3 py-2 rounded text-sm font-medium transition-colors ${
                     difficulty === 'custom'
                       ? 'bg-gray-500 text-white ring-2 ring-gray-400'
                       : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
@@ -493,6 +474,38 @@ export default function NewGameDialog({
                   Custom
                 </button>
               </div>
+              {difficulty === 'auto' && (
+                <>
+                  <p className="text-xs text-gray-500 mb-2">
+                    Adjusts after each game. Or pick a level:
+                  </p>
+                  <div className="grid grid-cols-5 gap-1">
+                    {TIERS.map((tier, i) => {
+                      const level = i + 1;
+                      const autoLevel = getAutoMatchLevel();
+                      const isCurrentAuto = level === autoLevel;
+                      return (
+                        <button
+                          key={level}
+                          onClick={() => {
+                            setAutoMatchLevel(level);
+                            // Force re-render to update the label
+                            setDifficulty('auto');
+                          }}
+                          className={`px-1 py-1.5 rounded text-xs font-medium transition-colors ${
+                            isCurrentAuto
+                              ? 'bg-green-600 text-white ring-1 ring-green-400'
+                              : 'bg-gray-700 text-gray-400 hover:bg-gray-600 hover:text-white'
+                          }`}
+                          title={tier.label}
+                        >
+                          {level}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </>
+              )}
             </div>
 
             {/* Custom model/sims controls */}
