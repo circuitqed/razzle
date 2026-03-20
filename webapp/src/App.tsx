@@ -28,6 +28,8 @@ import { setSoundEnabled, isSoundEnabled } from './utils/sounds';
 import { listModels, type ModelInfo } from './api/engine';
 import * as onlineApi from './api/online';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
+import LandingPage from './components/LandingPage';
+import Tutorial from './components/Tutorial';
 
 // Lazy-loaded heavy routes
 const TrainingDashboard = lazy(() => import('./components/TrainingDashboard'));
@@ -36,6 +38,7 @@ const AnalysisBoard = lazy(() => import('./components/AnalysisBoard'));
 const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID || '';
 
 const GAME_STORAGE_KEY = 'knightball_current_game';
+const HAS_PLAYED_KEY = 'knightball_has_played';
 
 function readSavedGame(): { gameId: string; settings: NewGameSettings; playerColor: number } | null {
   try {
@@ -48,6 +51,12 @@ function readSavedGame(): { gameId: string; settings: NewGameSettings; playerCol
 function AppContent() {
   // Restore saved game state if available
   const savedGame = useMemo(() => readSavedGame(), []);
+
+  // Landing page & tutorial state
+  const [showLanding, setShowLanding] = useState(() => {
+    try { return !localStorage.getItem(HAS_PLAYED_KEY); } catch { return false; }
+  });
+  const [showTutorial, setShowTutorial] = useState(false);
 
   // Game settings (persisted across new games)
   const [settings, setSettings] = useState<NewGameSettings>(
@@ -155,8 +164,9 @@ function AppContent() {
     }
   }, []);
 
-  // On mount: resume saved game or start new
+  // On mount: resume saved game or start new (skip if landing page is showing)
   useEffect(() => {
+    if (showLanding) return;
     if (savedGame && !fromOnline) {
       resumeGame(savedGame.gameId).then(success => {
         if (!success) {
@@ -171,7 +181,7 @@ function AppContent() {
       startNewGame();
     }
     fetchModels();
-  }, []);
+  }, [showLanding]);
 
   // Persist active game to localStorage so it survives refresh
   useEffect(() => {
@@ -426,6 +436,28 @@ function AppContent() {
     setWaitingGame(null);
   };
 
+  // Landing page handlers
+  const handlePlayNow = useCallback(() => {
+    try { localStorage.setItem(HAS_PLAYED_KEY, 'true'); } catch { /* ignore */ }
+    setShowLanding(false);
+    // The mount useEffect will fire when showLanding becomes false
+  }, []);
+
+  const handleStartTutorial = useCallback(() => {
+    try { localStorage.setItem(HAS_PLAYED_KEY, 'true'); } catch { /* ignore */ }
+    setShowLanding(false);
+    setShowTutorial(true);
+  }, []);
+
+  const handleTutorialDone = useCallback(() => {
+    setShowTutorial(false);
+    // If no game was started yet (edge case), start one now.
+    if (!gameState) {
+      startNewGame();
+      fetchModels();
+    }
+  }, [gameState, startNewGame, fetchModels]);
+
   // WebSocket for waiting game
   useEffect(() => {
     if (!waitingGame) return;
@@ -440,8 +472,18 @@ function AppContent() {
     return () => { ws.close(); };
   }, [waitingGame, navigate]);
 
+  // Show landing page for first-time visitors
+  if (showLanding) {
+    return <LandingPage onPlayNow={handlePlayNow} onTutorial={handleStartTutorial} />;
+  }
+
   return (
     <div className="h-[100dvh] bg-gray-900 text-white flex flex-col overflow-hidden">
+      {/* Tutorial overlay */}
+      {showTutorial && (
+        <Tutorial onComplete={handleTutorialDone} onSkip={handleTutorialDone} />
+      )}
+
       {/* Email verification banner */}
       <EmailVerificationBanner />
 
@@ -463,6 +505,13 @@ function AppContent() {
             title="Report a bug"
           >
 {'\u{1F41B}'}
+          </button>
+          <button
+            onClick={() => setShowTutorial(true)}
+            className="p-1.5 text-gray-400 hover:text-white transition-colors"
+            title="How to Play"
+          >
+{'\u{1F393}'}
           </button>
           <UserMenu
             onOpenLogin={() => setShowLoginModal(true)}
@@ -615,7 +664,7 @@ function AppContent() {
       />
 
       {/* Rules Modal */}
-      <RulesModal isOpen={showRules} onClose={() => setShowRules(false)} />
+      <RulesModal isOpen={showRules} onClose={() => setShowRules(false)} onStartTutorial={() => { setShowRules(false); setShowTutorial(true); }} />
 
       {/* Bug Report Dialog */}
       <BugReportDialog

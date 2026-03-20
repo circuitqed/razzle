@@ -1,9 +1,10 @@
 interface RulesModalProps {
   isOpen: boolean;
   onClose: () => void;
+  onStartTutorial?: () => void;
 }
 
-export default function RulesModal({ isOpen, onClose }: RulesModalProps) {
+export default function RulesModal({ isOpen, onClose, onStartTutorial }: RulesModalProps) {
   if (!isOpen) return null;
 
   return (
@@ -105,9 +106,18 @@ export default function RulesModal({ isOpen, onClose }: RulesModalProps) {
           KnightBall is based on Razzle Dazzle (also known as Knight's Move).
         </p>
 
+        {onStartTutorial && (
+          <button
+            onClick={() => { onClose(); onStartTutorial(); }}
+            className="mt-4 w-full px-4 py-2 bg-green-600 hover:bg-green-700 rounded font-medium transition-colors"
+          >
+            Try the Tutorial
+          </button>
+        )}
+
         <button
           onClick={onClose}
-          className="mt-4 w-full px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded font-medium transition-colors"
+          className="mt-2 w-full px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded font-medium transition-colors"
         >
           Got it!
         </button>
