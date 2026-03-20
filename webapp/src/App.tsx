@@ -60,15 +60,18 @@ function AppContent() {
   const [showTutorial, setShowTutorial] = useState(false);
 
   // Game settings (persisted across new games)
-  const [settings, setSettings] = useState<NewGameSettings>(
-    savedGame?.settings ?? {
-      mode: 'ai',
-      model: undefined,
-      simulations: 256,
-      colorChoice: 'random',
+  const [settings, setSettings] = useState<NewGameSettings>(() => {
+    if (savedGame?.settings) return savedGame.settings;
+    // Resolve auto-match tier for initial default
+    const tier = getTierSettings(getAutoMatchLevel());
+    return {
+      mode: 'ai' as const,
+      model: tier.model,
+      simulations: tier.sims,
+      colorChoice: 'random' as const,
       difficulty: 'auto',
-    }
-  );
+    };
+  });
   const [playerColor, setPlayerColor] = useState(savedGame?.playerColor ?? 0);
   const [gameGeneration, setGameGeneration] = useState(0); // Bumped to force new game
 

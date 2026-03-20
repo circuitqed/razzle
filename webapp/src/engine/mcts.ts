@@ -374,9 +374,16 @@ async function simulateBatch(
 
   // Phase 2: EVALUATE — all non-terminal leaves (batched if supported)
   if (leaves.length > 0) {
-    const results = evaluator.evaluateBatch
-      ? await evaluator.evaluateBatch(leaves.map(l => l.state))
-      : await Promise.all(leaves.map(l => evaluator.evaluate(l.state)));
+    let results: Array<{ policy: Float32Array; value: number }>;
+    if (evaluator.evaluateBatch) {
+      results = await evaluator.evaluateBatch(leaves.map(l => l.state));
+    } else {
+      // Sequential evaluation — ONNX Runtime may not handle concurrent session.run()
+      results = [];
+      for (const leaf of leaves) {
+        results.push(await evaluator.evaluate(leaf.state));
+      }
+    }
 
     // Phase 3: EXPAND and BACKUP
     for (let i = 0; i < leaves.length; i++) {
