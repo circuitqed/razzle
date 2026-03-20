@@ -488,9 +488,7 @@ function AppContent() {
       <EmailVerificationBanner />
 
       {/* Header bar */}
-      <header className="flex items-center justify-between px-4 py-2 shrink-0">
-        <div className="w-20" /> {/* Spacer for balance */}
-        <h1 className="text-xl sm:text-2xl font-bold">KnightBall</h1>
+      <header className="flex items-center justify-end px-4 py-2 shrink-0">
         <div className="flex items-center gap-2">
           <button
             onClick={() => setShowGameBrowser(true)}
