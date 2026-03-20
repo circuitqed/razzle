@@ -63,15 +63,31 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // Stale-while-revalidate for HTML navigation (root page)
+  // Network-first for HTML navigation — stale HTML references old JS filenames
+  // that no longer exist after a deploy. Fall back to cache only if offline.
   if (event.request.mode === 'navigate' || url.pathname === '/') {
-    event.respondWith(staleWhileRevalidate(event.request));
+    event.respondWith(networkFirst(event.request));
     return;
   }
 
   // Cache-first for other static files (SVG, images, etc.)
   event.respondWith(cacheFirst(event.request));
 });
+
+// Network-first: try network, fall back to cache if offline
+async function networkFirst(request) {
+  try {
+    const response = await fetch(request);
+    if (response.ok) {
+      const cache = await caches.open(STATIC_CACHE);
+      cache.put(request, response.clone());
+    }
+    return response;
+  } catch {
+    const cached = await caches.match(request);
+    return cached || new Response('Offline', { status: 503, statusText: 'Offline' });
+  }
+}
 
 // Cache-first: return cached response, fall back to network and cache the result
 async function cacheFirst(request) {
