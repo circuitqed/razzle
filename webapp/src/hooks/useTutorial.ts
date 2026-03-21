@@ -54,6 +54,7 @@ export interface TutorialStep {
   chainPreState?: EngineState;
   chainPreMessage?: string;
   chainPreMove?: { from: number; to: number };
+  suggestedMoves?: number[];
 }
 
 // ---------------------------------------------------------------------------
@@ -72,6 +73,7 @@ export interface UseTutorialReturn {
   preMessage: string | null;
   preAnimMove: { from: number; to: number } | null;
   completionMessage: string | null;
+  suggestedMoves: number[] | undefined;
   selectedSquare: number | null;
   highlightSquares: number[];
   isPassing: boolean;
@@ -437,6 +439,7 @@ export function useTutorial(options: UseTutorialOptions): UseTutorialReturn {
     preMessage: showingPreState ? (step.chainPreMessage ?? step.preMessage ?? null) : null,
     preAnimMove,
     completionMessage: stepComplete ? (step.completionMessage ?? null) : null,
+    suggestedMoves: step.suggestedMoves,
     selectedSquare,
     highlightSquares,
     isPassing,

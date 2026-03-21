@@ -25,6 +25,8 @@ export interface TutorialStep {
   chainPreMessage?: string;
   /** The opponent's move to animate during chain pre-transition. */
   chainPreMove?: { from: number; to: number };
+  /** Moves to visually emphasize (green). Other allowed moves shown as gray. */
+  suggestedMoves?: number[];
 }
 
 const b = (sq: number): bigint => 1n << BigInt(sq);
@@ -181,7 +183,7 @@ export const TUTORIAL_STEPS: TutorialStep[] = [
     id: 'move-knight',
     title: 'Move a Knight',
     instruction: 'Knights move in an L-shape, just like chess. Moving a knight ends your turn. Tap any knight, then tap a highlighted square.',
-    hint: 'Each player has 5 knights and 1 ball.',
+    hint: 'The piece carrying the ball can\'t move as a knight — it can only pass.',
     completionMessage: 'Great move!',
     boardState: step1State,
     playerColor: 0,
@@ -240,8 +242,12 @@ export const TUTORIAL_STEPS: TutorialStep[] = [
     completionMessage: 'Well done! You cleared the piece and passed to it.',
     boardState: step5State,
     playerColor: 0,
-    allowedMoves: [mv(32, 23), mv(32, 17)],
+    allowedMoves: [
+      mv(32, 17), mv(32, 19), mv(32, 23), mv(32, 27),  // all legal knight moves from e5
+      mv(32, 37), mv(32, 41), mv(32, 45), mv(32, 47),
+    ],
     highlightSquares: [32],
+    suggestedMoves: [mv(32, 23), mv(32, 17)], // c4 and d3 land on pass lines from d4
     nextStepState: step5AfterMove,
     chainPreState: step5PreOpponent,
     chainPreMessage: 'The opponent is making their move...',

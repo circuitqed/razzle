@@ -28,6 +28,7 @@ interface BoardProps {
   lastTurnMoves?: LastMove[]; // All moves in last opponent turn (for multi-pass animation)
   animate?: boolean; // Whether to animate piece movement (default true)
   animationDuration?: number; // ms per segment (default ANIMATION_DURATION)
+  suggestedMoves?: number[]; // Moves to highlight green; other legal moves shown gray
 }
 
 const SQUARE_SIZE = 50;
@@ -76,6 +77,7 @@ export default function Board({
   lastTurnMoves,
   animate = true,
   animationDuration = ANIMATION_DURATION,
+  suggestedMoves,
 }: BoardProps) {
   // Drag state - drag only activates after moving past threshold
   const [pendingDragSquare, setPendingDragSquare] = useState<number | null>(null);
@@ -339,6 +341,18 @@ export default function Board({
     );
   }, [selectedSquare, legalMoves]);
 
+  // Suggested destinations (for tutorial — green highlight vs gray for others)
+  const suggestedDestinations = useMemo(() => {
+    if (!suggestedMoves || selectedSquare === null) return null;
+    return new Set(
+      suggestedMoves
+        .filter(m => m >= 0)
+        .map(decodeMove)
+        .filter(({ src }) => src === selectedSquare)
+        .map(({ dst }) => dst)
+    );
+  }, [suggestedMoves, selectedSquare]);
+
   // Get all squares with pieces that can move/pass
   const movablePieces = useMemo(() => {
     return new Set(
@@ -409,7 +423,11 @@ export default function Board({
     if (isSelected || isDragging) {
       bgColor = '#bbcb2b';
     } else if (isLegalDest || isDragDest) {
-      bgColor = isLight ? '#acd490' : '#87b560';
+      // If suggestedMoves is active, show suggested in green, others in gray
+      const isSuggested = !suggestedDestinations || suggestedDestinations.has(square);
+      bgColor = isSuggested
+        ? (isLight ? '#acd490' : '#87b560')  // green
+        : (isLight ? '#c8c8c8' : '#888888'); // gray
     } else if (isLastMoveFrom || isLastMoveTo) {
       // Highlight last move with a subtle yellow tint
       bgColor = isLight ? '#f7e896' : '#c9b458';

@@ -30,6 +30,7 @@ export default function Tutorial({ onComplete, onSkip }: TutorialProps) {
         chainPreMessage: s.chainPreMessage,
         preMove: s.preMove,
         chainPreMove: s.chainPreMove,
+        suggestedMoves: s.suggestedMoves,
       })),
     [],
   );
@@ -68,6 +69,7 @@ export default function Tutorial({ onComplete, onSkip }: TutorialProps) {
           touchedMask={tut.gameState.touched_mask}
           mustPass={checkMustPass(tut.engineState)}
           lastMove={tut.preAnimMove}
+          suggestedMoves={tut.suggestedMoves}
         />
       </div>
 
