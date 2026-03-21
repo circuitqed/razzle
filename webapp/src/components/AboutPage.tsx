@@ -43,10 +43,9 @@ export default function AboutPage() {
               opposite end of the board before your opponent does the same.
             </p>
             <p>
-              The physical game was published by Family Games America &mdash; first
-              as <em>Knight Moves</em> in 2005, then repackaged as <em>Razzle
-              Dazzle</em>. It shipped with a wooden board, ten wooden blocks (five per
-              player), two metal spheres, and a single page of rules. A game typically lasts
+              The physical game was published by Family Games America. It shipped
+              with a wooden board, ten wooden blocks (five per player), two metal
+              spheres, and a single page of rules. A game typically lasts
               around ten minutes, but beneath the simple rules lies genuine strategic depth:
               positioning your knights to open passing lanes while blocking your opponent's,
               timing forced-pass threats, and choosing when to advance versus when to defend.
