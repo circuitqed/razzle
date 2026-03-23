@@ -139,6 +139,7 @@ export default function NewGameDialog({
   const [model, setModel] = useState<string | undefined>(currentSettings.model);
   const [simulations, setSimulations] = useState(currentSettings.simulations);
   const [difficulty, setDifficulty] = useState<BotDifficulty>(currentSettings.difficulty ?? 'auto');
+  const [selectedLevel, setSelectedLevel] = useState(getAutoMatchLevel);
   const [colorChoice, setColorChoice] = useState<ColorChoice>(currentSettings.colorChoice);
   const [timeControl, setTimeControl] = useState<number | null>(currentSettings.timeControl ?? null);
   const [increment, setIncrement] = useState<number>(currentSettings.increment ?? 0);
@@ -461,7 +462,7 @@ export default function NewGameDialog({
                       : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
                   }`}
                 >
-                  Auto — {getLevelLabel(getAutoMatchLevel())}
+                  Auto — {getLevelLabel(selectedLevel)}
                 </button>
                 <button
                   onClick={() => setDifficulty('custom')}
@@ -482,15 +483,13 @@ export default function NewGameDialog({
                   <div className="grid grid-cols-5 gap-1">
                     {TIERS.map((tier, i) => {
                       const level = i + 1;
-                      const autoLevel = getAutoMatchLevel();
-                      const isCurrentAuto = level === autoLevel;
+                      const isCurrentAuto = level === selectedLevel;
                       return (
                         <button
                           key={level}
                           onClick={() => {
                             setAutoMatchLevel(level);
-                            // Force re-render to update the label
-                            setDifficulty('auto');
+                            setSelectedLevel(level);
                           }}
                           className={`px-1 py-1.5 rounded text-xs font-medium transition-colors ${
                             isCurrentAuto
