@@ -41,7 +41,7 @@ class GameState:
     pieces: tuple[int, int] = (P1_START_PIECES, P2_START_PIECES)
     balls: tuple[int, int] = (P1_START_BALL, P2_START_BALL)
     current_player: int = 0
-    touched_mask: int = 0
+    touched_mask: int = field(default_factory=lambda: P1_START_PIECES | P2_START_PIECES)
     has_passed: bool = False
     last_knight_dst: int = -1
     ply: int = 0

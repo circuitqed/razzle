@@ -31,7 +31,7 @@ export function newGame(): EngineState {
     pieces: [P1_START_PIECES, P2_START_PIECES],
     balls: [P1_START_BALL, P2_START_BALL],
     currentPlayer: 0,
-    touchedMask: 0n,
+    touchedMask: P1_START_PIECES | P2_START_PIECES, // All pieces start ineligible for passes
     hasPassed: false,
     lastKnightDst: -1,
     ply: 0,
