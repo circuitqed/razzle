@@ -307,9 +307,11 @@ export function useAIWorker(): UseAIWorkerReturn {
       );
 
       // Recycle the worker to fully release WASM linear memory.
-      // Only needed for the 'wasm' backend — WASM memory grows monotonically
-      // and iOS kills the tab. WebGPU, WebGL, and pure-TS don't have this issue.
-      if (activeBackendRef.current === 'wasm') {
+      // Both 'wasm' and 'webgpu' backends use ONNX Runtime WASM internally,
+      // so memory grows monotonically. Recycle to prevent slowdown.
+      // Skip for 'gpu' (custom WebGL), 'pure-ts', and 'random'.
+      const backend = activeBackendRef.current;
+      if (backend === 'wasm' || backend === 'webgpu') {
         recycleWorker();
       }
 
