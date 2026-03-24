@@ -1336,12 +1336,32 @@ def get_game_full(game_id: str, db_path: Path = None) -> Optional[dict]:
         from razzle.core.moves import move_to_algebraic
         moves_algebraic = [move_to_algebraic(m) for m in moves]
 
+        # Look up player display names
+        p1_name = None
+        p2_name = None
+        if row["player1_user_id"]:
+            user = conn.execute("SELECT display_name FROM users WHERE user_id = ?", (row["player1_user_id"],)).fetchone()
+            if user:
+                p1_name = user["display_name"]
+        if row["player2_user_id"]:
+            user = conn.execute("SELECT display_name FROM users WHERE user_id = ?", (row["player2_user_id"],)).fetchone()
+            if user:
+                p2_name = user["display_name"]
+
+        # AI name from model version
+        if row["player2_type"] == "ai" and row["ai_model_version"]:
+            p2_name = f"AI ({row['ai_model_version']})"
+        elif row["player2_type"] == "ai":
+            p2_name = "AI"
+
         return {
             "game_id": row["game_id"],
             "player1_type": row["player1_type"],
             "player2_type": row["player2_type"],
             "player1_user_id": row["player1_user_id"],
             "player2_user_id": row["player2_user_id"],
+            "player1_name": p1_name,
+            "player2_name": p2_name,
             "status": "finished" if state.is_terminal() else "playing",
             "winner": state.get_winner(),
             "ply": state.ply,

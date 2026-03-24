@@ -162,8 +162,8 @@ export default function ReplayViewer({ gameId, onClose }: ReplayViewerProps) {
     const result = gameData.winner === 0 ? '1-0' : gameData.winner === 1 ? '0-1' : gameData.status === 'finished' ? '1/2-1/2' : '*';
     const pgn = generatePGN(gameData.moves, {
       gameId: gameData.game_id,
-      blue: gameData.player1_type === 'human' ? 'Human' : 'AI',
-      red: gameData.player2_type === 'human' ? 'Human' : 'AI',
+      blue: gameData.player1_name || (gameData.player1_type === 'human' ? 'Human' : 'AI'),
+      red: gameData.player2_name || (gameData.player2_type === 'human' ? 'Human' : 'AI'),
       result,
     });
     navigator.clipboard.writeText(pgn).then(() => {
@@ -267,12 +267,12 @@ export default function ReplayViewer({ gameId, onClose }: ReplayViewerProps) {
           <div>
             <h2 className="text-xl font-bold text-white">Game Replay</h2>
             <p className="text-sm text-gray-400">
-              {gameData.player2_type === 'ai' ? 'vs AI' : '2 Player'} • {' '}
+              {gameData.player1_name || 'Blue'} vs {gameData.player2_name || 'Red'} • {' '}
               {gameData.status === 'finished'
                 ? gameData.winner === 0
-                  ? 'Blue Won'
+                  ? `${gameData.player1_name || 'Blue'} Won`
                   : gameData.winner === 1
-                  ? 'Red Won'
+                  ? `${gameData.player2_name || 'Red'} Won`
                   : 'Draw'
                 : 'In Progress'}
             </p>

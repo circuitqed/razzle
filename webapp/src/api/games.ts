@@ -36,6 +36,8 @@ export interface GameFull {
   player2_type: string;
   player1_user_id: string | null;
   player2_user_id: string | null;
+  player1_name: string | null;
+  player2_name: string | null;
   status: string;
   winner: number | null;
   ply: number;
