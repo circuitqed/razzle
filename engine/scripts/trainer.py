@@ -360,8 +360,12 @@ class DistributedTrainer:
         # Games log for analysis
         self.games_log_path = self.output_dir / 'games_log.jsonl'
 
-        # Replay buffer for preventing catastrophic forgetting
-        self.replay_buffer = ReplayBuffer(max_positions=self.replay_buffer_size)
+        # Replay buffer: keep 10% of all positions seen, min 5k, hard cap at replay_buffer_size
+        self.replay_buffer = ReplayBuffer(
+            max_positions=self.replay_buffer_size,
+            fraction=0.10,
+            min_positions=5_000,
+        )
 
         # Game archive for permanent storage of training data
         self.game_archive = GameArchive(archive_dir=str(self.output_dir / 'games_archive'))
@@ -611,12 +615,20 @@ class DistributedTrainer:
                 legal_masks = data['legal_masks'] if 'legal_masks' in data and data['legal_masks'] is not None else None
 
                 # Reconstruct replay buffer
-                self.replay_buffer = ReplayBuffer(max_positions=self.replay_buffer_size)
+                self.replay_buffer = ReplayBuffer(
+                    max_positions=self.replay_buffer_size,
+                    fraction=0.10,
+                    min_positions=5_000,
+                )
+                # Estimate total_positions_seen from saved buffer size
+                # (the buffer was 10% of total, so total ~= saved * 10)
+                self.replay_buffer.total_positions_seen = len(states) * 10
                 if legal_masks is not None:
                     self.replay_buffer.add(states, policies, values, legal_masks)
                 else:
                     self.replay_buffer.add(states, policies, values, None)
-                print(f"[Trainer] Restored replay buffer ({len(self.replay_buffer)} positions)")
+                print(f"[Trainer] Restored replay buffer ({len(self.replay_buffer)} positions, "
+                      f"~{self.replay_buffer.total_positions_seen:,} total seen)")
             except Exception as e:
                 print(f"[Trainer] Could not restore replay buffer: {e}")
 
@@ -686,7 +698,8 @@ class DistributedTrainer:
 
         # Add new positions to replay buffer
         self.replay_buffer.add(states, policies, values, legal_masks)
-        print(f"[Trainer] Replay buffer size: {len(self.replay_buffer)}")
+        print(f"[Trainer] Replay buffer: {len(self.replay_buffer)} / {self.replay_buffer.capacity} "
+              f"(10% of {self.replay_buffer.total_positions_seen:,} seen)")
 
         # Sample from buffer (50% new, 50% buffer) if buffer has enough data
         if len(self.replay_buffer) > 1000:

@@ -2,9 +2,12 @@
 Replay buffer for storing training positions across iterations.
 
 Prevents catastrophic forgetting by mixing old and new positions during training.
+
+Buffer size is 10% of total positions seen, with a minimum floor. This mirrors
+AlphaZero's approach (which kept the last ~1M games out of ~25M total) but
+scaled for our smaller training runs.
 """
 
-from collections import deque
 import numpy as np
 import random
 
@@ -13,23 +16,40 @@ class ReplayBuffer:
     """
     Stores training positions across iterations for replay.
 
-    Uses deques with a max size to automatically evict oldest positions
-    when capacity is reached.
+    Buffer capacity grows as training progresses: max(min_positions,
+    total_positions_seen * fraction). Oldest positions are evicted
+    when capacity is exceeded.
     """
 
-    def __init__(self, max_positions: int = 100_000):
+    def __init__(
+        self,
+        max_positions: int = 100_000,
+        fraction: float = 0.10,
+        min_positions: int = 5_000,
+    ):
         """
         Initialize replay buffer.
 
         Args:
-            max_positions: Maximum number of positions to store.
-                          Oldest positions are evicted when full.
+            max_positions: Hard upper cap on buffer size.
+            fraction: Keep this fraction of total positions seen.
+            min_positions: Minimum buffer size regardless of fraction.
         """
-        self.max_positions = max_positions
-        self.states = deque(maxlen=max_positions)
-        self.policies = deque(maxlen=max_positions)
-        self.values = deque(maxlen=max_positions)
-        self.legal_masks = deque(maxlen=max_positions)
+        self.hard_cap = max_positions
+        self.fraction = fraction
+        self.min_positions = min_positions
+        self.total_positions_seen = 0
+
+        self.states: list[np.ndarray] = []
+        self.policies: list[np.ndarray] = []
+        self.values: list[np.ndarray] = []
+        self.legal_masks: list[np.ndarray | None] = []
+
+    @property
+    def capacity(self) -> int:
+        """Current buffer capacity based on total positions seen."""
+        dynamic = int(self.total_positions_seen * self.fraction)
+        return min(self.hard_cap, max(self.min_positions, dynamic))
 
     def add(
         self,
@@ -42,18 +62,33 @@ class ReplayBuffer:
         Add batch of positions to buffer.
 
         Args:
-            states: Board state tensors (N, 6, 8, 7)
+            states: Board state tensors (N, C, H, W)
             policies: Policy targets (N, NUM_ACTIONS)
             values: Value targets (N,)
             legal_masks: Legal move masks (N, NUM_ACTIONS) or None
         """
-        for i in range(len(states)):
+        n = len(states)
+        self.total_positions_seen += n
+
+        for i in range(n):
             self.states.append(states[i])
             self.policies.append(policies[i])
             self.values.append(values[i])
             self.legal_masks.append(
                 legal_masks[i] if legal_masks is not None else None
             )
+
+        self._evict()
+
+    def _evict(self) -> None:
+        """Remove oldest positions if over capacity."""
+        cap = self.capacity
+        excess = len(self.states) - cap
+        if excess > 0:
+            self.states = self.states[excess:]
+            self.policies = self.policies[excess:]
+            self.values = self.values[excess:]
+            self.legal_masks = self.legal_masks[excess:]
 
     def sample(self, n: int) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray | None]:
         """
