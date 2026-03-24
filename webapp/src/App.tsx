@@ -833,21 +833,8 @@ function NotFoundPage() {
   );
 }
 
-// Standalone Training Dashboard page for /dashboard route (requires login)
+// Standalone Training Dashboard page for /dashboard route
 function TrainingDashboardPage() {
-  const { isAuthenticated, isLoading } = useAuth();
-  const navigate = useNavigate();
-
-  useEffect(() => {
-    if (!isLoading && !isAuthenticated) {
-      navigate('/');
-    }
-  }, [isAuthenticated, isLoading, navigate]);
-
-  if (isLoading || !isAuthenticated) {
-    return <div className="min-h-screen bg-gray-900 flex items-center justify-center text-gray-400">Loading...</div>;
-  }
-
   return (
     <TrainingDashboard refreshInterval={10000} />
   );

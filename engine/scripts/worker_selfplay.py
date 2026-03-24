@@ -264,11 +264,8 @@ class SelfPlayWorker:
         models from early training so Elo ratings stay connected across
         all generations (the models list endpoint only returns recent models).
         """
-        # Fixed anchor models from early training for Elo continuity
-        ANCHOR_MODELS = [
-            "iter_020", "iter_100", "iter_200", "iter_300",
-            "iter_400", "iter_466",
-        ]
+        # No hardcoded anchors — use only models available on the server
+        ANCHOR_MODELS: list[str] = []
         try:
             import requests
             resp = requests.get(f"{self.api_url}/training/models", timeout=10)
@@ -770,22 +767,26 @@ class SelfPlayWorker:
                     # Play arena game between two different models
                     model1, model2 = self._select_arena_models()
                     if model1 != model2:
-                        moves, result, visit_counts, m1, m2 = self.play_arena_game(model1, model2)
+                        try:
+                            moves, result, visit_counts, m1, m2 = self.play_arena_game(model1, model2)
+                        except Exception as e:
+                            print(f"[Worker {self.worker_id}] Arena game failed ({model1} vs {model2}): {e}")
+                            is_arena_game = False  # Fall back to self-play
+                        else:
+                            if self.shutdown_event.is_set():
+                                break
 
-                        if self.shutdown_event.is_set():
-                            break
+                            # Submit as training game (use model1's version for training data)
+                            if self.submit_game(moves, result, visit_counts):
+                                self.games_completed += 1
+                                self.arena_games_played += 1
 
-                        # Submit as training game (use model1's version for training data)
-                        if self.submit_game(moves, result, visit_counts):
-                            self.games_completed += 1
-                            self.arena_games_played += 1
+                                # Also submit arena result
+                                self.submit_arena_result(m1, m2, result)
 
-                            # Also submit arena result
-                            self.submit_arena_result(m1, m2, result)
-
-                            winner_str = {1.0: m1, -1.0: m2, 0.0: "Draw"}.get(result, "?")
-                            print(f"[Worker {self.worker_id}] Arena {self.arena_games_played}: "
-                                  f"{m1} vs {m2}, {len(moves)} moves, winner={winner_str}")
+                                winner_str = {1.0: m1, -1.0: m2, 0.0: "Draw"}.get(result, "?")
+                                print(f"[Worker {self.worker_id}] Arena {self.arena_games_played}: "
+                                      f"{m1} vs {m2}, {len(moves)} moves, winner={winner_str}")
                     else:
                         is_arena_game = False  # Fall back to self-play
 

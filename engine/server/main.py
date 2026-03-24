@@ -2348,11 +2348,9 @@ async def download_training_model(version: str, _=Depends(require_training_key))
 async def get_training_dashboard(
     request: Request,
     auth_cookie: Optional[str] = Cookie(None, alias=AUTH_COOKIE_NAME),
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
 ):
-    """Get enhanced training status for the dashboard. Requires login."""
-    user = await get_current_user(request, auth_cookie)
-    if not user:
-        raise HTTPException(status_code=401, detail="Login required")
+    """Get training status for the dashboard. Public read access."""
     stats = persistence.get_training_games_stats()
     models = persistence.list_training_models(limit=10)
     latest = persistence.get_latest_training_model()
