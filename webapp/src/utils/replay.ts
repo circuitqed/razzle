@@ -304,3 +304,47 @@ export function formatMovesForDisplay(moves: number[], upToPly?: number): Format
 
   return turns;
 }
+
+/**
+ * Generate a PGN-like text representation of a game.
+ * Format: numbered turns with blue and red moves.
+ * Example: "1. b1-c3 b8-c6  2. d1-c1-b1 d8-e8-f8"
+ */
+export function generatePGN(
+  moves: number[],
+  metadata?: {
+    blue?: string;
+    red?: string;
+    result?: string;
+    date?: string;
+    gameId?: string;
+  },
+): string {
+  const turns = formatMovesForDisplay(moves);
+  const lines: string[] = [];
+
+  // Headers
+  if (metadata?.gameId) lines.push(`[Game "${metadata.gameId}"]`);
+  if (metadata?.date) lines.push(`[Date "${metadata.date}"]`);
+  if (metadata?.blue) lines.push(`[Blue "${metadata.blue}"]`);
+  if (metadata?.red) lines.push(`[Red "${metadata.red}"]`);
+  if (metadata?.result) lines.push(`[Result "${metadata.result}"]`);
+  if (lines.length > 0) lines.push('');
+
+  // Moves
+  const moveLines: string[] = [];
+  for (let i = 0; i < turns.length; i++) {
+    const t = turns[i];
+    let line = `${i + 1}. ${t.blue || '...'}`;
+    if (t.red) line += `  ${t.red}`;
+    moveLines.push(line);
+  }
+  lines.push(moveLines.join('  '));
+
+  // Result
+  if (metadata?.result) {
+    lines.push(metadata.result);
+  }
+
+  return lines.join('\n');
+}

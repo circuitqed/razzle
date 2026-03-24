@@ -5,7 +5,7 @@ import MoveHistory from './MoveHistory';
 import * as gamesApi from '../api/games';
 import type { GameFull } from '../api/games';
 import { decodeMove } from '../types';
-import { reconstructPositions, getLastMoveAtPosition, type ReplayState } from '../utils/replay';
+import { reconstructPositions, getLastMoveAtPosition, generatePGN, type ReplayState } from '../utils/replay';
 import { exportGameGif } from '../utils/exportGif';
 
 const END_TURN_MOVE = -1;
@@ -25,6 +25,7 @@ export default function ReplayViewer({ gameId, onClose }: ReplayViewerProps) {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [gifProgress, setGifProgress] = useState<number | null>(null); // null = not exporting
+  const [pgnCopied, setPgnCopied] = useState(false);
   // Server-side analysis removed to avoid server load.
   // TODO: re-add using client-side AI (Web Worker + ONNX)
 
@@ -156,6 +157,21 @@ export default function ReplayViewer({ gameId, onClose }: ReplayViewerProps) {
     }
   }, [positions, turnBoundaries, gameId, gifProgress]);
 
+  const handleCopyPGN = useCallback(() => {
+    if (!gameData) return;
+    const result = gameData.winner === 0 ? '1-0' : gameData.winner === 1 ? '0-1' : gameData.status === 'finished' ? '1/2-1/2' : '*';
+    const pgn = generatePGN(gameData.moves, {
+      gameId: gameData.game_id,
+      blue: gameData.player1_type === 'human' ? 'Human' : 'AI',
+      red: gameData.player2_type === 'human' ? 'Human' : 'AI',
+      result,
+    });
+    navigator.clipboard.writeText(pgn).then(() => {
+      setPgnCopied(true);
+      setTimeout(() => setPgnCopied(false), 2000);
+    });
+  }, [gameData]);
+
   // Track ply direction for animation
   const prevPlyRef = useRef(0);
   const prevPly = prevPlyRef.current;
@@ -267,13 +283,22 @@ export default function ReplayViewer({ gameId, onClose }: ReplayViewerProps) {
                 Generating GIF... {Math.round(gifProgress * 100)}%
               </span>
             ) : (
-              <button
-                onClick={handleExportGif}
-                className="px-3 py-1 text-sm bg-gray-700 hover:bg-gray-600 text-gray-300 rounded transition-colors"
-                title="Export as animated GIF"
-              >
-                Export GIF
-              </button>
+              <>
+                <button
+                  onClick={handleCopyPGN}
+                  className="px-3 py-1 text-sm bg-gray-700 hover:bg-gray-600 text-gray-300 rounded transition-colors"
+                  title="Copy game notation to clipboard"
+                >
+                  {pgnCopied ? 'Copied!' : 'Copy PGN'}
+                </button>
+                <button
+                  onClick={handleExportGif}
+                  className="px-3 py-1 text-sm bg-gray-700 hover:bg-gray-600 text-gray-300 rounded transition-colors"
+                  title="Export as animated GIF"
+                >
+                  Export GIF
+                </button>
+              </>
             )}
             <button
               onClick={onClose}
