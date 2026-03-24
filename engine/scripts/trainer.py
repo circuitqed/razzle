@@ -466,10 +466,10 @@ class DistributedTrainer:
     def _submit_iteration_metrics(self, metrics: dict, train_time: float, model_version: str = None):
         """Submit iteration metrics to API for dashboard tracking."""
         api_metrics = {
-            # Loss metrics
+            # Loss metrics (weighted, as they contribute to gradient)
             'loss_total': metrics.get('final_loss', 0),
-            'loss_policy': metrics.get('final_policy_loss', 0),
-            'loss_value': metrics.get('final_value_loss', 0),
+            'loss_policy': self.network_trainer.config.policy_weight * metrics.get('final_policy_loss', 0),
+            'loss_value': self.network_trainer.config.value_weight * metrics.get('final_value_loss', 0),
             'loss_difficulty': metrics.get('final_difficulty_loss', 0),
             'loss_illegal_penalty': metrics.get('final_illegal_penalty', 0),
             # Policy metrics
