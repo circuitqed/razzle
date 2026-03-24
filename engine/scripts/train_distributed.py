@@ -130,6 +130,7 @@ def _build_worker_onstart(
             f'--batch-size {batch_size} '
             f'--random-opening-moves {random_opening_moves} '
             f'--random-opening-fraction {random_opening_fraction} '
+            f'--arena-fraction 0 '
             f'</dev/null >/workspace/worker_{i}.log 2>&1 &'
         )
     return '\n'.join(lines)
