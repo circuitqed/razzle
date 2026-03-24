@@ -3096,7 +3096,8 @@ async def resign_game(
         game_id,
         winner=game.get_winner(),
         player1_player_id=game.player_ids[0],
-        player2_player_id=game.player_ids[1]
+        player2_player_id=game.player_ids[1],
+        resigned_by=resigning_player,
     )
 
     response = game.to_response()

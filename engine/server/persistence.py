@@ -72,6 +72,7 @@ def init_db(db_path: Path = None) -> None:
             ("ALTER TABLE games ADD COLUMN bot_type TEXT DEFAULT 'mcts'", None),
             ("ALTER TABLE games ADD COLUMN move_timestamps_json TEXT DEFAULT '[]'", None),
             ("ALTER TABLE games ADD COLUMN client_type TEXT", None),
+            ("ALTER TABLE games ADD COLUMN resigned_by INTEGER", None),
         ]
         for sql, _ in migrations:
             try:
@@ -1320,7 +1321,7 @@ def get_game_full(game_id: str, db_path: Path = None) -> Optional[dict]:
         row = conn.execute(
             """SELECT game_id, player1_type, player2_type, player1_user_id, player2_user_id,
                       state_json, moves_json, created_at, updated_at, ai_model_version,
-                      client_type
+                      client_type, resigned_by
                FROM games WHERE game_id = ?""",
             (game_id,)
         ).fetchone()
@@ -1362,8 +1363,9 @@ def get_game_full(game_id: str, db_path: Path = None) -> Optional[dict]:
             "player2_user_id": row["player2_user_id"],
             "player1_name": p1_name,
             "player2_name": p2_name,
-            "status": "finished" if state.is_terminal() else "playing",
-            "winner": state.get_winner(),
+            "status": "finished" if (state.is_terminal() or row["resigned_by"] is not None) else "playing",
+            "winner": (1 - row["resigned_by"]) if row["resigned_by"] is not None else state.get_winner(),
+            "resigned_by": row["resigned_by"],
             "ply": state.ply,
             "moves": moves,
             "moves_algebraic": moves_algebraic,
@@ -3110,6 +3112,7 @@ def update_game_result(
     winner: Optional[int],
     player1_player_id: Optional[str] = None,
     player2_player_id: Optional[str] = None,
+    resigned_by: Optional[int] = None,
     db_path: Path = None
 ) -> bool:
     """
@@ -3133,9 +3136,10 @@ def update_game_result(
             SET winner = ?,
                 player1_player_id = COALESCE(?, player1_player_id),
                 player2_player_id = COALESCE(?, player2_player_id),
+                resigned_by = COALESCE(?, resigned_by),
                 updated_at = ?
             WHERE game_id = ?
-        """, (winner, player1_player_id, player2_player_id, now, game_id))
+        """, (winner, player1_player_id, player2_player_id, resigned_by, now, game_id))
         conn.commit()
         return cursor.rowcount > 0
 
