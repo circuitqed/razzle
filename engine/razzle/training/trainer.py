@@ -29,7 +29,7 @@ class TrainingConfig:
     weight_decay: float = 1e-4  # Standard L2 regularization
     epochs: int = 10
     policy_weight: float = 1.0
-    value_weight: float = 5.0  # Balanced with 4x value head capacity + gradient clipping
+    value_weight: float = 12.0  # ~Equal gradient magnitude with policy (policy ~1.2, value ~0.02 × 12 ≈ 0.24)
     value_weight_quartic: float = 1.0  # Small quartic term for calibration
     difficulty_weight: float = 0.5
     illegal_penalty_weight: float = 1.0
