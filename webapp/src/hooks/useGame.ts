@@ -304,8 +304,13 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
       });
     } catch (err) {
       if (isStale()) return;
+      const msg = err instanceof Error ? err.message : 'AI move failed';
       logger.error('[useGame] AI move failed:', err);
-      setError(err instanceof Error ? err.message : 'AI move failed');
+      // Don't show "Worker not initialized" to user — the worker is recycling
+      // and the retry will handle it silently via the useEffect re-trigger.
+      if (!msg.includes('Worker not initialized')) {
+        setError(msg);
+      }
     } finally {
       if (!isStale()) {
         setAiThinking(false); aiThinkingRef.current = false;

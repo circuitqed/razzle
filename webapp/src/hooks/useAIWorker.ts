@@ -231,8 +231,8 @@ export function useAIWorker(): UseAIWorkerReturn {
       workerRef.current = null;
     }
     isLoadedRef.current = false;
-    // Don't update UI state here — the recycle is fast and the "loading model"
-    // flash is distracting. The UI will update when the new worker reports loaded.
+    // Clear loadPromiseRef so searchFn enters the polling loop
+    loadPromiseRef.current = null;
 
     // Delay creation to let OS reclaim old worker's memory
     setTimeout(() => {
