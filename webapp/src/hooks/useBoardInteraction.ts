@@ -212,6 +212,8 @@ export function useBoardInteraction(
 
   const clearSelection = useCallback(() => {
     setSelectedSquare(null);
+    setLocalEngine(null);
+    setPendingMoves([]);
   }, []);
 
   // --- Helpers ---
