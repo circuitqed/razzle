@@ -321,6 +321,7 @@ class DistributedTrainer:
         # TD(λ) parameters
         gamma: float = 0.99,           # Discount factor
         td_lambda: float = 0.95,       # TD blend (1.0 = pure MC)
+        run_name: str = '',            # Prefix for model versions (e.g. "v2" → "v2_iter_001")
     ):
         self.api_url = api_url
         self.device = device
@@ -338,6 +339,7 @@ class DistributedTrainer:
         self.replay_buffer_size = replay_buffer_size
         self.gamma = gamma
         self.td_lambda = td_lambda
+        self.run_name = run_name
 
         # Create output directory
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -669,7 +671,8 @@ class DistributedTrainer:
         # Archive training data for permanent storage
         try:
             game_results = [g.result for g in games]
-            model_version = f"iter_{self.iteration + 1:03d}"
+            prefix = f"{self.run_name}_" if self.run_name else ""
+            model_version = f"{prefix}iter_{self.iteration + 1:03d}"
             batch_id = self.game_archive.archive_games(
                 states=states,
                 policies=policies,
@@ -952,7 +955,8 @@ class DistributedTrainer:
             Model version string if promoted, None if rejected.
         """
         self.iteration += 1
-        version = f"iter_{self.iteration:03d}"
+        prefix = f"{self.run_name}_" if self.run_name else ""
+        version = f"{prefix}iter_{self.iteration:03d}"
 
         # Save locally (always save for analysis, even if not promoted)
         candidate_path = self.models_dir / f"{version}.pt"
@@ -1106,6 +1110,8 @@ def main():
                         help='Value discount factor for TD(λ) (default: 0.99)')
     parser.add_argument('--td-lambda', type=float, default=0.95,
                         help='TD(λ) trace decay (default: 0.95, 1.0=pure MC)')
+    parser.add_argument('--run-name', type=str, default='',
+                        help='Name prefix for model versions (e.g. "v2" → "v2_iter_001")')
 
     args = parser.parse_args()
 
@@ -1132,6 +1138,7 @@ def main():
         replay_buffer_size=args.replay_buffer_size,
         gamma=args.gamma,
         td_lambda=args.td_lambda,
+        run_name=args.run_name,
     )
 
     # Handle signals for graceful shutdown

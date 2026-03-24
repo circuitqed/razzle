@@ -957,7 +957,7 @@ def find_latest_model() -> Optional[tuple[Path, float]]:
         if not search_dir.exists():
             continue
         # Look for model files (iter_*.pt, model_iter_*.pt, or trained_model.pt)
-        for pattern in ["iter_*.pt", "model_iter_*.pt", "trained_model.pt"]:
+        for pattern in ["iter_*.pt", "*_iter_*.pt", "model_iter_*.pt", "trained_model.pt"]:
             for model_path in search_dir.glob(pattern):
                 try:
                     mtime = model_path.stat().st_mtime
@@ -1842,7 +1842,7 @@ async def list_models():
     for search_dir in MODEL_SEARCH_DIRS:
         if not search_dir.exists():
             continue
-        for pattern in ["iter_*.pt", "model_iter_*.pt", "trained_model.pt"]:
+        for pattern in ["iter_*.pt", "*_iter_*.pt", "model_iter_*.pt", "trained_model.pt"]:
             for model_path in search_dir.glob(pattern):
                 try:
                     path_str = str(model_path.resolve())

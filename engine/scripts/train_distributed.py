@@ -146,8 +146,10 @@ def _build_trainer_onstart(
     td_lambda: float,
     epochs: int = 5,
     api_key: str = '',
+    run_name: str = '',
 ) -> str:
     """Build the onstart-cmd string for a trainer instance."""
+    run_name_arg = f'--run-name {run_name} ' if run_name else ''
     lines = [
         f'export TRAINING_API_KEY="{api_key}"',
         # Fetch latest code from GitHub (overlay on base image)
@@ -161,6 +163,7 @@ def _build_trainer_onstart(
         f'--network-size {network_size} --output /workspace/output '
         f'--batch-size {trainer_batch_size} --replay-buffer-size {replay_buffer_size} '
         f'--gamma {gamma} --td-lambda {td_lambda} --epochs {epochs} '
+        f'{run_name_arg}'
         f'</dev/null >/workspace/trainer.log 2>&1 &',
     ]
     return '\n'.join(lines)
@@ -197,6 +200,7 @@ class DistributedOrchestrator:
         gamma: float = 0.99,
         td_lambda: float = 0.95,
         api_key: str = '',
+        run_name: str = '',
     ):
         self.num_workers = num_workers
         self.api_url = api_url
@@ -218,6 +222,7 @@ class DistributedOrchestrator:
         self.replay_buffer_size = replay_buffer_size
         self.gamma = gamma
         self.td_lambda = td_lambda
+        self.run_name = run_name
 
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -298,6 +303,7 @@ class DistributedOrchestrator:
             gamma=self.gamma,
             td_lambda=self.td_lambda,
             api_key=self.api_key,
+            run_name=self.run_name,
         )
         try:
             trainer.status = "creating"
@@ -665,6 +671,8 @@ def main():
 
     parser.add_argument('--api-key', type=str, default=None,
                         help='Training API key (default: from TRAINING_API_KEY env var or .env)')
+    parser.add_argument('--run-name', type=str, default='',
+                        help='Name prefix for model versions (e.g. "v2" → "v2_iter_001.pt")')
 
     args = parser.parse_args()
 
@@ -704,6 +712,7 @@ def main():
         gamma=args.gamma,
         td_lambda=args.td_lambda,
         api_key=args.api_key or '',
+        run_name=args.run_name,
     )
 
     # Handle signals
