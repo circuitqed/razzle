@@ -121,8 +121,11 @@ def main():
     args.models_dir.mkdir(parents=True, exist_ok=True)
 
     # Get list of available models
-    models_resp = client._get("/training/models", params={"limit": 500})
-    all_models = models_resp.get('models', [])
+    import requests
+    headers = {"X-API-Key": api_key} if api_key else {}
+    resp = requests.get(f"{args.api_url}/training/models", params={"limit": 500}, headers=headers, timeout=30)
+    resp.raise_for_status()
+    all_models = resp.json().get('models', [])
 
     # Filter to every Nth iteration
     tournament_models = []
