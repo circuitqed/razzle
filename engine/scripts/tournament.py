@@ -44,7 +44,7 @@ def play_game(mcts1: MCTS, mcts2: MCTS, max_moves: int = 300) -> float:
         if not legal:
             break
 
-        move = mcts.search(state)
+        move = mcts.get_best_move(state, add_noise=False)
         state.apply_move(move)
 
     winner = state.get_winner()
