@@ -78,8 +78,8 @@ def run_match(
     for i in range(num_games):
         # Alternate colors
         if i % 2 == 0:
-            mcts_p0 = MCTS(config, eval1)
-            mcts_p1 = MCTS(config, eval2)
+            mcts_p0 = MCTS(eval1, config)
+            mcts_p1 = MCTS(eval2, config)
             result = play_game(mcts_p0, mcts_p1)
             if result > 0:
                 m1_wins += 1
@@ -88,8 +88,8 @@ def run_match(
             else:
                 draws += 1
         else:
-            mcts_p0 = MCTS(config, eval2)
-            mcts_p1 = MCTS(config, eval1)
+            mcts_p0 = MCTS(eval2, config)
+            mcts_p1 = MCTS(eval1, config)
             result = play_game(mcts_p0, mcts_p1)
             if result > 0:
                 m2_wins += 1
@@ -123,7 +123,7 @@ def main():
     # Get list of available models
     import requests
     headers = {"X-API-Key": api_key} if api_key else {}
-    resp = requests.get(f"{args.api_url}/training/models", params={"limit": 500}, headers=headers, timeout=30)
+    resp = requests.get(f"{args.api_url}/training/models", params={"limit": 1000}, headers=headers, timeout=30)
     resp.raise_for_status()
     all_models = resp.json().get('models', [])
 
