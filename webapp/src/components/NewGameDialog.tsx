@@ -61,14 +61,13 @@ const SIMULATION_OPTIONS = [
   { value: 65536, label: '64K' },
 ];
 
-// Bot difficulty presets based on strength calibration tournament
-// Each preset maps to a specific model + simulation count, calibrated by ELO
+// Bot difficulty presets from pegasus training run Elo tournament
 export const BOT_PRESETS = [
-  { id: 'beginner', name: 'Beginner', model: 'latest', sims: 1, elo: 0 },
-  { id: 'easy', name: 'Easy', model: 'latest', sims: 64, elo: 0 },
-  { id: 'medium', name: 'Medium', model: 'latest', sims: 256, elo: 0 },
-  { id: 'hard', name: 'Hard', model: 'latest', sims: 2048, elo: 0 },
-  { id: 'expert', name: 'Expert', model: 'latest', sims: 16384, elo: 0 },
+  { id: 'beginner', name: 'Beginner', model: 'pegasus_iter_010.pt', sims: 16, elo: 661 },
+  { id: 'easy', name: 'Easy', model: 'pegasus_iter_075.pt', sims: 64, elo: 998 },
+  { id: 'medium', name: 'Medium', model: 'pegasus_iter_150.pt', sims: 256, elo: 1070 },
+  { id: 'hard', name: 'Hard', model: 'pegasus_iter_250.pt', sims: 1024, elo: 1219 },
+  { id: 'expert', name: 'Expert', model: 'pegasus_iter_250.pt', sims: 4096, elo: 1300 },
 ] as const;
 
 export type BotDifficulty = 'auto' | typeof BOT_PRESETS[number]['id'] | 'custom';

@@ -14,25 +14,25 @@ export interface TierSettings {
   label: string;
 }
 
-// Use 'latest' to always resolve to the best available model.
-// Difficulty is controlled purely by simulation count until we have
-// enough training iterations to differentiate by model strength.
+// Pegasus training run models with varying sim counts for difficulty.
+// Early iterations are weaker (Elo ~660-900), later ones stronger (~1100-1220).
+// Sim count further modulates strength within each model tier.
 export const TIERS: TierSettings[] = [
-  { model: 'latest', sims: 1,     label: 'Level 1 — Beginner' },
-  { model: 'latest', sims: 4,     label: 'Level 2 — Beginner' },
-  { model: 'latest', sims: 16,    label: 'Level 3 — Beginner' },
-  { model: 'latest', sims: 32,    label: 'Level 4 — Easy' },
-  { model: 'latest', sims: 64,    label: 'Level 5 — Easy' },
-  { model: 'latest', sims: 128,   label: 'Level 6 — Intermediate' },
-  { model: 'latest', sims: 256,   label: 'Level 7 — Intermediate' },
-  { model: 'latest', sims: 512,   label: 'Level 8 — Medium' },
-  { model: 'latest', sims: 1024,  label: 'Level 9 — Medium' },
-  { model: 'latest', sims: 2048,  label: 'Level 10 — Hard' },
-  { model: 'latest', sims: 4096,  label: 'Level 11 — Hard' },
-  { model: 'latest', sims: 8192,  label: 'Level 12 — Expert' },
-  { model: 'latest', sims: 16384, label: 'Level 13 — Expert' },
-  { model: 'latest', sims: 32768, label: 'Level 14 — Master' },
-  { model: 'latest', sims: 65536, label: 'Level 15 — Master' },
+  { model: 'pegasus_iter_010.pt', sims: 1,    label: 'Level 1 — Beginner' },
+  { model: 'pegasus_iter_010.pt', sims: 16,   label: 'Level 2 — Beginner' },
+  { model: 'pegasus_iter_025.pt', sims: 32,   label: 'Level 3 — Beginner' },
+  { model: 'pegasus_iter_050.pt', sims: 64,   label: 'Level 4 — Easy' },
+  { model: 'pegasus_iter_075.pt', sims: 64,   label: 'Level 5 — Easy' },
+  { model: 'pegasus_iter_100.pt', sims: 128,  label: 'Level 6 — Intermediate' },
+  { model: 'pegasus_iter_150.pt', sims: 128,  label: 'Level 7 — Intermediate' },
+  { model: 'pegasus_iter_150.pt', sims: 256,  label: 'Level 8 — Medium' },
+  { model: 'pegasus_iter_200.pt', sims: 256,  label: 'Level 9 — Medium' },
+  { model: 'pegasus_iter_250.pt', sims: 256,  label: 'Level 10 — Hard' },
+  { model: 'pegasus_iter_250.pt', sims: 512,  label: 'Level 11 — Hard' },
+  { model: 'pegasus_iter_250.pt', sims: 1024, label: 'Level 12 — Expert' },
+  { model: 'pegasus_iter_250.pt', sims: 2048, label: 'Level 13 — Expert' },
+  { model: 'pegasus_iter_250.pt', sims: 4096, label: 'Level 14 — Master' },
+  { model: 'pegasus_iter_250.pt', sims: 8192, label: 'Level 15 — Master' },
 ];
 
 export const MAX_LEVEL = TIERS.length;
