@@ -588,7 +588,7 @@ function ValueTab({ data }: { data: any[] }) {
         <LineChart data={data}>
           <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
           <XAxis dataKey="iteration" stroke="#9CA3AF" type="number" domain={['dataMin', 'dataMax']} />
-          <YAxis stroke="#9CA3AF" domain={[40, 60]} />
+          <YAxis stroke="#9CA3AF" domain={[0, 100]} />
           <Tooltip {...tooltipStyle} formatter={(v: number) => `${v?.toFixed(1)}%`} />
           <ReferenceLine y={50} stroke="#6B7280" strokeDasharray="5 5" label={{ value: 'Random', fill: '#6B7280', fontSize: 10 }} />
           <Line type="monotone" dataKey="value_sign_accuracy" stroke="#22C55E" strokeWidth={2} dot={false} name="Sign Accuracy" />
