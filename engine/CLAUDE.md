@@ -138,6 +138,29 @@ python scripts/train_distributed.py \
 - `GET /training/models/latest` - Workers check for updates
 - `GET /training/dashboard` - Monitor training progress
 
+## Training Data Management
+
+**IMPORTANT**: Training data requires careful lifecycle management. Multiple training runs can coexist but share the same DB.
+
+### Training Runs
+Each run is named (e.g. `pegasus`, `gryphon`) and models are versioned as `{run_name}_iter_{N:03d}`. Use `--run-name` when launching `train_distributed.py`.
+
+### What lives where
+- **Training games DB** (`server/data/games.db`): Temporary storage. Games are consumed by the trainer and can be cleared between runs. The DB grows large (4+ GB) and should be VACUUMed periodically.
+- **Model .pt files** (`output/models/`): Persist on disk even after DB records are deleted. The webapp difficulty tiers reference specific .pt files by name — do NOT delete model files that are referenced in `webapp/src/utils/autoMatch.ts` or `webapp/src/components/NewGameDialog.tsx`.
+- **ONNX exports** (`output/models/*.onnx`): Auto-generated on demand from .pt files. Safe to delete (will be regenerated).
+- **Training metrics** (DB `training_metrics` table): Dashboard chart data. Lost when DB is cleared between runs.
+- **Trainer state** (DB `trainer_state` table): Optimizer state + replay buffer. Lost when DB is cleared.
+
+### Before starting a new run
+1. Upload a seed model: create a fresh network with the correct architecture and upload via `TrainingAPIClient.upload_model()` with `{run_name}_iter_000`
+2. Clear old training data if changing architectures: delete old models from `training_models` table (NOT the .pt files on disk), clear `training_games`, `training_metrics`, and `trainer_state` tables
+3. The `training/models/latest` endpoint returns the highest iteration — old run models with higher iteration numbers will shadow new run's seed model if not cleared
+
+### Completed training runs
+- **pegasus**: Medium net (96f/12b, 2.4M params), 635 iterations, 422k games. Best strength at iter_250 (Elo 1219). Models used for webapp difficulty tiers. Old rules models archived in `output/old_rules_models.zip`.
+- **gryphon**: Large net (256f/20b, 24M params), in progress.
+
 ## Current Status
 
 - [x] Core game engine with bitboards
