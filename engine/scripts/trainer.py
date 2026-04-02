@@ -292,10 +292,9 @@ class DistributedTrainer:
     Trainer that fetches games from API and uploads models.
     """
 
-    # Learning rate schedule: list of (games, learning_rate) tuples
+    # Learning rate schedules: (games, learning_rate) tuples
     # LR changes when total_games_trained reaches each milestone
-    # Aggressive 10x drops (AlphaZero-style) for 500k+ game runs
-    DEFAULT_LR_SCHEDULE = [
+    ADAM_LR_SCHEDULE = [
         (0, 0.001),         # Start at 0.001
         (5000, 0.001),      # Keep at 0.001 until 5k games
         (20000, 0.0005),    # Drop to 0.0005 at 20k games
@@ -304,6 +303,16 @@ class DistributedTrainer:
         (150000, 0.00001),  # 3x drop at 150k games
         (250000, 0.000003), # 3x drop at 250k games
     ]
+    SGD_LR_SCHEDULE = [
+        (0, 0.1),           # Start at 0.1 (SGD needs ~100x higher LR than Adam)
+        (5000, 0.1),        # Keep at 0.1 until 5k games
+        (20000, 0.05),      # Drop to 0.05 at 20k games
+        (50000, 0.01),      # 10x drop at 50k games
+        (100000, 0.003),    # 3x drop at 100k games
+        (150000, 0.001),    # 3x drop at 150k games
+        (250000, 0.0003),   # 3x drop at 250k games
+    ]
+    DEFAULT_LR_SCHEDULE = ADAM_LR_SCHEDULE  # Overridden in __init__ based on optimizer
 
     def __init__(
         self,
@@ -338,7 +347,8 @@ class DistributedTrainer:
         self.filters = filters
         self.blocks = blocks
         self.output_dir = Path(output_dir)
-        self.lr_schedule = lr_schedule if lr_schedule is not None else self.DEFAULT_LR_SCHEDULE
+        default_schedule = self.SGD_LR_SCHEDULE if optimizer_type == 'sgd' else self.ADAM_LR_SCHEDULE
+        self.lr_schedule = lr_schedule if lr_schedule is not None else default_schedule
         self.current_lr = learning_rate
         self.replay_buffer_size = replay_buffer_size
         self.gamma = gamma
@@ -1102,8 +1112,8 @@ def main():
                         help='Training epochs per iteration')
     parser.add_argument('--batch-size', type=int, default=512,
                         help='Training batch size (default: 512)')
-    parser.add_argument('--learning-rate', type=float, default=0.001,
-                        help='Initial learning rate (default: 0.001)')
+    parser.add_argument('--learning-rate', type=float, default=None,
+                        help='Initial learning rate (default: 0.001 for Adam, 0.1 for SGD)')
     parser.add_argument('--replay-buffer-size', type=int, default=100_000,
                         help='Replay buffer capacity in positions (default: 100000)')
     parser.add_argument('--filters', type=int, default=None,
@@ -1131,6 +1141,10 @@ def main():
     network_size = args.network_size
     filters = args.filters or 0
     blocks = args.blocks or 0
+
+    # Default learning rate depends on optimizer
+    if args.learning_rate is None:
+        args.learning_rate = 0.1 if args.optimizer == 'sgd' else 0.001
 
     # Ensure unbuffered output
     os.environ['PYTHONUNBUFFERED'] = '1'
