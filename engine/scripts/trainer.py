@@ -294,15 +294,15 @@ class DistributedTrainer:
 
     # Learning rate schedule: list of (games, learning_rate) tuples
     # LR changes when total_games_trained reaches each milestone
-    # Extended schedule for large model runs targeting 500k+ games
+    # Aggressive 10x drops (AlphaZero-style) for 500k+ game runs
     DEFAULT_LR_SCHEDULE = [
-        (0, 0.001),        # Start at 0.001
-        (5000, 0.001),     # Keep at 0.001 until 5k games
-        (20000, 0.0005),   # Drop to 0.0005 at 20k games
-        (50000, 0.0002),   # Drop to 0.0002 at 50k games
-        (80000, 0.0001),   # Drop to 0.0001 at 80k games
-        (200000, 0.00005), # Drop to 0.00005 at 200k games
-        (350000, 0.00002), # Drop to 0.00002 at 350k games
+        (0, 0.001),         # Start at 0.001
+        (5000, 0.001),      # Keep at 0.001 until 5k games
+        (20000, 0.0005),    # Drop to 0.0005 at 20k games
+        (50000, 0.0001),    # 10x drop at 50k games
+        (100000, 0.00003),  # 3x drop at 100k games
+        (150000, 0.00001),  # 3x drop at 150k games
+        (250000, 0.000003), # 3x drop at 250k games
     ]
 
     def __init__(
