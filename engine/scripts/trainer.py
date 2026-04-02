@@ -324,6 +324,8 @@ class DistributedTrainer:
         gamma: float = 0.99,           # Discount factor
         td_lambda: float = 0.95,       # TD blend (1.0 = pure MC)
         run_name: str = '',            # Prefix for model versions (e.g. "v2" → "v2_iter_001")
+        optimizer_type: str = 'adam',  # 'adam' or 'sgd'
+        momentum: float = 0.9,        # SGD momentum (ignored for Adam)
     ):
         self.api_url = api_url
         self.device = device
@@ -341,6 +343,8 @@ class DistributedTrainer:
         self.replay_buffer_size = replay_buffer_size
         self.gamma = gamma
         self.td_lambda = td_lambda
+        self.optimizer_type = optimizer_type
+        self.momentum = momentum
         self.run_name = run_name
 
         # Create output directory
@@ -433,9 +437,11 @@ class DistributedTrainer:
             learning_rate=self.learning_rate,
             epochs=self.epochs,
             device=self.device,
+            optimizer=self.optimizer_type,
+            momentum=self.momentum,
         )
         self.network_trainer = NetworkTrainer(self.network, config)
-        print(f"[Trainer] Created trainer with Adam optimizer (lr={self.learning_rate})")
+        print(f"[Trainer] Created trainer with {self.optimizer_type.upper()} optimizer (lr={self.learning_rate})")
 
         # Try to restore trainer state (optimizer, replay buffer)
         self._load_trainer_state()
@@ -1114,6 +1120,10 @@ def main():
                         help='TD(λ) trace decay (default: 0.95, 1.0=pure MC)')
     parser.add_argument('--run-name', type=str, default='',
                         help='Name prefix for model versions (e.g. "v2" → "v2_iter_001")')
+    parser.add_argument('--optimizer', type=str, default='adam', choices=['adam', 'sgd'],
+                        help='Optimizer: adam or sgd (default: adam)')
+    parser.add_argument('--momentum', type=float, default=0.9,
+                        help='SGD momentum (default: 0.9, ignored for Adam)')
 
     args = parser.parse_args()
 
@@ -1141,6 +1151,8 @@ def main():
         gamma=args.gamma,
         td_lambda=args.td_lambda,
         run_name=args.run_name,
+        optimizer_type=args.optimizer,
+        momentum=args.momentum,
     )
 
     # Handle signals for graceful shutdown

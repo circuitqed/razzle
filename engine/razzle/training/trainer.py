@@ -34,6 +34,8 @@ class TrainingConfig:
     difficulty_weight: float = 0.5
     illegal_penalty_weight: float = 1.0
     max_grad_norm: float = 1.0  # Gradient clipping (0 = disabled)
+    optimizer: str = 'adam'  # 'adam' or 'sgd'
+    momentum: float = 0.9  # SGD momentum (ignored for Adam)
     device: str = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 
@@ -80,15 +82,19 @@ class Trainer:
 
         self.network = self.network.to(self.config.device)
 
-        self.optimizer = torch.optim.Adam(
-            self.network.parameters(),
-            lr=self.config.learning_rate,
-            weight_decay=self.config.weight_decay
-        )
-
-        # No LR scheduler - Adam adapts per-parameter learning rates automatically
-        # A constant base LR works well with Adam for most cases
-        self.scheduler = None
+        if self.config.optimizer == 'sgd':
+            self.optimizer = torch.optim.SGD(
+                self.network.parameters(),
+                lr=self.config.learning_rate,
+                momentum=self.config.momentum,
+                weight_decay=self.config.weight_decay,
+            )
+        else:
+            self.optimizer = torch.optim.Adam(
+                self.network.parameters(),
+                lr=self.config.learning_rate,
+                weight_decay=self.config.weight_decay,
+            )
 
     def train_epoch(
         self,
