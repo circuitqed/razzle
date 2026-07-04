@@ -2082,6 +2082,17 @@ async def apple_complete(request: AppleCompleteRequest, response: Response, req:
     )
 
 
+@app.delete("/auth/account")
+async def delete_account(response: Response, user: dict = Depends(require_auth)):
+    """Delete the authenticated user's account (App Store guideline 5.1.1(v):
+    apps with account creation must offer in-app deletion)."""
+    if not persistence.delete_user_account(user["user_id"]):
+        raise HTTPException(status_code=404, detail="Account not found")
+    response.delete_cookie(key=AUTH_COOKIE_NAME)
+    logger.info(f"Account deleted: {user['user_id']}")
+    return {"message": "Account deleted"}
+
+
 @app.post("/auth/ws-ticket", response_model=WsTicketResponse)
 async def create_ws_ticket(user: dict = Depends(require_auth)):
     """Mint a one-time, short-lived ticket for authenticating a WebSocket

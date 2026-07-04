@@ -176,6 +176,20 @@ platform :ios do
     match(type: "development", api_key: ASC_KEY, readonly: false, force: true)
   end
 
+
+lane :checkcaps do
+  Spaceship::ConnectAPI.token = Spaceship::ConnectAPI::Token.create(
+    key_id: "7MD5L4AMDY",
+    issuer_id: "8c1c5bd8-37c1-459e-bc4d-f15d04f58c26",
+    filepath: File.expand_path("~/.appstoreconnect/private_keys/AuthKey_7MD5L4AMDY.p8"),
+  )
+  bundle = Spaceship::ConnectAPI::BundleId.all(filter: { identifier: "com.lazybrains.knightball" }).first
+  bundle.get_capabilities.each do |c|
+    UI.message("capability: #{c.capability_type} settings=#{c.settings.inspect}")
+  end
+end
+
+
   desc "Fetch (or create on first run) signing certs + profiles via match"
   lane :certs do
     match(type: "appstore", api_key: ASC_KEY, readonly: false)

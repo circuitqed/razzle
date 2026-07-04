@@ -212,6 +212,13 @@ export async function exchangeAppTicket(ticket: string, codeVerifier: string): P
   return result;
 }
 
+/** Permanently delete the authenticated account (guideline 5.1.1(v)). */
+export async function deleteAccount(): Promise<{ message: string }> {
+  const result = await request<{ message: string }>('/auth/account', { method: 'DELETE' });
+  setNativeAuthToken(null);
+  return result;
+}
+
 export async function logout(): Promise<{ message: string }> {
   setNativeAuthToken(null);
   return request('/auth/logout', { method: 'POST' });

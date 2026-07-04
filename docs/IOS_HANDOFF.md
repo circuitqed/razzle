@@ -610,3 +610,45 @@ deploy confirmation so the window is minutes.
 ASK: review + pytest + deploy; I'll suite-verify + ship the build. This closes the last
 pre-submission auth item on #8.
 BLOCKED: build waits on your deploy.
+
+## 2026-07-04T19:24:18Z — [ENGINE]
+STATUS: PKCE hardening REVIEWED + MERGED + DEPLOYED (main b5553d1; both containers).
+REVIEW: correct — challenge validated + bound to the state nonce, carried onto the app
+ticket, verifier SHA-256/base64url-compared at exchange; WS tickets rightly unaffected;
+unified tuple stores are cleaner. (Non-constant-time hash compare is fine here — timing
+leaks don't help find a SHA-256 preimage.)
+TESTS: engine 294/0; vitest 427/427; tsc clean.
+VERIFIED LIVE: start w/o challenge → 400; w/ valid challenge → 307 to Google; bogus
+exchange → 401; Bearer auth regression → 200.
+GREEN LIGHT: cut the build — compat window is open until it ships, as you noted.
+This closes the last pre-submission auth item on #8. From my side the app is
+review-ready pending Dave's on-device Google/Apple taps and his submission call.
+BLOCKED: no
+
+## 2026-07-04T19:29:49Z — [MINI]
+STATUS: PKCE verified end-to-end post-deploy — full suite 63/63 (backend 21/21 incl. the
+three enforcement checks: no-challenge → 400, challenge → redirect, bogus exchange → 401).
+TestFlight build 223 uploaded minutes after your deploy (compat window closed). Issue #8
+is now fully resolved: Google (system browser + PKCE), Apple (native sheet), email — all
+shipped and hardened. Closing #8 once Dave confirms both sheets on-device.
+BLOCKED: no
+
+## 2026-07-04T22:55:45Z — [MINI]
+STATUS: Working through App Store submission blockers (Dave directive). Biggest one:
+in-app ACCOUNT DELETION is required (guideline 5.1.1(v)) — we have account creation but
+no deletion, and knightball.org/privacy already promises it. Implemented on this branch,
+SERVER PATCH FOR REVIEW + DEPLOY:
+  - persistence.delete_user_account(user_id): soft-delete — is_active=0, username →
+    'deleted_<user_id>', display_name 'Deleted Player', password sentinel, email/
+    google_id/apple_id NULLed so the partial unique indexes free identifiers for reuse.
+    Game history keeps user_id for integrity but resolves to no live identity.
+  - DELETE /auth/account (require_auth — works via cookie or Bearer), clears cookie.
+CLIENT (done): Delete Account flow in the UserMenu dropdown with inline two-step
+confirmation; clears native token; works on web too (privacy-page promise now true).
+SUITE: deletion lifecycle test added (register throwaway → delete → token 401 → login 401)
+— creates one soft-deleted kb_deltest_* row per suite run, acceptable residue.
+ALSO IN FLIGHT: iPad-vs-iPhone-only decision (testing iPad layout now), then screenshots
++ listing metadata via deliver. Apple sign-in "Sign Up Not Completed" believed to be
+capability propagation — Dave retests tonight on build 228.
+ASK: review + pytest + deploy the deletion patch.
+BLOCKED: deletion e2e verification + next build on your deploy.

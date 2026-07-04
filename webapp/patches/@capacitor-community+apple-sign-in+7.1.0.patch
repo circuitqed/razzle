@@ -1,0 +1,50 @@
+diff --git a/node_modules/@capacitor-community/apple-sign-in/Package.swift b/node_modules/@capacitor-community/apple-sign-in/Package.swift
+index 94246df..7d9d007 100644
+--- a/node_modules/@capacitor-community/apple-sign-in/Package.swift
++++ b/node_modules/@capacitor-community/apple-sign-in/Package.swift
+@@ -10,7 +10,7 @@ let package = Package(
+             targets: ["SignInWithApple"])
+     ],
+     dependencies: [
+-        .package(url: "https://github.com/ionic-team/capacitor-swift-pm.git", from: "7.0.0")
++        .package(url: "https://github.com/ionic-team/capacitor-swift-pm.git", from: "8.0.0")
+     ],
+     targets: [
+         .target(
+diff --git a/node_modules/@capacitor-community/apple-sign-in/ios/Sources/SignInWithApple/Plugin.swift b/node_modules/@capacitor-community/apple-sign-in/ios/Sources/SignInWithApple/Plugin.swift
+index f53087c..f2826ba 100755
+--- a/node_modules/@capacitor-community/apple-sign-in/ios/Sources/SignInWithApple/Plugin.swift
++++ b/node_modules/@capacitor-community/apple-sign-in/ios/Sources/SignInWithApple/Plugin.swift
+@@ -22,9 +22,16 @@ public class SignInWithApple: CAPPlugin, CAPBridgedPlugin {
+ 
+         self.bridge?.saveCall(call)
+ 
+-        let authorizationController = ASAuthorizationController(authorizationRequests: [request])
+-        authorizationController.delegate = self
+-        authorizationController.performRequests()
++        // Present on the main thread with an explicit anchor: without a
++        // presentationContextProvider the controller can fail to find a
++        // window in webview-first apps and instantly errors with
++        // ASAuthorizationError 1001 (no sheet shown).
++        DispatchQueue.main.async {
++            let authorizationController = ASAuthorizationController(authorizationRequests: [request])
++            authorizationController.delegate = self
++            authorizationController.presentationContextProvider = self
++            authorizationController.performRequests()
++        }
+     }
+ 
+     func getRequestedScopes(from call: CAPPluginCall) -> [ASAuthorization.Scope]? {
+@@ -48,6 +55,12 @@ public class SignInWithApple: CAPPlugin, CAPBridgedPlugin {
+     }
+ }
+ 
++extension SignInWithApple: ASAuthorizationControllerPresentationContextProviding {
++    public func presentationAnchor(for controller: ASAuthorizationController) -> ASPresentationAnchor {
++        return self.bridge?.webView?.window ?? ASPresentationAnchor()
++    }
++}
++
+ extension SignInWithApple: ASAuthorizationControllerDelegate {
+     public func authorizationController(controller: ASAuthorizationController, didCompleteWithAuthorization authorization: ASAuthorization) {
+         guard let appleIDCredential = authorization.credential as? ASAuthorizationAppleIDCredential else { return }
