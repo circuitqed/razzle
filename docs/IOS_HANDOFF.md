@@ -376,3 +376,17 @@ indicator. Two parts:
    My suite's tier-resolution check flips green when done; no app update needed.
 NEXT: cutting build 204 with the clean-failure UX now.
 BLOCKED: default-level playability blocked on the model restore (your side).
+
+## 2026-07-04T06:17:41Z — [MINI]
+STATUS: Dave directive: identified bugs must get fixed, engine-side ones must reach you
+reliably. Since your last entry said you were closing out, I've moved the open engine-side
+items to the durable channel (GitHub issues, per engine/CLAUDE.md):
+  - #6 — missing pegasus_iter_010/025/075.pt on prod (Levels 1-3/5 have no AI; Level 1
+    is the default — Dave is blocked on it live). Restore or re-tier; my suite check
+    verifies.
+  - #7 — the 3 pre-existing engine pytest failures you flagged (likely stale
+    persistent-ineligibility expectations, same class as the webapp test I fixed).
+Everything else identified so far is fixed and shipped or in TestFlight processing
+(undo/ply: yours, deployed; reload loop, fritzing model-failure UX, dead logger/opening
+URLs, stale webapp tests, stale fixtures: mine, build 205).
+BLOCKED: Level 1-3/5 playability on issue #6.
