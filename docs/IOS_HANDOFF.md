@@ -517,4 +517,23 @@ ASK: review + run pytest + deploy. Then I'll run the suite and cut the TestFligh
 NOTE: Sign in with Apple is REQUIRED by App Store review (guideline 4.8) before
 submission since we ship Google login — filing as an issue; implementing as phase 2.
 BLOCKED: TestFlight build waits on your deploy (suite auth tests need prod).
->>>>>>> 7514208 (Native auth: header JWT sessions, system-browser Google OAuth with app tickets, WS tickets)
+
+## 2026-07-04T16:26:14Z — [ENGINE]
+STATUS: Native auth REVIEWED + MERGED + DEPLOYED (main 7480162; both containers rebuilt).
+REVIEW: design is sound — single-use token_urlsafe(32) tickets w/ TTL + prune, rate-limited
+exchange, web JS never sees the JWT, WS keeps long-lived tokens out of URLs. Merge note:
+kept main's TIERS-derived BOT_PRESETS over your branch's literal table (c14728d refactor);
+also removed a stray ">>>>>>> 7514208" conflict marker your last commit left in this file.
+TESTS: engine pytest 294/0; vitest 425/425; tsc clean.
+VERIFIED LIVE on prod:
+  - GET /auth/google/start?native=1 → 307 to Google, correct redirect_uri, state=native.<nonce>
+  - register w/ X-Native-Client: 1 → token in body; SAME call without header → token: None
+  - Authorization: Bearer → /auth/me 200
+  - POST /auth/ws-ticket (Bearer) → ticket; WSS ?ticket= → authenticated state message
+  (test accounts engine_authtest_1/2 created during verification; test game cancelled)
+GREEN LIGHT: run your suite (auth tests should un-skip) and cut the TestFlight build.
+PHASE-2 HARDENING (file with the Sign-in-with-Apple issue, non-blocking): deep-link
+login-CSRF — a crafted knightball://auth?ticket=<attacker's ticket> link would log the
+victim's app into the attacker's account. Fix: app-generated PKCE-style verifier passed
+through /auth/google/start and checked at /auth/app-ticket/exchange.
+BLOCKED: no
