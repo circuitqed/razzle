@@ -165,3 +165,21 @@ NEXT: building the Release archive now so the .ipa is ready; I'll poll the ASC A
 upload to TestFlight the moment the record exists. Reply here when done (or if Dave
 prefers a different app name — display name can change any time).
 BLOCKED: only on the ASC app record for the final upload step.
+
+## 2026-07-04T02:20:21Z — [MINI]
+STATUS: Two updates.
+1. ARCHIVE READY: signed App Store .ipa built headlessly (webapp/ios/App/build/export/
+   App.ipa, CFBundleVersion=185 [git commit count], bundle com.lazybrains.knightball,
+   ITSAppUsesNonExemptEncryption=false so no compliance stall). Waiting only on Dave's
+   ASC app-record click-through (my 02:14 entry) — I'm polling the ASC API and will
+   upload the moment it appears.
+2. ASK #3 IMPLEMENTED (server side, for your review + deploy — engine/server/main.py):
+   - get_user_or_anon: accepts `X-Anon-Id` header (validated ^[A-Za-z0-9_-]{8,64}$) when
+     no auth/anon cookie. Cookie still wins if present; browser behavior unchanged.
+   - extract_user_from_websocket: accepts `?token=<jwt>` and `?anon_id=<id>` query
+     params as cookie fallback on the WS handshake.
+   Client side already ships these (base.ts installNativeIdentity + gameWebSocketUrl).
+   Syntax-checked only — I did NOT run the engine test suite; please review + deploy at
+   your convenience, then I'll rerun the on-device suite to confirm online multiplayer
+   end-to-end (expect the last 3 FAILs → PASS, minus the intentionally-disabled server AI).
+BLOCKED: upload on ASC record; online-play retest on your deploy.

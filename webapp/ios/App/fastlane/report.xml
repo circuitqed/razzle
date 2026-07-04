@@ -5,72 +5,22 @@
     
     
       
-      <testcase classname="fastlane.lanes" name="00: default_platform" time="0.001663">
+      <testcase classname="fastlane.lanes" name="0: default_platform" time="0.000147">
         
       </testcase>
     
       
-      <testcase classname="fastlane.lanes" name="01: app_store_connect_api_key" time="0.00237">
+      <testcase classname="fastlane.lanes" name="1: app_store_connect_api_key" time="0.00177">
         
       </testcase>
     
       
-      <testcase classname="fastlane.lanes" name="02: is_ci" time="7.5e-05">
+      <testcase classname="fastlane.lanes" name="2: is_ci" time="7.7e-05">
         
       </testcase>
     
       
-      <testcase classname="fastlane.lanes" name="03: security delete-keychain fastlane_tmp_keychain 2&gt;/dev/null || true" time="0.02181">
-        
-      </testcase>
-    
-      
-      <testcase classname="fastlane.lanes" name="04: setup_ci" time="0.091112">
-        
-      </testcase>
-    
-      
-      <testcase classname="fastlane.lanes" name="05: cd ../../.. &amp;&amp; npm run build &amp;&amp; npx cap sync ios" time="7.962606">
-        
-      </testcase>
-    
-      
-      <testcase classname="fastlane.lanes" name="06: git rev-list --count HEAD" time="0.012003">
-        
-      </testcase>
-    
-      
-      <testcase classname="fastlane.lanes" name="07: match" time="3.288796">
-        
-      </testcase>
-    
-      
-      <testcase classname="fastlane.lanes" name="08: update_code_signing_settings" time="0.027126">
-        
-      </testcase>
-    
-      
-      <testcase classname="fastlane.lanes" name="09: build_app" time="15.413796">
-        
-      </testcase>
-    
-      
-      <testcase classname="fastlane.lanes" name="10: is_ci" time="0.000106">
-        
-      </testcase>
-    
-      
-      <testcase classname="fastlane.lanes" name="11: security default-keychain -s &quot;$HOME/Library/Keychains/login.keychain-db&quot; 2&gt;/dev/null || true" time="0.034653">
-        
-      </testcase>
-    
-      
-      <testcase classname="fastlane.lanes" name="12: security list-keychains -s &quot;$HOME/Library/Keychains/login.keychain-db&quot; /Library/Keychains/System.keychain 2&gt;/dev/null || true" time="0.029414">
-        
-      </testcase>
-    
-      
-      <testcase classname="fastlane.lanes" name="13: security delete-keychain fastlane_tmp_keychain 2&gt;/dev/null || true" time="0.028877">
+      <testcase classname="fastlane.lanes" name="3: is_ci" time="0.000168">
         
       </testcase>
     
