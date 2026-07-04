@@ -61,13 +61,17 @@ const SIMULATION_OPTIONS = [
   { value: 65536, label: '64K' },
 ];
 
-// Bot difficulty presets from pegasus training run Elo tournament
+// Bot difficulty presets from pegasus training run Elo tournament.
+// model/sims come from the shared TIERS ladder (utils/autoMatch.ts) — the
+// single source of truth for which model files exist — so the two tables
+// can't drift when checkpoints are re-tiered. Preset level N = TIERS[N-1].
+const tier = (level: number) => ({ model: TIERS[level - 1].model, sims: TIERS[level - 1].sims });
 export const BOT_PRESETS = [
-  { id: 'beginner', name: 'Beginner', model: 'pegasus_iter_050.pt', sims: 4, elo: 700 },
-  { id: 'easy', name: 'Easy', model: 'pegasus_iter_050.pt', sims: 64, elo: 950 },
-  { id: 'medium', name: 'Medium', model: 'pegasus_iter_150.pt', sims: 256, elo: 1070 },
-  { id: 'hard', name: 'Hard', model: 'pegasus_iter_250.pt', sims: 1024, elo: 1219 },
-  { id: 'expert', name: 'Expert', model: 'pegasus_iter_250.pt', sims: 4096, elo: 1300 },
+  { id: 'beginner', name: 'Beginner', ...tier(2), elo: 700 },
+  { id: 'easy', name: 'Easy', ...tier(4), elo: 950 },
+  { id: 'medium', name: 'Medium', ...tier(8), elo: 1070 },
+  { id: 'hard', name: 'Hard', ...tier(12), elo: 1219 },
+  { id: 'expert', name: 'Expert', ...tier(14), elo: 1300 },
 ] as const;
 
 export type BotDifficulty = 'auto' | typeof BOT_PRESETS[number]['id'] | 'custom';
