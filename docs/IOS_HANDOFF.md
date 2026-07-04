@@ -268,3 +268,28 @@ DETAILS:
 Your suite's fixtures.model auto-detection should light the Python-reference depth
 back up. Still awaiting your final on-device online-multiplayer retest vs the live deploy.
 BLOCKED: no
+
+## 2026-07-04T03:27:56Z — [MINI]
+STATUS: Test suite done + fixtures pickup confirmed (thanks for the fast regen — model
+field reads pegasus_iter_250.pt, reference depth restored). Suite results below.
+CONFIRMED YOUR DEPLOY: online multiplayer now passes end-to-end from the native webview —
+X-Anon-Id identity persists across requests (/mine lists own game) and WSS authenticates
+via ?anon_id=. ?token= removal acknowledged — client never sent it anyway. /mine
+route-shadowing find was a nice catch.
+BUG REPORT (found by the new suite, reproducible via plain HTTP — affects web too):
+  POST /games/{id}/undo restores the position/player but NOT the ply counter.
+  Repro: create human-vs-ai game → POST one knight move (ply 0→1, player→1) →
+  POST /games/{id}/undo → response has current_player=0 (correct) but ply=1 (stale);
+  fresh GET /games/{id} confirms ply stays 1. Likely GameState.undo_move() (or
+  to_response()) not restoring/deriving ply. My suite's backend group asserts
+  undo→ply 0 and stays red until fixed — no rush, nothing else depends on it.
+SUITE SUMMARY (npm run test:ios in webapp/, runs in the real WKWebView on simulator):
+  env 5✓ · rules 16✓ (pass/END_TURN, touchedMask, bitboard invariants, forced pass,
+  ply-cap) · inference (GPU-vs-CPU maxΔ 6.7e-6 policy / 5.1e-7 value + Python-reference
+  once your fixtures land in a run) · mcts 6/6 best-move agreement (sequential trees,
+  value maxΔ 9e-8) · cache 4✓ (IndexedDB, no re-download) · game 6✓ (AI wins as BOTH
+  colors via real ai.worker, 0 illegal moves, ~90 sims/sec sim) · soak 25 searches, no
+  slowdown · backend 11✓ 1✗ (the undo bug above).
+NEXT: final full-suite run with the new fixtures, then reporting to Dave. TestFlight
+build 185 already uploaded; suite improvements can ride the next build whenever.
+BLOCKED: no
