@@ -106,3 +106,40 @@ cookie behavior against prod — this is how I'll verify per your green light.
 NEXT: simulator build finishing now → run self-test → post results (WebGL backend, game
 outcome, sims/sec, CORS, cookie-over-fetch, cookie-over-WSS verdict → whether ask #3 needed).
 BLOCKED: no
+
+## 2026-07-04T02:02:51Z — [MINI]
+STATUS: Simulator verification done (iPhone 17 Pro sim, self-test inside the Capacitor
+webview against prod knightball.org). Results:
+PASS (the big ones):
+  - WebGL2 + EXT_color_buffer_float + OffscreenCanvas available in WKWebView
+  - ai.worker model load: backend=gpu (WebGL2 GEMM path) in ~2.1s, model iter_865
+    downloaded FROM THE WORKER over CORS — your capacitor://localhost deploy works
+  - Full game, MCTS(128 sims)-vs-random-mover: AI wins (winner=0, 24 plies, 13 AI moves)
+    → inference is producing sensible play, not random shuffling
+  - Search perf: ~108 sims/sec avg (472ms/move @ 128 sims) — beats the ~25/s doc estimate
+  - REST: /health, /models/onnx/latest, POST /games, POST /games/{id}/move all OK
+  - WSS: local-game socket connects + receives state
+  - POST /games/online creates a game OK
+FAIL:
+  1. POST /games/{id}/ai → 403 by design (require_admin_for_ai: "Server-side AI is
+     disabled"). NOT an iOS issue — prod has server AI admin-gated, so there is no
+     server-AI fallback on ANY platform. Flagging since my brief said to verify it.
+     Confirm this is the intended prod posture and I'll treat it as done.
+  2. anon cookie does NOT persist across fetches (own online game missing from /mine)
+  3. online-game WSS auth → AUTH_REQUIRED (cookie not sent on handshake)
+  → WKWebView ITP blocks cross-site cookies even with SameSite=None. Ask #3 is NEEDED.
+PROPOSAL (ask #3, minimal server surface):
+  a. get_user_or_anon + the auth paths on REST: accept header `X-Anon-Id: <id>` as the
+     anon identity when no cookie (client-generated UUID, same trust level as the cookie).
+  b. extract_user_from_websocket: also accept `?anon_id=<id>` and (later, for real accounts)
+     `?token=<jwt>` query params. Your token-in-server-logs concern applies to the JWT
+     variant; anon_id is low-value so logs exposure is acceptable. JWT could use a
+     short-lived ticket endpoint later — not needed for v1 (Google OAuth is blocked inside
+     webviews anyway, so native v1 ships anonymous-only online play).
+  Client side (mine): native-only fetch wrapper adds X-Anon-Id from localStorage UUID;
+  gameWebSocketUrl appends ?anon_id=. Browser behavior unchanged. Forward-compatible: I'll
+  ship the client side now — server ignores the header/param until you deploy.
+NEXT: normal-app-UI smoke test (board rendering/safe areas), then signing + archive +
+TestFlight upload. Will pick up your server change for a final online-multiplayer retest
+when deployed.
+BLOCKED: no (online multiplayer verification blocked on ask #3 server side only)
