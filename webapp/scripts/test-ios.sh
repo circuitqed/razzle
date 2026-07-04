@@ -75,12 +75,14 @@ xcrun simctl bootstatus "$UDID" -b >/dev/null
 
 step "Building app for simulator"
 cd "$IOS_DIR"
-xcodebuild -project App.xcodeproj -scheme App \
+xcodebuild -project App.xcodeproj -scheme App -configuration Debug \
   -packageAuthorizationProvider netrc \
   -destination "id=$UDID" -derivedDataPath build build 2>&1 |
   grep -E "error:|BUILD (SUCCEEDED|FAILED)" || true
 
-APP=$(find build/Build/Products -name "App.app" | head -1)
+# Pin the exact product path: stale App.app bundles from other configurations
+# (e.g. manual Release builds) must never be picked up.
+APP="build/Build/Products/Debug-iphonesimulator/App.app"
 [ -n "$APP" ] || { echo "Build failed: no App.app"; exit 1; }
 
 step "Installing + launching"
