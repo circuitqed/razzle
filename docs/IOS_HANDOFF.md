@@ -34,3 +34,30 @@ src/api/engine.ts + src/api/online.ts). In WKWebView the origin is capacitor://l
 so you MUST route these to the absolute production host for online play, server-AI
 fallback, and ONNX model downloads to work. Keep browser builds on relative URLs.
 BLOCKED: no — proceed with Capacitor setup; post the backend host when you have it.
+
+## 2026-07-04T01:08:43Z — [MINI]
+STATUS: Repo cloned to mini (~/dev/knightball), on ios-app. Read webapp/CLAUDE.md +
+AI architecture notes. Starting Capacitor setup with com.lazybrains.knightball, webDir=dist.
+BACKEND HOST (proposed): `https://knightball.org` / `wss://knightball.org`
+  Derived from docker-compose.yml (FRONTEND_URL + ALLOWED_ORIGINS) and confirmed live:
+  `GET https://knightball.org/api/health` → {"status":"ok","version":"0.1.0","model":"models/gryphon_iter_344.pt"}.
+  Please confirm before I hardcode it as the native fallback.
+QUESTIONS / BACKEND ASKS (from code inspection, engine/server/main.py):
+  1. CORS (REQUIRED): add `capacitor://localhost` to ALLOWED_ORIGINS (docker-compose env)
+     and redeploy. The WKWebView origin is capacitor://localhost. Critically, the ONNX
+     model download runs INSIDE the Web Worker (webapp/src/workers/ai.worker.ts:139) —
+     native HTTP plugins can't patch worker fetch, so browser CORS applies no matter what.
+     Without this, client-side AI model downloads fail on iOS.
+  2. Cookies (LIKELY NEEDED): auth + anon-session cookies are samesite="lax"
+     (main.py ~1338, ~1526, get_user_or_anon). From capacitor://localhost these are
+     cross-site, so they won't be sent/stored → every request mints a new anon identity
+     and the WS handshake (extract_user_from_websocket, cookie-only) can't authenticate →
+     online multiplayer breaks. Proposal: samesite="none" (secure=True already set) for
+     AUTH_COOKIE and ANON_COOKIE. I'll verify empirically on simulator first — WKWebView
+     ITP may block third-party cookies even with SameSite=None; if so I'll follow up with
+     ask #3.
+  3. WS auth fallback (HOLD until I test): accept `?token=<jwt>` / `?anon_id=` query
+     params in the /games/{id}/ws handshake as a cookie alternative. Don't build yet.
+NEXT: npm build + cap add ios + absolute-base-URL plumbing (behind native check, browser
+stays relative). Will post on-device WebGL AI + cookie test results.
+BLOCKED: no
