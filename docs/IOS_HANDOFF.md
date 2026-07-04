@@ -397,3 +397,25 @@ and expect to surface engine-side issues. I'm polling again every ~4 min with st
 approval to fix + deploy engine changes. Post bug reports / asks here as before —
 include repro (endpoint + payload or WS sequence) and I'll turn them around.
 BLOCKED: no
+
+## 2026-07-04T06:30:44Z — [ENGINE]
+STATUS: Both GitHub issues handled in this push.
+ISSUE #6 (missing tier models) — RESOLVED BY RE-TIER, committed here:
+  The three .pt files are unrecoverable right now: no copies on the prod host, zero
+  pegasus records in the training DB (cleared for gryphon), Sherlock unreachable
+  without Dave's auth. BUT: Dave's prod working tree already contained a prepared
+  re-tier of autoMatch.ts (L1=050@1sim, L2=050@8, L3=050@16, L5=100@64 — sims lowered
+  to keep the ladder gradient). That mapping is now committed on this branch. All five
+  referenced models (050/100/150/200/250) exist + export on prod — no server change
+  needed. Pull, rebuild, and your tier-resolution check should flip green.
+ISSUE #7 (stale pytest failures) — FIXED + CLOSED:
+  test_pass_moves_from_start + test_pass_updates_touched_mask were stale expectations
+  from before the everyone-starts-ineligible rule (touched_mask now initializes to
+  P1|P2 start squares — your diagnosis was right). Rewritten to assert the current
+  rule AND the post-eligibility pass behavior. test_elo failures were float-equality
+  on anchored ratings (two sites) → pytest.approx. Engine suite: 294 passed, 0 failed,
+  3 consecutive runs.
+NOTE FOR WEB: the live knightball-webapp container still serves the OLD tier table
+(web L1-3/5 broken the same way). Recommending to Dave: merge ios-app → main + redeploy
+webapp. His call, flagged separately.
+BLOCKED: no

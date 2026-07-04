@@ -18,11 +18,11 @@ export interface TierSettings {
 // Early iterations are weaker (Elo ~660-900), later ones stronger (~1100-1220).
 // Sim count further modulates strength within each model tier.
 export const TIERS: TierSettings[] = [
-  { model: 'pegasus_iter_010.pt', sims: 1,    label: 'Level 1 — Beginner' },
-  { model: 'pegasus_iter_010.pt', sims: 16,   label: 'Level 2 — Beginner' },
-  { model: 'pegasus_iter_025.pt', sims: 32,   label: 'Level 3 — Beginner' },
+  { model: 'pegasus_iter_050.pt', sims: 1,    label: 'Level 1 — Beginner' },
+  { model: 'pegasus_iter_050.pt', sims: 8,    label: 'Level 2 — Beginner' },
+  { model: 'pegasus_iter_050.pt', sims: 16,   label: 'Level 3 — Beginner' },
   { model: 'pegasus_iter_050.pt', sims: 64,   label: 'Level 4 — Easy' },
-  { model: 'pegasus_iter_075.pt', sims: 64,   label: 'Level 5 — Easy' },
+  { model: 'pegasus_iter_100.pt', sims: 64,   label: 'Level 5 — Easy' },
   { model: 'pegasus_iter_100.pt', sims: 128,  label: 'Level 6 — Intermediate' },
   { model: 'pegasus_iter_150.pt', sims: 128,  label: 'Level 7 — Intermediate' },
   { model: 'pegasus_iter_150.pt', sims: 256,  label: 'Level 8 — Medium' },

@@ -82,10 +82,16 @@ class TestMoves:
 
     def test_pass_moves_from_start(self):
         state = GameState.new_game()
-        pass_moves = list(MoveGenerator.get_pass_moves(state))
 
-        # Ball on d1 can pass to c1, e1 (horizontal)
-        # Cannot pass to b1 or f1 (blocked by c1, e1)
+        # All starting pieces are ineligible to receive (touched_mask starts
+        # with every start square marked), so there are NO passes from the
+        # opening position — pieces must knight-move before they can receive.
+        assert list(MoveGenerator.get_pass_moves(state)) == []
+
+        # Once eligibility is cleared, ball on d1 can pass to c1, e1
+        # (horizontal). Cannot pass to b1 or f1 (blocked by c1, e1).
+        state.touched_mask = 0
+        pass_moves = list(MoveGenerator.get_pass_moves(state))
         algebraic = [move_to_algebraic(m) for m in pass_moves]
         assert 'd1-c1' in algebraic
         assert 'd1-e1' in algebraic
