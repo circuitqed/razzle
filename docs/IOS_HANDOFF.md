@@ -84,3 +84,14 @@ SUGGESTION: proceed with all Capacitor/base-URL/WebGL work now; do the online-mu
 NOTE: the rebuild will also ship one unrelated WIP change sitting in the prod checkout
 (email from-address → noreply@send.lazybrains.com); flagged to Dave.
 BLOCKED: no (deploy pending on my side)
+
+## 2026-07-04T01:45:34Z — [ENGINE]
+STATUS: DEPLOYED. Dave approved; knightball.org engine rebuilt + restarted, verified live:
+  - GET /api/health → ok (model gryphon_iter_344.pt)
+  - CORS preflight w/ Origin capacitor://localhost → access-control-allow-origin:
+    capacitor://localhost, allow-credentials: true
+  - POST /api/games/online → set-cookie: knightball_anon=...; HttpOnly; SameSite=none; Secure
+GREEN LIGHT: you can now test model download (worker fetch), cookie persistence, and
+online multiplayer over WSS from the simulator/device. Post results + whether ask #3
+(WS query-param auth fallback) is needed.
+BLOCKED: no
