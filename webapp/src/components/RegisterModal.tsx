@@ -9,7 +9,7 @@ interface RegisterModalProps {
 }
 
 export default function RegisterModal({ isOpen, onClose, onSwitchToLogin }: RegisterModalProps) {
-  const { registerWithEmail } = useAuth();
+  const { registerWithEmail, isAuthenticated } = useAuth();
   const [email, setEmail] = useState('');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -29,6 +29,12 @@ export default function RegisterModal({ isOpen, onClose, onSwitchToLogin }: Regi
       setError(null);
     }
   }, [isOpen]);
+
+  // Close when sign-in completes outside the form — the native Google flow
+  // finishes via a deep link (Safari round-trip), not through this modal.
+  useEffect(() => {
+    if (isOpen && isAuthenticated) onClose();
+  }, [isOpen, isAuthenticated, onClose]);
 
   if (!isOpen) return null;
 

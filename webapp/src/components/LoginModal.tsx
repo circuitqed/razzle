@@ -10,7 +10,7 @@ interface LoginModalProps {
 }
 
 export default function LoginModal({ isOpen, onClose, onSwitchToRegister, onForgotPassword }: LoginModalProps) {
-  const { loginWithEmail } = useAuth();
+  const { loginWithEmail, isAuthenticated } = useAuth();
   const [emailOrUsername, setEmailOrUsername] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -24,6 +24,12 @@ export default function LoginModal({ isOpen, onClose, onSwitchToRegister, onForg
       setError(null);
     }
   }, [isOpen]);
+
+  // Close when sign-in completes outside the form — the native Google flow
+  // finishes via a deep link (Safari round-trip), not through this modal.
+  useEffect(() => {
+    if (isOpen && isAuthenticated) onClose();
+  }, [isOpen, isAuthenticated, onClose]);
 
   if (!isOpen) return null;
 
