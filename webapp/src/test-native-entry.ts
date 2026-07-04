@@ -17,7 +17,9 @@
 import { newGame, copyState, applyMove, isTerminal, getWinner } from './engine/state';
 import type { EngineState } from './engine/state';
 import { getLegalMoves } from './engine/moves';
-import { API_BASE, isNativeApp, gameWebSocketUrl } from './api/base';
+import { API_BASE, isNativeApp, gameWebSocketUrl, installNativeIdentity } from './api/base';
+
+installNativeIdentity();
 
 const logEl = document.getElementById('log')!;
 const resultEl = document.getElementById('result')!;
