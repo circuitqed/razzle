@@ -1,0 +1,17 @@
+{
+  "applinks": {
+    "details": [
+      {
+        "appIDs": ["5J862PN572.com.lazybrains.knightball"],
+        "components": [
+          { "/": "/api/*", "exclude": true },
+          { "/": "/auth/*", "exclude": true },
+          { "/": "/*" }
+        ]
+      }
+    ]
+  },
+  "webcredentials": {
+    "apps": ["5J862PN572.com.lazybrains.knightball"]
+  }
+}

@@ -2,6 +2,8 @@ import { Component, Suspense, lazy, useEffect, useState, useCallback, useMemo, u
 import type { ReactNode, ErrorInfo } from 'react';
 import { BrowserRouter, Routes, Route, useParams, useNavigate, useLocation } from 'react-router-dom';
 import { GoogleOAuthProvider } from '@react-oauth/google';
+import { App as CapacitorApp } from '@capacitor/app';
+import { isNativeApp } from './api/base';
 import BugReportDialog from './components/BugReportDialog';
 import GameView from './components/GameView';
 import RulesModal from './components/RulesModal';
@@ -38,6 +40,28 @@ const TrainingDashboard = lazy(() => import('./components/TrainingDashboard'));
 const AnalysisBoard = lazy(() => import('./components/AnalysisBoard'));
 
 const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID || '';
+
+/**
+ * Universal links (https://knightball.org/...) arriving in the native app —
+ * e.g. a shared join link — are routed into the SPA. The knightball://auth
+ * deep link is handled separately in AuthContext.
+ */
+function NativeLinkHandler() {
+  const navigate = useNavigate();
+  useEffect(() => {
+    if (!isNativeApp) return;
+    const sub = CapacitorApp.addListener('appUrlOpen', ({ url }) => {
+      try {
+        const u = new URL(url);
+        if (u.protocol === 'https:' && /(^|\.)knightball\.org$/.test(u.hostname)) {
+          navigate(u.pathname + u.search);
+        }
+      } catch { /* not a URL we handle */ }
+    });
+    return () => { sub.then((h) => h.remove()); };
+  }, [navigate]);
+  return null;
+}
 
 const GAME_STORAGE_KEY = 'knightball_current_game';
 const HAS_PLAYED_KEY = 'knightball_has_played';
@@ -956,6 +980,7 @@ export default function App() {
       <GoogleOAuthProvider clientId={GOOGLE_CLIENT_ID}>
         <BrowserRouter>
           <AuthProvider>
+            <NativeLinkHandler />
             <Suspense fallback={<div className="min-h-screen bg-gray-900 flex items-center justify-center text-gray-400">Loading...</div>}>
               <Routes>
                 <Route path="/" element={<AppContentWrapper />} />
