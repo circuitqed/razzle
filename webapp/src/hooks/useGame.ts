@@ -96,6 +96,11 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
   // Client-side AI worker
   const aiWorker = useAIWorker();
   const loadedModelRef = useRef<string | null>(null);
+  // Set when the model info fetch itself fails (e.g. model missing on the
+  // server). Distinct from aiWorker.loadError, which only covers failures
+  // AFTER a load was started — without this, the AI-move trigger effect
+  // retries forever (red error banner + flickering "thinking" indicator).
+  const [modelUnavailable, setModelUnavailable] = useState<string | null>(null);
 
   // Which player the human controls (for AI games)
   const humanPlayer = vsAI ? playerColor : -1; // -1 means both
@@ -140,6 +145,7 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
     const modelKey = aiModel ?? 'latest';
     if (loadedModelRef.current === modelKey) return;
     loadedModelRef.current = modelKey;
+    setModelUnavailable(null);
 
     if (modelKey === 'random_weights') {
       aiWorkerRef.current.loadRandomEvaluator();
@@ -159,7 +165,14 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
         logger.info('[useGame] Loading client-side AI model:', modelInfo.version);
       })
       .catch((err) => {
-        logger.info('[useGame] ONNX model not available, using server AI:', err);
+        if (loadedModelRef.current !== modelKey) return;
+        // No server-side AI fallback exists (it's admin-gated in prod), so a
+        // missing model means this level cannot be played right now. Fail
+        // once with a clear message; retry only if the user switches levels.
+        logger.error('[useGame] AI model unavailable:', err);
+        loadedModelRef.current = null; // allow retry on reselect
+        setModelUnavailable(modelKey);
+        setError(`The AI for this level is unavailable (model ${filename ?? 'latest'} missing on the server). Try a different level.`);
       });
   }, [vsAI, aiModel]);
 
@@ -334,8 +347,10 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
     if (gameState.current_player !== aiPlayer) return;
     // Don't retry if model failed to load and isn't recovering
     if (aiWorker.loadError && !aiWorker.isLoaded && !aiWorker.isLoading) return;
+    // Don't retry if the model info fetch failed (model missing server-side)
+    if (modelUnavailable) return;
     handleAIMove(gameState.game_id);
-  }, [vsAI, gameState?.game_id, gameState?.current_player, gameState?.status, aiPlayer, aiThinking, isLoading, aiWorker.loadError, aiWorker.isLoaded, aiWorker.isLoading]);
+  }, [vsAI, gameState?.game_id, gameState?.current_player, gameState?.status, aiPlayer, aiThinking, isLoading, aiWorker.loadError, aiWorker.isLoaded, aiWorker.isLoading, modelUnavailable]);
 
   // Commit a complete turn: send all sub-moves to the server, update state.
   const commitTurn = useCallback(

@@ -127,7 +127,9 @@ describe('state', () => {
     expect(s.pieces[1]).toBe(P2_START_PIECES);
     expect(s.balls[0]).toBe(P1_START_BALL);
     expect(s.balls[1]).toBe(P2_START_BALL);
-    expect(s.touchedMask).toBe(0n);
+    // Persistent ineligibility rule: all pieces start ineligible to receive
+    // passes (a piece becomes eligible by moving).
+    expect(s.touchedMask).toBe(P1_START_PIECES | P2_START_PIECES);
   });
 
   it('initial state is not terminal', () => {

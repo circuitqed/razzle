@@ -8,8 +8,14 @@ vi.mock('../api/engine', () => ({
   createGame: vi.fn(),
   getGameState: vi.fn(),
   makeMove: vi.fn(),
+  makeTurn: vi.fn(),
   getAIMove: vi.fn(),
   undoMove: vi.fn(),
+  resignGame: vi.fn(),
+  // Never resolves: model stays "loading" so tests exercise game flow
+  // without the model-unavailable error path racing their assertions.
+  getOnnxModelInfo: vi.fn().mockReturnValue(new Promise(() => {})),
+  getOnnxModelInfoByName: vi.fn().mockReturnValue(new Promise(() => {})),
 }))
 
 // Import mocked module
@@ -46,7 +52,7 @@ describe('useGame hook', () => {
       expect(api.createGame).toHaveBeenCalledWith({
         player1_type: 'human',
         player2_type: 'ai',
-        ai_simulations: 800,
+        ai_simulations: 256,
       })
       expect(api.getGameState).toHaveBeenCalledWith('test-game-123')
       expect(result.current.gameState).toEqual(mockInitialGameState)

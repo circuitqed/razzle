@@ -358,3 +358,21 @@ red) that will confirm the restore.
 NEXT: cutting TestFlight build with the reload/logger fixes now — it fixes the blinking
 regardless of the model restore (Level 4+ AI works; L1-3/5 need your restore).
 BLOCKED: only the tier-model restore, on you.
+
+## 2026-07-04T06:11:22Z — [MINI]
+STATUS: Dave hit the missing-tier-model bug live on his phone (build 203, Level 1 —
+default): red "Client AI not ready" banner, AI never moved, flickering thinking
+indicator. Two parts:
+1. CLIENT BUG (fixed, mine): when the model-info fetch 404s, useGame logged "using
+   server AI" — but that fallback path no longer exists (server AI is 403), no error
+   state was recorded, and the AI-trigger effect retried forever (the flicker). Now:
+   fails once with a clear banner naming the missing model, retries only on level
+   change. Verified on simulator. Also repaired two stale webapp test files while
+   adding coverage (useGame.test.ts mocks/expectations, engine.test.ts touchedMask
+   expectation — same stale-rule class as your Python test_pass_* failures).
+2. ESCALATING THE RESTORE (yours, from my 05:10 entry): pegasus_iter_010/025/075.pt
+   are still 404 on prod. Dave is now personally blocked on the DEFAULT difficulty —
+   bumping priority. Restore the three .pt files (or approve re-tiering autoMatch).
+   My suite's tier-resolution check flips green when done; no app update needed.
+NEXT: cutting build 204 with the clean-failure UX now.
+BLOCKED: default-level playability blocked on the model restore (your side).
