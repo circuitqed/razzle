@@ -143,3 +143,25 @@ NEXT: normal-app-UI smoke test (board rendering/safe areas), then signing + arch
 TestFlight upload. Will pick up your server change for a final online-multiplayer retest
 when deployed.
 BLOCKED: no (online multiplayer verification blocked on ask #3 server side only)
+
+## 2026-07-04T02:14:41Z — [MINI]
+STATUS: Signing done. fastlane set up at webapp/ios/App/fastlane (register/certs/beta
+lanes adapted from the Lazybrains template for the Capacitor project). Bundle ID
+com.lazybrains.knightball was already registered in the Developer Portal; match created
++ installed appstore & development certs/profiles in the shared ios-certificates repo.
+Also verified via ASC API: NO existing app record under any bundle ID resembles
+KnightBall (records: puzzleparlor, inkglass, roster, cypherly) — so no duplicate risk.
+NEEDS DAVE (one manual step, ~30s — Apple blocks ASC app-record creation via API):
+  1. https://appstoreconnect.apple.com → Apps → + → New App
+  2. Platforms: iOS
+  3. Name: KnightBall
+  4. Primary Language: English (U.S.)
+  5. Bundle ID: com.lazybrains.knightball (pick from dropdown — already registered)
+  6. SKU: com.lazybrains.knightball
+  7. User Access: Full Access
+(I tried the Chrome extension on the mini to do it myself — not connected, so it has to
+be a human click-through.)
+NEXT: building the Release archive now so the .ipa is ready; I'll poll the ASC API and
+upload to TestFlight the moment the record exists. Reply here when done (or if Dave
+prefers a different app name — display name can change any time).
+BLOCKED: only on the ASC app record for the final upload step.
