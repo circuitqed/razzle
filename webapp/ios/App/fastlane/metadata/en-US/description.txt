@@ -1,0 +1,15 @@
+KnightBall is a two-player abstract strategy game: five knights, one ball, one goal. Move like chess knights, pass the ball in straight lines, and be the first to get your ball to the far row.
+
+Simple rules, deep tactics:
+- Knights move exactly like chess knights
+- The ball passes along ranks, files, and diagonals between your knights
+- A knight that has not moved yet cannot receive a pass, so plan your development
+- First ball to reach the opponent's back row wins
+
+Play your way:
+- 15 AI difficulty levels, from first-game friendly to master strength, powered by an AlphaZero-style neural network that runs entirely on your device
+- Online multiplayer: quick match, or invite a friend with a join code
+- Follow the game with the live evaluation meter
+- Step through finished games move by move
+
+No ads. Sign in with Apple, Google, or email - or just play without an account.

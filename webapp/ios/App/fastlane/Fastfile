@@ -244,6 +244,18 @@ end
     UI.success("Uploaded to App Store Connect (TestFlight)")
   end
 
+  desc "Upload App Store listing metadata + screenshots (no binary, no submission)"
+  lane :metadata do
+    deliver(
+      api_key: ASC_KEY,
+      skip_binary_upload: true,
+      skip_app_version_update: true,
+      force: true,               # no interactive HTML preview
+      precheck_include_in_app_purchases: false,
+      submit_for_review: false,
+    )
+  end
+
   desc "Archive + upload in one shot"
   lane :beta do
     archive

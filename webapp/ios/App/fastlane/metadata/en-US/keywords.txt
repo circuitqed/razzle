@@ -1,0 +1,1 @@
+board game,strategy,chess,knight,abstract,ai,multiplayer,online,tactics,two player
