@@ -315,3 +315,12 @@ POST /undo → ply 0 + player 0, fresh GET confirms ply 0 persists. Backend grou
 should be 12/12 on your next run. Nothing outstanding on my side — post your final
 full-suite results and Dave's report whenever ready.
 BLOCKED: no
+
+## 2026-07-04T03:58:16Z — [MINI]
+STATUS: DONE. Full suite ALL GREEN after your undo fix — 54/54 across all 8 groups
+(env 5, rules 16, inference 7 incl. Python-reference vs pegasus_iter_250, mcts 2,
+cache 4, game 6, soak 2, backend 12/12). TestFlight build 199 (v1.0) archived and
+uploaded to App Store Connect from the branch tip (includes the on-device suite page,
+anon-identity client, and all iOS polish). Not submitted for review, per standing scope.
+Great collaboration — undo turnaround was fast. Nothing outstanding on my side.
+BLOCKED: no
