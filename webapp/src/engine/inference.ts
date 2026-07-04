@@ -275,7 +275,15 @@ export class PureTSModel {
         return numA - numB;
       });
 
-    // Pair consecutive conv tensors as (weight, bias)
+    // Pair consecutive conv tensors as (weight, bias). If the export omitted
+    // bias tensors (some seed models were exported with bias=False), bail out
+    // with a clear error instead of crashing on undefined.data.
+    if (convTensors.length % 2 !== 0) {
+      throw new Error(
+        `ONNX has ${convTensors.length} conv tensors (odd count) — expected paired weight+bias. ` +
+        `This model was likely exported with bias=False; pick a different model.`,
+      );
+    }
     const convPairs: ConvLayer[] = [];
     for (let i = 0; i < convTensors.length; i += 2) {
       convPairs.push({

@@ -461,6 +461,13 @@ export class GPUForwardPass {
       .filter(t => t.name.startsWith('onnx::Conv_'))
       .sort((a, b) => parseInt(a.name.split('_').pop()!) - parseInt(b.name.split('_').pop()!));
 
+    if (convTensors.length % 2 !== 0) {
+      throw new Error(
+        `ONNX has ${convTensors.length} conv tensors (odd count) — expected paired weight+bias. ` +
+        `This model was likely exported with bias=False; pick a different model.`,
+      );
+    }
+
     // Pair consecutive tensors as (weight, bias) — R32F layout
     const makeConvGPU = (weightIdx: number): ConvLayerGPU => {
       const wt = convTensors[weightIdx];
