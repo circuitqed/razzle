@@ -330,6 +330,7 @@ def init_db(db_path: Path = None) -> None:
             "ALTER TABLE users ADD COLUMN email_verified INTEGER DEFAULT 0",
             "ALTER TABLE users ADD COLUMN google_id TEXT",
             "ALTER TABLE users ADD COLUMN auth_provider TEXT DEFAULT 'local'",
+            "ALTER TABLE users ADD COLUMN apple_id TEXT",
         ]
         for sql in auth_migrations:
             try:
@@ -344,6 +345,10 @@ def init_db(db_path: Path = None) -> None:
             pass
         try:
             conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google_id ON users(google_id) WHERE google_id IS NOT NULL")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_apple_id ON users(apple_id) WHERE apple_id IS NOT NULL")
         except sqlite3.OperationalError:
             pass
 
@@ -881,6 +886,8 @@ def _user_dict_from_row(row) -> dict:
         d["auth_provider"] = row["auth_provider"] or "local"
     if "google_id" in keys:
         d["google_id"] = row["google_id"]
+    if "apple_id" in keys:
+        d["apple_id"] = row["apple_id"]
     return d
 
 
@@ -956,6 +963,84 @@ def get_user_by_google_id(
         if row is None:
             return None
         return _user_dict_from_row(row)
+
+
+def get_user_by_apple_id(
+    apple_id: str,
+    db_path: Path = None
+) -> Optional[dict]:
+    """Get a user by their Apple sub ID."""
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+    with get_connection(db_path) as conn:
+        row = conn.execute(
+            "SELECT * FROM users WHERE apple_id = ? AND is_active = 1",
+            (apple_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        return _user_dict_from_row(row)
+
+
+def create_user_apple(
+    username: str,
+    apple_id: str,
+    email: Optional[str] = None,
+    display_name: Optional[str] = None,
+    db_path: Path = None
+) -> Optional[dict]:
+    """Create a new user via Sign in with Apple. Password set to sentinel '!oauth!'.
+
+    Email may be None: Apple can relay-hide it, and only provides it on the
+    FIRST authorization.
+    """
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+    user_id = secrets.token_hex(8)
+    now = datetime.utcnow().isoformat() + 'Z'
+
+    with get_connection(db_path) as conn:
+        try:
+            conn.execute("""
+                INSERT INTO users (user_id, username, password_hash, display_name, created_at,
+                                   email, email_verified, apple_id, auth_provider)
+                VALUES (?, ?, '!oauth!', ?, ?, ?, ?, ?, 'apple')
+            """, (user_id, username.lower(), display_name or username, now,
+                  email.lower() if email else None, 1 if email else 0, apple_id))
+            conn.commit()
+            return {
+                "user_id": user_id,
+                "username": username.lower(),
+                "display_name": display_name or username,
+                "created_at": now,
+                "last_login_at": None,
+                "email": email.lower() if email else None,
+                "email_verified": bool(email),
+                "auth_provider": "apple",
+                "apple_id": apple_id,
+            }
+        except sqlite3.IntegrityError:
+            return None
+
+
+def link_apple_account(
+    user_id: str,
+    apple_id: str,
+    db_path: Path = None
+) -> bool:
+    """Link an Apple account to an existing user."""
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+    with get_connection(db_path) as conn:
+        try:
+            conn.execute(
+                "UPDATE users SET apple_id = ? WHERE user_id = ?",
+                (apple_id, user_id)
+            )
+            conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            return False
 
 
 def create_user_with_email(

@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import GoogleSignInButton from './GoogleSignInButton';
+import AppleSignInButton from './AppleSignInButton';
 
 interface RegisterModalProps {
   isOpen: boolean;
@@ -9,7 +10,7 @@ interface RegisterModalProps {
 }
 
 export default function RegisterModal({ isOpen, onClose, onSwitchToLogin }: RegisterModalProps) {
-  const { registerWithEmail } = useAuth();
+  const { registerWithEmail, isAuthenticated } = useAuth();
   const [email, setEmail] = useState('');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -29,6 +30,12 @@ export default function RegisterModal({ isOpen, onClose, onSwitchToLogin }: Regi
       setError(null);
     }
   }, [isOpen]);
+
+  // Close when sign-in completes outside the form — the native Google flow
+  // finishes via a deep link (Safari round-trip), not through this modal.
+  useEffect(() => {
+    if (isOpen && isAuthenticated) onClose();
+  }, [isOpen, isAuthenticated, onClose]);
 
   if (!isOpen) return null;
 
@@ -171,6 +178,9 @@ export default function RegisterModal({ isOpen, onClose, onSwitchToLogin }: Regi
         {/* Google Sign In - redirects to Google */}
         <div className="flex justify-center">
           <GoogleSignInButton onError={(msg) => setError(msg)} />
+          <div className="mt-2">
+            <AppleSignInButton onError={(msg) => setError(msg)} />
+          </div>
         </div>
 
         <div className="mt-4 text-center text-sm text-gray-400">

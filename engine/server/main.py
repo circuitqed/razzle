@@ -244,6 +244,27 @@ class GoogleCompleteRequest(BaseModel):
     state: Optional[str] = None  # OAuth state; marks native-initiated flows
 
 
+class AppleAuthRequest(BaseModel):
+    identity_token: str  # Apple identity token (RS256 JWT) from the native sheet
+    # Apple only supplies the name on FIRST authorization - client forwards it
+    display_name: Optional[str] = None
+
+
+class AppleAuthResponse(BaseModel):
+    status: str  # 'logged_in' or 'needs_username'
+    user: Optional[UserResponse] = None
+    temp_token: Optional[str] = None
+    email: Optional[str] = None
+    suggested_name: Optional[str] = None
+    token: Optional[str] = None  # session JWT (native clients only)
+
+
+class AppleCompleteRequest(BaseModel):
+    temp_token: str
+    username: str = Field(..., min_length=3, max_length=32, pattern=r'^[a-zA-Z0-9_]+$')
+    display_name: Optional[str] = Field(None, max_length=64)
+
+
 class AppTicketExchangeRequest(BaseModel):
     ticket: str
 
@@ -1536,6 +1557,57 @@ async def send_email_via_resend(to: str, subject: str, html: str) -> None:
         logger.error(f"Failed to send email to {to}: {e}")
 
 
+APPLE_BUNDLE_ID = os.environ.get("APPLE_BUNDLE_ID", "com.lazybrains.knightball")
+_apple_jwks_client = None
+
+
+def verify_apple_token(identity_token: str) -> Optional[dict]:
+    """Verify a Sign in with Apple identity token against Apple's JWKS.
+
+    Returns {sub, email} or None. Requires pyjwt[crypto] (cryptography) for
+    RS256 - flag for the container image if missing.
+    """
+    global _apple_jwks_client
+    try:
+        if _apple_jwks_client is None:
+            _apple_jwks_client = jwt.PyJWKClient("https://appleid.apple.com/auth/keys")
+        signing_key = _apple_jwks_client.get_signing_key_from_jwt(identity_token)
+        payload = jwt.decode(
+            identity_token,
+            signing_key.key,
+            algorithms=["RS256"],
+            audience=APPLE_BUNDLE_ID,
+            issuer="https://appleid.apple.com",
+        )
+        return {"sub": payload["sub"], "email": payload.get("email")}
+    except Exception as e:
+        logger.warning(f"Apple identity token verification failed: {e}")
+        return None
+
+
+def create_apple_temp_token(apple_id: str, email, name) -> str:
+    """Create a short-lived JWT for the Apple username-picker flow."""
+    payload = {
+        "purpose": "apple_link",
+        "apple_id": apple_id,
+        "email": email,
+        "name": name,
+        "exp": datetime.utcnow() + timedelta(minutes=15),
+        "iat": datetime.utcnow(),
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
+def decode_apple_temp_token(token: str):
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        if payload.get("purpose") != "apple_link":
+            return None
+        return payload
+    except (jwt.ExpiredSignatureError, jwt.InvalidTokenError):
+        return None
+
+
 def create_temp_token(google_id: str, email: str, name: str) -> str:
     """Create a short-lived JWT for the Google username-picker flow."""
     payload = {
@@ -1907,6 +1979,83 @@ async def exchange_app_ticket(request: AppTicketExchangeRequest, req: Request = 
     if not user:
         raise HTTPException(status_code=401, detail="User not found")
     return AppTicketExchangeResponse(token=create_jwt_token(user_id), user=UserResponse(**user))
+
+
+@app.post("/auth/apple", response_model=AppleAuthResponse)
+async def apple_auth(request: AppleAuthRequest, response: Response, req: Request = None):
+    """Sign in with Apple (native app). The sheet is native, so no browser
+    round-trip or tickets - the app posts the identity token directly."""
+    if req and not auth_limiter.check(get_client_ip(req)):
+        raise HTTPException(status_code=429, detail="Too many requests. Try again later.")
+
+    info = verify_apple_token(request.identity_token)
+    if not info:
+        raise HTTPException(status_code=401, detail="Invalid Apple identity token")
+
+    apple_id = info["sub"]
+    email = info.get("email")
+
+    user = persistence.get_user_by_apple_id(apple_id)
+    if user:
+        _set_auth_cookie(response, user["user_id"])
+        return AppleAuthResponse(status="logged_in", user=UserResponse(**user),
+                                 token=_native_token(req, user["user_id"]))
+
+    # Link by email (Apple emails are verified; private-relay addresses are fine)
+    if email:
+        existing = persistence.get_user_by_email(email)
+        if existing:
+            persistence.link_apple_account(existing["user_id"], apple_id)
+            if not existing.get("email_verified"):
+                persistence.set_email_verified(existing["user_id"])
+            user = persistence.get_user_by_id(existing["user_id"])
+            _set_auth_cookie(response, user["user_id"])
+            return AppleAuthResponse(status="logged_in", user=UserResponse(**user),
+                                     token=_native_token(req, user["user_id"]))
+
+    # New user - pick a username in-app
+    temp_token = create_apple_temp_token(apple_id, email, request.display_name)
+    return AppleAuthResponse(
+        status="needs_username",
+        temp_token=temp_token,
+        email=email,
+        suggested_name=request.display_name,
+    )
+
+
+@app.post("/auth/apple/complete", response_model=AuthResponse)
+async def apple_complete(request: AppleCompleteRequest, response: Response, req: Request = None):
+    """Complete Apple sign-up by choosing a username."""
+    if req and not auth_limiter.check(get_client_ip(req)):
+        raise HTTPException(status_code=429, detail="Too many requests. Try again later.")
+
+    payload = decode_apple_temp_token(request.temp_token)
+    if not payload:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    user = persistence.create_user_apple(
+        username=request.username,
+        apple_id=payload["apple_id"],
+        email=payload.get("email"),
+        display_name=request.display_name or payload.get("name"),
+    )
+
+    if not user:
+        if persistence.get_user_by_username(request.username):
+            raise HTTPException(status_code=409, detail="Username already exists")
+        if payload.get("email") and persistence.get_user_by_email(payload["email"]):
+            raise HTTPException(status_code=409, detail="Email already registered")
+        if persistence.get_user_by_apple_id(payload["apple_id"]):
+            raise HTTPException(status_code=409, detail="Apple account already linked")
+        raise HTTPException(status_code=409, detail="Account creation failed")
+
+    _set_auth_cookie(response, user["user_id"])
+
+    return AuthResponse(
+        user=UserResponse(**user),
+        message="Account created successfully",
+        token=_native_token(req, user["user_id"]),
+    )
 
 
 @app.post("/auth/ws-ticket", response_model=WsTicketResponse)

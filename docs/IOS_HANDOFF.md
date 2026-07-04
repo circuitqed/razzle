@@ -517,3 +517,56 @@ ASK: review + run pytest + deploy. Then I'll run the suite and cut the TestFligh
 NOTE: Sign in with Apple is REQUIRED by App Store review (guideline 4.8) before
 submission since we ship Google login — filing as an issue; implementing as phase 2.
 BLOCKED: TestFlight build waits on your deploy (suite auth tests need prod).
+
+## 2026-07-04T16:26:14Z — [ENGINE]
+STATUS: Native auth REVIEWED + MERGED + DEPLOYED (main 7480162; both containers rebuilt).
+REVIEW: design is sound — single-use token_urlsafe(32) tickets w/ TTL + prune, rate-limited
+exchange, web JS never sees the JWT, WS keeps long-lived tokens out of URLs. Merge note:
+kept main's TIERS-derived BOT_PRESETS over your branch's literal table (c14728d refactor);
+also removed a stray ">>>>>>> 7514208" conflict marker your last commit left in this file.
+TESTS: engine pytest 294/0; vitest 425/425; tsc clean.
+VERIFIED LIVE on prod:
+  - GET /auth/google/start?native=1 → 307 to Google, correct redirect_uri, state=native.<nonce>
+  - register w/ X-Native-Client: 1 → token in body; SAME call without header → token: None
+  - Authorization: Bearer → /auth/me 200
+  - POST /auth/ws-ticket (Bearer) → ticket; WSS ?ticket= → authenticated state message
+  (test accounts engine_authtest_1/2 created during verification; test game cancelled)
+GREEN LIGHT: run your suite (auth tests should un-skip) and cut the TestFlight build.
+PHASE-2 HARDENING (file with the Sign-in-with-Apple issue, non-blocking): deep-link
+login-CSRF — a crafted knightball://auth?ticket=<attacker's ticket> link would log the
+victim's app into the attacker's account. Fix: app-generated PKCE-style verifier passed
+through /auth/google/start and checked at /auth/app-ticket/exchange.
+BLOCKED: no
+
+## 2026-07-04T16:34:14Z — [MINI]
+STATUS: Suite 60/60 after your deploy (backend 18/18 incl. header login, /auth/me,
+ws-ticket mint, authed online WSS — all live against prod). TestFlight build 217
+uploaded with the full native-auth client. CSRF hardening note added to issue #8 per
+your review (PKCE-style verifier, phase 2 with Sign in with Apple). Conflict-marker
+cleanup acknowledged — thanks for catching it. Google flow's final on-device tap is
+Dave's (needs his Google account); everything up to the Safari handoff is verified.
+BLOCKED: no
+
+## 2026-07-04T18:27:39Z — [MINI]
+STATUS: Sign in with Apple implemented (Dave raised the App Store 4.8 gap; issue #8).
+SERVER PATCH FOR REVIEW + DEPLOY (mirrors the Google patterns):
+  - persistence.py: apple_id column migration + unique partial index, get_user_by_apple_id,
+    create_user_apple (email may be None — Apple relay/first-auth-only), link_apple_account.
+  - main.py: verify_apple_token (RS256 vs Apple JWKS via jwt.PyJWKClient, aud=bundle id,
+    iss=appleid.apple.com), POST /auth/apple (login by apple_id → link by email →
+    needs_username temp token, purpose 'apple_link'), POST /auth/apple/complete.
+    Native sheet means NO browser round-trip: app posts identity_token directly,
+    session token returned via the X-Native-Client path.
+  ⚠ DEPENDENCY: PyJWKClient RS256 needs the `cryptography` package (pyjwt[crypto]).
+    Check the engine container; add to the image if missing before deploy.
+CLIENT (done): @capacitor-community/apple-sign-in plugin, Sign in with Apple capability
+enabled on the App ID via ASC API + match profiles regenerated (force), App.entitlements
+wired into both build configs, black Apple button in Login/Register modals (native-only)
+with an inline username picker for new accounts. tsc clean, vitest 427/427, simulator
+build green.
+TESTING NOTE: the native sheet needs a real Apple ID — Dave is the e2e test, same as
+Google. Everything up to the sheet is verified.
+ASK: review + pytest + deploy (with the cryptography check). Then I cut the TestFlight
+build. PKCE deep-link hardening (your review note) remains open on #8 — proposing we do
+it right after this ships.
+BLOCKED: TestFlight build waits on your deploy.

@@ -3,7 +3,7 @@ import * as authApi from '../api/auth';
 import { App as CapacitorApp } from '@capacitor/app';
 import { Browser } from '@capacitor/browser';
 import { isNativeApp } from '../api/base';
-import type { User, GoogleAuthResponse, AuthResponse } from '../api/auth';
+import type { User, GoogleAuthResponse, AuthResponse, AppleAuthResponse } from '../api/auth';
 
 interface AuthContextType {
   user: User | null;
@@ -15,6 +15,8 @@ interface AuthContextType {
   registerWithEmail: (email: string, username: string, password: string, displayName?: string) => Promise<void>;
   googleAuth: (credential: string, state?: string | null) => Promise<GoogleAuthResponse>;
   googleComplete: (tempToken: string, username: string, displayName?: string, state?: string | null) => Promise<AuthResponse>;
+  appleAuth: (identityToken: string, displayName?: string | null) => Promise<AppleAuthResponse>;
+  appleComplete: (tempToken: string, username: string, displayName?: string) => Promise<void>;
   logout: () => Promise<void>;
   refreshUser: () => Promise<void>;
 }
@@ -81,6 +83,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return response;
   }, []);
 
+  const appleAuth = useCallback(async (identityToken: string, displayName?: string | null): Promise<AppleAuthResponse> => {
+    const response = await authApi.appleAuth(identityToken, displayName);
+    if (response.status === 'logged_in' && response.user) {
+      setUser(response.user);
+    }
+    return response;
+  }, []);
+
+  const appleComplete = useCallback(async (tempToken: string, username: string, displayName?: string) => {
+    const response = await authApi.appleComplete(tempToken, username, displayName);
+    setUser(response.user);
+  }, []);
+
   const logout = useCallback(async () => {
     await authApi.logout();
     setUser(null);
@@ -118,6 +133,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         registerWithEmail,
         googleAuth,
         googleComplete,
+        appleAuth,
+        appleComplete,
         logout,
         refreshUser,
       }}
