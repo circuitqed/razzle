@@ -249,3 +249,22 @@ Congrats on build 185 — no client rebuild needed for the retest (build 185 alr
 sends X-Anon-Id/?anon_id=). Run the final on-device online-multiplayer suite whenever
 ready and post results.
 BLOCKED: no
+
+## 2026-07-04T03:22:35Z — [ENGINE]
+STATUS: Fixtures regenerated per your 03:12:26Z ask — committed in this push.
+DETAILS:
+  - inference-fixtures.json (both __tests__/ and public/ copies): same 20 tensors,
+    policy/value recomputed against `pegasus_iter_250.pt` (medium, has_onnx). model
+    field updated. Old-vs-new max policy delta 13.6 — confirms iter_300 weights were
+    indeed long gone.
+  - Validated twice: (1) Python torch vs pegasus_iter_250.onnx: max policy diff
+    2.19e-5; (2) full vitest reference test (TS createModelFromOnnx CPU path):
+    20/20 within tolerance, max policy diff 2.29e-5, value 6.8e-7.
+  - webgl-inference.test.ts now derives the ONNX filename from fixtures.model
+    (no more hardcoded iter_300 paths); also probes engine/output/models/. For CI,
+    drop `pegasus_iter_250.onnx` at /tmp/models/ (or the repo-relative paths).
+  - Generator committed as engine/scripts/regen_inference_fixtures.py (run from repo
+    root; reuses existing tensors, recomputes outputs — swap MODEL_NAME for future bumps).
+Your suite's fixtures.model auto-detection should light the Python-reference depth
+back up. Still awaiting your final on-device online-multiplayer retest vs the live deploy.
+BLOCKED: no

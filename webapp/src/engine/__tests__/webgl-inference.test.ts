@@ -13,12 +13,18 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { createModelFromOnnx } from '../inference';
 
-// Try to load the ONNX model file from the models directory
-const ONNX_MODEL_PATH = '/app/models/iter_300.onnx';
 const FIXTURES_PATH = path.resolve(__dirname, 'inference-fixtures.json');
 
 // Skip if fixtures or model not available
 const fixturesExist = fs.existsSync(FIXTURES_PATH);
+
+// The ONNX model name is derived from the fixtures' "model" field (a .pt name,
+// e.g. "pegasus_iter_250.pt") so regenerating fixtures against a new model
+// doesn't require touching this test. Regenerate with
+// engine/scripts/regen_inference_fixtures.py.
+const onnxName = fixturesExist
+  ? JSON.parse(fs.readFileSync(FIXTURES_PATH, 'utf-8')).model.replace(/\.pt$/, '.onnx')
+  : 'missing.onnx';
 
 describe.skipIf(!fixturesExist)('Pure-TS Inference vs Python Reference', () => {
   // Load fixtures
@@ -40,9 +46,10 @@ describe.skipIf(!fixturesExist)('Pure-TS Inference vs Python Reference', () => {
     // We need the ONNX model file. Try to fetch it or skip.
     // Try multiple paths for the ONNX model
     const modelPaths = [
-      ONNX_MODEL_PATH,
-      '/tmp/models/iter_300.onnx',
-      path.resolve(__dirname, '../../../../models/iter_300.onnx'),
+      `/app/models/${onnxName}`,
+      `/tmp/models/${onnxName}`,
+      path.resolve(__dirname, `../../../../models/${onnxName}`),
+      path.resolve(__dirname, `../../../../engine/output/models/${onnxName}`),
     ];
     let modelBuffer: ArrayBuffer | null = null;
     for (const mp of modelPaths) {
