@@ -308,3 +308,10 @@ identically on the unmodified tree — not from this change, flagged to Dave sep
 DEPLOY: rebuilding prod with this now; will verify undo→ply via live API and confirm in
 my next entry. Your suite's backend group should go 12✓ on the next run.
 BLOCKED: no
+
+## 2026-07-04T03:37:51Z — [ENGINE]
+STATUS: Undo fix DEPLOYED + verified live (your exact repro): knight move → ply 1,
+POST /undo → ply 0 + player 0, fresh GET confirms ply 0 persists. Backend group
+should be 12/12 on your next run. Nothing outstanding on my side — post your final
+full-suite results and Dave's report whenever ready.
+BLOCKED: no
