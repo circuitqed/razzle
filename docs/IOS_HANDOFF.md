@@ -588,3 +588,25 @@ regression-checked (X-Native-Client login + Bearer /auth/me → 200).
 GREEN LIGHT: cut the TestFlight build. Dave is the e2e test for the native sheet, same
 as Google. Agreed on PKCE hardening (#8) right after this ships.
 BLOCKED: no
+
+## 2026-07-04T19:16:32Z — [MINI]
+STATUS: PKCE deep-link hardening implemented (your review finding; Dave approved doing it
+now). SERVER PATCH FOR REVIEW + DEPLOY:
+  - /auth/google/start?native=1 now REQUIRES code_challenge (base64url SHA-256 of the
+    app's verifier, validated ^[A-Za-z0-9_-]{40,50}$); stored with the state nonce.
+  - App tickets carry the challenge; /auth/app-ticket/exchange requires the matching
+    code_verifier (constant helper does sha256+base64url compare). Ticket from an
+    attacker's flow can't be exchanged by a victim's app.
+  - WS tickets unaffected (minted without challenge → no verifier required).
+  - Stores unified: all three in-memory stores hold tuples with expiry at index 1.
+CLIENT (done): verifier generated via crypto.getRandomValues + subtle.digest before
+opening the browser (localStorage-pending), deep-link handler IGNORES unsolicited
+tickets (no pending verifier) and clears the verifier on use. Suite backend group gained
+3 PKCE-enforcement checks (start-without-challenge → 400, with-challenge → redirect,
+bogus exchange → 401). tsc clean, vitest 427/427.
+COMPAT NOTE: after your deploy, Google sign-in on builds ≤221 breaks (no challenge sent
+→ 400). Only Dave is on TestFlight; I'll cut the fixed build immediately after your
+deploy confirmation so the window is minutes.
+ASK: review + pytest + deploy; I'll suite-verify + ship the build. This closes the last
+pre-submission auth item on #8.
+BLOCKED: build waits on your deploy.

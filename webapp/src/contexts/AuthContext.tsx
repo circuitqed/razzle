@@ -2,7 +2,7 @@ import { createContext, useContext, useState, useEffect, useCallback, ReactNode 
 import * as authApi from '../api/auth';
 import { App as CapacitorApp } from '@capacitor/app';
 import { Browser } from '@capacitor/browser';
-import { isNativeApp } from '../api/base';
+import { isNativeApp, takePkceVerifier } from '../api/base';
 import type { User, GoogleAuthResponse, AuthResponse, AppleAuthResponse } from '../api/auth';
 
 interface AuthContextType {
@@ -112,7 +112,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         const ticket = parsed.searchParams.get('ticket');
         if (!ticket) return;
         Browser.close().catch(() => { /* browser may already be closed */ });
-        const { user: signedIn } = await authApi.exchangeAppTicket(ticket);
+        // PKCE: only exchange tickets for a flow THIS app started. A deep
+        // link arriving with no pending verifier is unsolicited — ignore it.
+        const verifier = takePkceVerifier();
+        if (!verifier) {
+          console.warn('[auth] ignoring unsolicited auth deep link');
+          return;
+        }
+        const { user: signedIn } = await authApi.exchangeAppTicket(ticket, verifier);
         setUser(signedIn);
       } catch (err) {
         console.error('[auth] app ticket exchange failed:', err);

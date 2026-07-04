@@ -267,6 +267,7 @@ class AppleCompleteRequest(BaseModel):
 
 class AppTicketExchangeRequest(BaseModel):
     ticket: str
+    code_verifier: Optional[str] = None  # PKCE verifier matching the flow's challenge
 
 
 class AppTicketExchangeResponse(BaseModel):
@@ -1668,7 +1669,7 @@ def _native_token(req: Optional[Request], user_id: str) -> Optional[str]:
 
 _APP_TICKETS: dict = {}  # ticket -> (user_id, expiry_ts)
 _WS_TICKETS: dict = {}  # ticket -> (user_id, expiry_ts)
-_NATIVE_OAUTH_STATES: dict = {}  # nonce -> expiry_ts
+_NATIVE_OAUTH_STATES: dict = {}  # nonce -> (pkce_challenge, expiry_ts)
 
 APP_TICKET_TTL = 300
 WS_TICKET_TTL = 60
@@ -1677,26 +1678,43 @@ NATIVE_STATE_TTL = 600
 
 def _prune_tickets(store: dict) -> None:
     now = time.time()
-    for key in [k for k, v in store.items() if (v[1] if isinstance(v, tuple) else v) < now]:
+    for key in [k for k, v in store.items() if v[1] < now]:
         store.pop(key, None)
 
 
-def _mint_ticket(store: dict, user_id: str, ttl: int) -> str:
+def _mint_ticket(store: dict, user_id: str, ttl: int, challenge: Optional[str] = None) -> str:
     _prune_tickets(store)
     ticket = secrets.token_urlsafe(32)
-    store[ticket] = (user_id, time.time() + ttl)
+    store[ticket] = (user_id, time.time() + ttl, challenge)
     return ticket
 
 
-def _consume_ticket(store: dict, ticket: str) -> Optional[str]:
-    """Return the user_id for a valid ticket and invalidate it, else None."""
+def _consume_ticket(store: dict, ticket: str, verifier: Optional[str] = None) -> Optional[str]:
+    """Return the user_id for a valid ticket and invalidate it, else None.
+
+    If the ticket was minted with a PKCE challenge, the caller must supply the
+    matching verifier (SHA-256(verifier) base64url == challenge). This stops
+    login-CSRF via crafted knightball://auth?ticket= deep links: a ticket from
+    an attacker's flow can't be exchanged by the victim's app, whose verifier
+    won't match.
+    """
     _prune_tickets(store)
     entry = store.pop(ticket, None)
     if entry is None:
         return None
-    user_id, expiry = entry
+    user_id, expiry = entry[0], entry[1]
+    challenge = entry[2] if len(entry) > 2 else None
     if expiry < time.time():
         return None
+    if challenge is not None:
+        if not verifier:
+            return None
+        import hashlib, base64
+        computed = base64.urlsafe_b64encode(
+            hashlib.sha256(verifier.encode("ascii")).digest()
+        ).rstrip(b"=").decode("ascii")
+        if computed != challenge:
+            return None
     return user_id
 
 
@@ -1859,8 +1877,9 @@ async def google_auth(request: GoogleAuthRequest, response: Response, req: Reque
     # one-time ticket it can deep-link into the app (knightball://auth).
     def _app_ticket_for(user_id: str):
         if _is_native_oauth_state(request.state):
-            _NATIVE_OAUTH_STATES.pop(request.state[len("native."):], None)
-            return _mint_ticket(_APP_TICKETS, user_id, APP_TICKET_TTL)
+            entry = _NATIVE_OAUTH_STATES.pop(request.state[len("native."):], None)
+            challenge = entry[0] if entry else None
+            return _mint_ticket(_APP_TICKETS, user_id, APP_TICKET_TTL, challenge=challenge)
         return None
 
     # Check if user exists by google_id
@@ -1925,8 +1944,9 @@ async def google_complete(request: GoogleCompleteRequest, response: Response, re
 
     app_ticket = None
     if _is_native_oauth_state(request.state):
-        _NATIVE_OAUTH_STATES.pop(request.state[len("native."):], None)
-        app_ticket = _mint_ticket(_APP_TICKETS, user["user_id"], APP_TICKET_TTL)
+        entry = _NATIVE_OAUTH_STATES.pop(request.state[len("native."):], None)
+        challenge = entry[0] if entry else None
+        app_ticket = _mint_ticket(_APP_TICKETS, user["user_id"], APP_TICKET_TTL, challenge=challenge)
 
     return AuthResponse(
         user=UserResponse(**user),
@@ -1936,7 +1956,7 @@ async def google_complete(request: GoogleCompleteRequest, response: Response, re
 
 
 @app.get("/auth/google/start")
-async def google_auth_start(native: int = 0):
+async def google_auth_start(native: int = 0, code_challenge: Optional[str] = None):
     """Begin the Google OAuth flow server-side.
 
     The native app opens this URL in the system browser (Google blocks OAuth
@@ -1949,9 +1969,13 @@ async def google_auth_start(native: int = 0):
         raise HTTPException(status_code=503, detail="Google sign-in not configured")
     state = None
     if native:
+        # PKCE: the app supplies SHA-256(verifier); the ticket exchange later
+        # requires the verifier, so a leaked/planted ticket is useless.
+        if not code_challenge or not re.match(r"^[A-Za-z0-9_-]{40,50}$", code_challenge):
+            raise HTTPException(status_code=400, detail="code_challenge required for native flows")
         _prune_tickets(_NATIVE_OAUTH_STATES)
         nonce = secrets.token_urlsafe(16)
-        _NATIVE_OAUTH_STATES[nonce] = time.time() + NATIVE_STATE_TTL
+        _NATIVE_OAUTH_STATES[nonce] = (code_challenge, time.time() + NATIVE_STATE_TTL)
         state = f"native.{nonce}"
     from urllib.parse import urlencode
     params = {
@@ -1972,7 +1996,7 @@ async def exchange_app_ticket(request: AppTicketExchangeRequest, req: Request = 
     """Exchange a one-time app ticket (from the native OAuth deep link) for a JWT."""
     if req and not auth_limiter.check(get_client_ip(req)):
         raise HTTPException(status_code=429, detail="Too many requests. Try again later.")
-    user_id = _consume_ticket(_APP_TICKETS, request.ticket)
+    user_id = _consume_ticket(_APP_TICKETS, request.ticket, verifier=request.code_verifier)
     if not user_id:
         raise HTTPException(status_code=401, detail="Invalid or expired ticket")
     user = persistence.get_user_by_id(user_id)

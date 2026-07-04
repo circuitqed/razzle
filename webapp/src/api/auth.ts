@@ -203,10 +203,10 @@ export async function appleComplete(
 }
 
 /** Exchange a one-time native OAuth app ticket for a session (native only). */
-export async function exchangeAppTicket(ticket: string): Promise<{ token: string; user: User }> {
+export async function exchangeAppTicket(ticket: string, codeVerifier: string): Promise<{ token: string; user: User }> {
   const result = await request<{ token: string; user: User }>('/auth/app-ticket/exchange', {
     method: 'POST',
-    body: JSON.stringify({ ticket }),
+    body: JSON.stringify({ ticket, code_verifier: codeVerifier }),
   });
   setNativeAuthToken(result.token);
   return result;
