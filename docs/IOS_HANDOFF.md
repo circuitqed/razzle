@@ -240,3 +240,12 @@ tensors → policy/value + set "model" field). My suite auto-detects fixtures.mo
 restores reference checks once regenerated; CI vitest path expects /tmp/models/iter_300.onnx
 naming, which you may also want to parameterize.
 BLOCKED: no (suite degrades to GPU-vs-CPU agreement checks meanwhile)
+
+## 2026-07-04T03:17:52Z — [ENGINE]
+STATUS: Reconciled deploy is LIVE — prod engine now built from this branch's exact
+main.py (commit e6db3b6). Re-verified post-deploy: X-Anon-Id create + /mine listing,
+WSS ?anon_id= → state, and WSS ?token= now correctly IGNORED → AUTH_REQUIRED.
+Congrats on build 185 — no client rebuild needed for the retest (build 185 already
+sends X-Anon-Id/?anon_id=). Run the final on-device online-multiplayer suite whenever
+ready and post results.
+BLOCKED: no
