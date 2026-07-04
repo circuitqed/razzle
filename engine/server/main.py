@@ -9,6 +9,7 @@ import asyncio
 import gzip
 import logging
 import os
+import re
 import secrets
 import threading
 import time
@@ -1314,11 +1315,17 @@ async def require_admin_for_ai(
         )
 
 
+# Client-supplied anon ids (X-Anon-Id header / ?anon_id= WS param) — opaque
+# token, same trust level as the anon cookie value.
+ANON_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
+
+
 async def get_user_or_anon(
     request: Request,
     response: Response,
     auth_cookie: Optional[str] = Cookie(None, alias=AUTH_COOKIE_NAME),
     anon_cookie: Optional[str] = Cookie(None, alias=ANON_COOKIE_NAME),
+    anon_header: Optional[str] = Header(None, alias="X-Anon-Id"),
 ) -> dict:
     """Get authenticated user, or create/retrieve anonymous session."""
     # Try real auth first
@@ -1326,8 +1333,13 @@ async def get_user_or_anon(
     if user:
         return user
 
-    # Fall back to anonymous session
+    # Fall back to anonymous session. The native iOS app (capacitor://localhost
+    # origin) can't persist cross-site cookies (WKWebView tracking prevention
+    # drops them even with SameSite=None), so it sends a client-generated anon
+    # id in X-Anon-Id instead.
     anon_id = anon_cookie
+    if not anon_id and anon_header and ANON_ID_RE.match(anon_header):
+        anon_id = anon_header
     if not anon_id:
         anon_id = secrets.token_hex(16)
         response.set_cookie(
@@ -1335,7 +1347,7 @@ async def get_user_or_anon(
             max_age=86400 * 30,  # 30 days
             httponly=True,
             secure=True,
-            samesite="lax",
+            samesite="none",  # cross-site: iOS app (capacitor://localhost) must send cookies
         )
 
     return {
@@ -1523,7 +1535,7 @@ def _set_auth_cookie(response: Response, user_id: str) -> None:
         value=token,
         httponly=True,
         secure=True,
-        samesite="lax",
+        samesite="none",  # cross-site: iOS app (capacitor://localhost) must send cookies
         max_age=JWT_EXPIRY_HOURS * 3600,
     )
 
@@ -3474,6 +3486,25 @@ async def join_online_game(
     )
 
 
+@app.get("/games/online/mine", response_model=MyOnlineGamesResponse)
+async def get_my_online_games(
+    user: dict = Depends(get_user_or_anon)
+):
+    """
+    List all online games for the current user.
+
+    Returns active (playing) and waiting games separately.
+    """
+    result = persistence.get_user_online_games(user["user_id"])
+
+    return MyOnlineGamesResponse(
+        active=[OnlineGameSummary(**g) for g in result["active"]],
+        waiting=[OnlineGameSummary(**g) for g in result["waiting"]],
+    )
+
+
+# NOTE: must be registered AFTER /games/online/mine — Starlette matches routes in
+# registration order, so this dynamic route would otherwise shadow the static one.
 @app.get("/games/online/{game_id}", response_model=OnlineGameStatusResponse)
 async def get_online_game_status(
     game_id: str,
@@ -3602,23 +3633,6 @@ async def leave_online_game(
     return LeaveOnlineGameResponse(
         status=result["status"],
         winner=result.get("winner"),
-    )
-
-
-@app.get("/games/online/mine", response_model=MyOnlineGamesResponse)
-async def get_my_online_games(
-    user: dict = Depends(get_user_or_anon)
-):
-    """
-    List all online games for the current user.
-
-    Returns active (playing) and waiting games separately.
-    """
-    result = persistence.get_user_online_games(user["user_id"])
-
-    return MyOnlineGamesResponse(
-        active=[OnlineGameSummary(**g) for g in result["active"]],
-        waiting=[OnlineGameSummary(**g) for g in result["waiting"]],
     )
 
 
@@ -4437,15 +4451,26 @@ async def handle_player_reconnect(game: Game, user_id: str):
 
 
 def extract_user_from_websocket(websocket: WebSocket) -> Optional[str]:
-    """Extract user_id from WebSocket cookies (JWT auth or anonymous session)."""
+    """Extract user_id from WebSocket cookies (JWT auth or anonymous session).
+
+    The native iOS app can't send cross-site cookies on the WS handshake
+    (WKWebView tracking prevention), so ?anon_id=<id> is accepted as a
+    fallback (same trust level as the cookie). JWT via query param is
+    deliberately NOT supported — tokens in URLs end up in access logs; add a
+    short-lived ticket endpoint instead when real accounts ship on native.
+    """
     cookies = websocket.cookies
     token = cookies.get(AUTH_COOKIE_NAME)
     if token:
         user_id = decode_jwt_token(token)
         if user_id:
             return user_id
-    # Fall back to anonymous cookie
+    # Fall back to anonymous cookie, then anon_id query param
     anon_id = cookies.get(ANON_COOKIE_NAME)
+    if not anon_id:
+        candidate = websocket.query_params.get("anon_id")
+        if candidate and ANON_ID_RE.match(candidate):
+            anon_id = candidate
     if anon_id:
         return f"anon_{anon_id}"
     return None

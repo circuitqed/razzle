@@ -147,7 +147,8 @@ class GameState:
                 self.current_player,
                 self.touched_mask,
                 self.has_passed,
-                self.last_knight_dst
+                self.last_knight_dst,
+                self.ply
             ))
             # Switch player - DO NOT reset touched_mask (ineligibility persists!)
             self.current_player = 1 - self.current_player
@@ -169,7 +170,8 @@ class GameState:
             self.current_player,
             self.touched_mask,
             self.has_passed,
-            self.last_knight_dst
+            self.last_knight_dst,
+            self.ply
         ))
 
         p = self.current_player
@@ -208,9 +210,8 @@ class GameState:
             raise ValueError("No moves to undo")
 
         entry = self.history.pop()
-        _, self.pieces, self.balls, self.current_player, self.touched_mask, self.has_passed, self.last_knight_dst = entry
-        # Note: ply is decremented based on whether current_player changed,
-        # but that logic was broken. For now we don't track ply precisely on undo.
+        (_, self.pieces, self.balls, self.current_player, self.touched_mask,
+         self.has_passed, self.last_knight_dst, self.ply) = entry
 
     def to_tensor(self) -> np.ndarray:
         """

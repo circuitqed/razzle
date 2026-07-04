@@ -1,6 +1,6 @@
 import type { ArenaMatch, ArenaRating, ArenaMatchesResponse, ArenaRatingsResponse } from '../types';
 
-const API_BASE = '/api';
+import { API_BASE } from './base';
 
 /**
  * Get arena match history.

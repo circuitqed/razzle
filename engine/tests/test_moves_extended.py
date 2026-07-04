@@ -263,7 +263,12 @@ class TestApplyMoveStateChanges:
 
     def test_pass_updates_touched_mask(self):
         state = GameState.new_game()
-        assert state.touched_mask == 0
+        # All starting pieces begin ineligible (must knight-move before receiving)
+        from razzle.core.bitboard import P1_START_PIECES, P2_START_PIECES
+        assert state.touched_mask == P1_START_PIECES | P2_START_PIECES
+
+        # Clear the mask so the pass itself marks squares
+        state.touched_mask = 0
 
         # Pass from d1 to e1
         move = algebraic_to_move('d1-e1')

@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>Native App Self-Test</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+body { font-family: monospace; padding: 10px; background: #111; color: #ddd; font-size: 12px; }
+.pass { color: #4f4; } .fail { color: #f44; } .warn { color: #ff4; }
+.info { color: #8af; } .dim { color: #888; }
+pre { white-space: pre-wrap; word-wrap: break-word; }
+.summary { font-size: 14px; padding: 8px; margin: 8px 0; border: 2px solid; }
+.summary.pass { border-color: #4f4; } .summary.fail { border-color: #f44; }
+</style>
+</head>
+<body>
+<h2>Native App Self-Test Suite</h2>
+<p style="color:#888">On-device regression suite: env / rules / inference / mcts / cache /
+game / soak / backend. Groups map to historical bug classes (see src/test-native-entry.ts).
+Query params: ?groups=env,rules,... · ?model=local · ?gamesims= ?mctssims= ?soakn=</p>
+<pre id="log"><div>Loading test script...</div></pre>
+<div id="result" data-status="running"></div>
+<script type="module" src="/src/test-native-entry.ts"></script>
+</body>
+</html>

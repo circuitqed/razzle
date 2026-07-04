@@ -110,7 +110,7 @@ describe('GameBrowser', () => {
 
     await waitFor(() => {
       // Shows model filename (not full path) for AI games
-      expect(screen.getByText('Human vs model_v1.pt')).toBeInTheDocument()
+      expect(screen.getByText('Human vs model_v1 - 800 sims')).toBeInTheDocument()
     })
 
     // Shows usernames for human vs human games
@@ -129,10 +129,10 @@ describe('GameBrowser', () => {
     )
 
     await waitFor(() => {
-      expect(screen.getAllByText('Replay').length).toBeGreaterThan(0)
+      expect(screen.getAllByText('View').length).toBeGreaterThan(0)
     })
 
-    const replayButtons = screen.getAllByText('Replay')
+    const replayButtons = screen.getAllByText('View')
     fireEvent.click(replayButtons[0])
 
     expect(onSelectGame).toHaveBeenCalledWith('game1')

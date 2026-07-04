@@ -16,7 +16,7 @@ services:
       - JWT_SECRET=${JWT_SECRET:-change-me-in-production}
       - TRAINING_API_KEY=${TRAINING_API_KEY:-}
       - RAZZLE_MODELS_DIR=/app/models
-      - ALLOWED_ORIGINS=https://knightball.org,http://localhost:5173,http://localhost:7492
+      - ALLOWED_ORIGINS=https://knightball.org,capacitor://localhost,http://localhost:5173,http://localhost:7492
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
       - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-}
       - RESEND_API_KEY=${RESEND_API_KEY:-}

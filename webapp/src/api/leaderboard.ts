@@ -1,6 +1,6 @@
 import type { PlayerProfile, PlayerProfileWithGames, PlayersListResponse, LeaderboardResponse } from '../types';
 
-const API_BASE = '/api';
+import { API_BASE } from './base';
 
 /**
  * Get the ELO leaderboard.

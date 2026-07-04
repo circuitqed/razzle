@@ -1,0 +1,7 @@
+git_url("git@github.com:circuitqed/ios-certificates.git")
+git_branch("main") # override fastlane's default of "master"
+storage_mode("git")
+
+type("appstore") # default; override with `fastlane match development|adhoc|appstore`
+
+app_identifier(["com.lazybrains.knightball"])

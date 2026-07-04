@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="manifest" href="/manifest.json" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <title>KnightBall</title>
@@ -32,14 +32,23 @@
       // Auto-recover from stale service worker cache: if a bundled asset
       // fails to load (404 because filenames changed), wait for the new
       // service worker to activate then reload automatically.
+      //
+      // Only SAME-ORIGIN failures count — a blocked/unreachable third-party
+      // script (e.g. accounts.google.com behind an adblocker) must not
+      // trigger reloads. Disabled entirely in the native app (capacitor://):
+      // assets ship in the bundle, so version skew is impossible and a
+      // reload loop is the only possible outcome.
       (function() {
+        if (location.protocol === 'capacitor:') return;
         var reloading = false;
         window.addEventListener('error', function(e) {
-          if (!reloading && e.target && (e.target.tagName === 'SCRIPT' || e.target.tagName === 'LINK')) {
-            reloading = true;
-            // Brief delay to let the new SW install + activate
-            setTimeout(function() { location.reload(); }, 1500);
-          }
+          if (reloading || !e.target) return;
+          if (e.target.tagName !== 'SCRIPT' && e.target.tagName !== 'LINK') return;
+          var url = e.target.src || e.target.href || '';
+          if (url.indexOf(location.origin + '/') !== 0) return; // third-party
+          reloading = true;
+          // Brief delay to let the new SW install + activate
+          setTimeout(function() { location.reload(); }, 1500);
         }, true);
       })();
     </script>

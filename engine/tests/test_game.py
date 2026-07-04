@@ -82,10 +82,16 @@ class TestMoves:
 
     def test_pass_moves_from_start(self):
         state = GameState.new_game()
-        pass_moves = list(MoveGenerator.get_pass_moves(state))
 
-        # Ball on d1 can pass to c1, e1 (horizontal)
-        # Cannot pass to b1 or f1 (blocked by c1, e1)
+        # All starting pieces are ineligible to receive (touched_mask starts
+        # with every start square marked), so there are NO passes from the
+        # opening position — pieces must knight-move before they can receive.
+        assert list(MoveGenerator.get_pass_moves(state)) == []
+
+        # Once eligibility is cleared, ball on d1 can pass to c1, e1
+        # (horizontal). Cannot pass to b1 or f1 (blocked by c1, e1).
+        state.touched_mask = 0
+        pass_moves = list(MoveGenerator.get_pass_moves(state))
         algebraic = [move_to_algebraic(m) for m in pass_moves]
         assert 'd1-c1' in algebraic
         assert 'd1-e1' in algebraic
@@ -122,6 +128,30 @@ class TestApplyMove:
         state = GameState.new_game()
         assert not state.is_terminal()
         assert state.get_winner() is None
+
+    def test_undo_restores_ply(self):
+        state = GameState.new_game()
+        moves = get_legal_moves(state)
+        knight_moves = [m for m in moves if m != -1 and not (state.balls[0] & bit(m // 56))]
+
+        # Knight move increments ply; undo must restore it
+        state.apply_move(knight_moves[0])
+        assert state.ply == 1
+        state.undo_move()
+        assert state.ply == 0
+        assert state.current_player == 0
+
+        # Pass + END_TURN chain: pass keeps ply, END_TURN increments; undo both
+        pass_move = algebraic_to_move('d1-e1')
+        state.apply_move(pass_move)
+        assert state.ply == 0
+        state.apply_move(-1)
+        assert state.ply == 1
+        state.undo_move()
+        assert state.ply == 0
+        state.undo_move()
+        assert state.ply == 0
+        assert state.current_player == 0
 
 
 class TestMustPass:

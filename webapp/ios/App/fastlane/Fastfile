@@ -1,0 +1,210 @@
+default_platform(:ios)
+
+# Load MATCH_PASSWORD from the macOS login Keychain if not already in env.
+# The ios-certificates repo has a single encryption passphrase shared by all
+# com.lazybrains apps; fall back through the known keychain entry names.
+if ENV["MATCH_PASSWORD"].nil?
+  require "open3"
+  ["match_knightball_passphrase", "match_inkglass_passphrase"].each do |entry|
+    out, status = Open3.capture2("security", "find-generic-password", "-s", entry, "-w")
+    if status.success? && !out.strip.empty?
+      ENV["MATCH_PASSWORD"] = out.strip
+      break
+    end
+  end
+end
+
+# App Store Connect API key. Identifiers are not secrets; the secret is the .p8.
+ASC_KEY = app_store_connect_api_key(
+  key_id: ENV["ASC_KEY_ID"] || "7MD5L4AMDY",
+  issuer_id: ENV["ASC_ISSUER_ID"] || "8c1c5bd8-37c1-459e-bc4d-f15d04f58c26",
+  key_filepath: ENV["ASC_KEY_FILEPATH"] ||
+    File.expand_path("~/.appstoreconnect/private_keys/AuthKey_7MD5L4AMDY.p8"),
+  in_house: false
+)
+
+before_all do
+  # With CI set (GHA runner, or a headless local session), use a disposable
+  # keychain so codesign never needs GUI Keychain prompts.
+  if is_ci
+    sh("security delete-keychain fastlane_tmp_keychain 2>/dev/null || true")
+    setup_ci
+  end
+end
+
+def _restore_login_keychain
+  sh(%q{security default-keychain -s "$HOME/Library/Keychains/login.keychain-db" 2>/dev/null || true})
+  sh(%q{security list-keychains -s "$HOME/Library/Keychains/login.keychain-db" /Library/Keychains/System.keychain 2>/dev/null || true})
+  sh("security delete-keychain fastlane_tmp_keychain 2>/dev/null || true")
+end
+
+after_all do |_lane|
+  _restore_login_keychain if is_ci
+end
+
+error do |_lane, _exception|
+  _restore_login_keychain if is_ci
+end
+
+platform :ios do
+  desc "Register the bundle ID (Developer Portal) + verify ASC app record exists (idempotent)"
+  lane :register do
+    bundle_id = CredentialsManager::AppfileConfig.try_fetch_value(:app_identifier)
+    app_name = "KnightBall"
+
+    existing_bundle = Spaceship::ConnectAPI::BundleId.all(filter: { identifier: bundle_id }).first
+    if existing_bundle
+      UI.success("Bundle ID already registered: #{bundle_id}")
+    else
+      Spaceship::ConnectAPI::BundleId.create(
+        name: app_name,
+        identifier: bundle_id,
+        platform: "IOS"
+      )
+      UI.success("Registered bundle ID: #{bundle_id}")
+    end
+
+    existing_app = Spaceship::ConnectAPI::App.all(filter: { bundleId: bundle_id }).first
+    if existing_app
+      UI.success("ASC app record exists: #{existing_app.name}")
+    else
+      UI.user_error!(<<~MSG)
+        Missing ASC app record for #{bundle_id}.
+
+        Create it once in the web UI (30 seconds):
+
+          1. https://appstoreconnect.apple.com → Apps → + → New App
+          2. Platforms: iOS
+          3. Name: #{app_name}
+          4. Primary Language: English (U.S.)
+          5. Bundle ID: #{bundle_id}  (pick from dropdown)
+          6. SKU: #{bundle_id}
+          7. User Access: Full Access
+
+        Then re-run `fastlane register`.
+      MSG
+    end
+  end
+
+  desc "List all ASC app records (debug helper)"
+  lane :listapps do
+    Spaceship::ConnectAPI.token = ASC_KEY.is_a?(Spaceship::ConnectAPI::Token) ? ASC_KEY : Spaceship::ConnectAPI::Token.create(**{
+      key_id: "7MD5L4AMDY",
+      issuer_id: "8c1c5bd8-37c1-459e-bc4d-f15d04f58c26",
+      filepath: File.expand_path("~/.appstoreconnect/private_keys/AuthKey_7MD5L4AMDY.p8"),
+    })
+    Spaceship::ConnectAPI::App.all.each { |a| UI.message("#{a.bundle_id}  |  #{a.name}") }
+  end
+
+  desc "Add Dave to the internal TestFlight group (idempotent)"
+  lane :invite do
+    Spaceship::ConnectAPI.token = Spaceship::ConnectAPI::Token.create(
+      key_id: "7MD5L4AMDY",
+      issuer_id: "8c1c5bd8-37c1-459e-bc4d-f15d04f58c26",
+      filepath: File.expand_path("~/.appstoreconnect/private_keys/AuthKey_7MD5L4AMDY.p8"),
+    )
+    app = Spaceship::ConnectAPI::App.find("com.lazybrains.knightball")
+    UI.user_error!("app not found") unless app
+
+    groups = Spaceship::ConnectAPI.get_beta_groups(filter: { app: app.id }).all_pages.flat_map(&:to_models)
+    groups.each { |g| UI.message("group: #{g.name} internal=#{g.is_internal_group}") }
+    internal = groups.find(&:is_internal_group)
+    unless internal
+      # Spaceship's create_beta_group sends publicLinkLimitEnabled, which the
+      # API rejects for internal groups — use the raw endpoint instead.
+      resp = Spaceship::ConnectAPI.test_flight_request_client.post("v1/betaGroups", {
+        data: {
+          type: "betaGroups",
+          attributes: { name: "Internal Testers", isInternalGroup: true, hasAccessToAllBuilds: true },
+          relationships: { app: { data: { type: "apps", id: app.id } } },
+        },
+      })
+      internal = resp.to_models.first
+      UI.success("created internal group")
+    end
+
+    email = "david.schuster@gmail.com"
+    existing = Spaceship::ConnectAPI.get_beta_testers(filter: { email: email, apps: app.id }).to_models
+    if existing.any?
+      UI.success("#{email} already a tester on this app")
+    else
+      Spaceship::ConnectAPI.post_beta_tester_assignment(
+        beta_group_ids: [internal.id],
+        attributes: { email: email, firstName: "David", lastName: "S" },
+      )
+      UI.success("added #{email} to '#{internal.name}'")
+    end
+  end
+
+  desc "Show TestFlight build processing states"
+  lane :builds do
+    Spaceship::ConnectAPI.token = Spaceship::ConnectAPI::Token.create(
+      key_id: "7MD5L4AMDY",
+      issuer_id: "8c1c5bd8-37c1-459e-bc4d-f15d04f58c26",
+      filepath: File.expand_path("~/.appstoreconnect/private_keys/AuthKey_7MD5L4AMDY.p8"),
+    )
+    app = Spaceship::ConnectAPI::App.find("com.lazybrains.knightball")
+    builds = Spaceship::ConnectAPI.get_builds(filter: { app: app.id }, includes: "buildBetaDetail", sort: "-version", limit: 5).to_models
+    builds.each { |b| UI.message("build #{b.version}: #{b.processing_state}") }
+  end
+
+  desc "Fetch (or create on first run) signing certs + profiles via match"
+  lane :certs do
+    match(type: "appstore", api_key: ASC_KEY, readonly: false)
+    match(type: "development", api_key: ASC_KEY, readonly: false)
+  end
+
+  desc "Build the web assets, sync Capacitor, and produce a signed App Store .ipa"
+  lane :archive do
+    # Web build + Capacitor sync (webapp/ is two levels up from ios/App)
+    sh("cd ../../.. && npm run build && npx cap sync ios")
+
+    build_number = ENV["BUILD_NUMBER"] || sh("git rev-list --count HEAD").strip
+    UI.message("Using CURRENT_PROJECT_VERSION=#{build_number}")
+
+    match(type: "appstore", api_key: ASC_KEY, readonly: false)
+    update_code_signing_settings(
+      path: "App.xcodeproj",
+      use_automatic_signing: false,
+      team_id: "5J862PN572",
+      code_sign_identity: "Apple Distribution",
+      profile_name: "match AppStore com.lazybrains.knightball",
+      bundle_identifier: "com.lazybrains.knightball",
+      targets: ["App"],
+      build_configurations: ["Release"]
+    )
+    build_app(
+      project: "App.xcodeproj",
+      scheme: "App",
+      configuration: "Release",
+      export_method: "app-store",
+      output_directory: "build/export",
+      xcargs: "-packageAuthorizationProvider netrc CURRENT_PROJECT_VERSION=#{build_number}",
+      export_options: {
+        method: "app-store",
+        signingStyle: "manual",
+        teamID: "5J862PN572",
+        provisioningProfiles: {
+          "com.lazybrains.knightball" => "match AppStore com.lazybrains.knightball"
+        }
+      }
+    )
+    UI.success("Archived build #{build_number}: build/export/App.ipa")
+  end
+
+  desc "Upload the previously archived .ipa to TestFlight (requires ASC app record)"
+  lane :upload do
+    upload_to_testflight(
+      api_key: ASC_KEY,
+      ipa: "build/export/App.ipa",
+      skip_waiting_for_build_processing: true
+    )
+    UI.success("Uploaded to App Store Connect (TestFlight)")
+  end
+
+  desc "Archive + upload in one shot"
+  lane :beta do
+    archive
+    upload
+  end
+end

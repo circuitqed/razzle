@@ -1,6 +1,8 @@
 // Simple logging utility for debugging
 // Logs are stored in memory, sent to server, and can be downloaded
 
+import { API_BASE } from '../api/base';
+
 interface LogEntry {
   timestamp: string;
   level: 'debug' | 'info' | 'warn' | 'error';
@@ -13,7 +15,7 @@ class Logger {
   private pendingLogs: LogEntry[] = [];
   private maxLogs = 1000;
   private sessionId: string;
-  private serverUrl = '/api/logs';
+  private serverUrl = `${API_BASE}/logs`;
 
   constructor() {
     // Generate a unique session ID

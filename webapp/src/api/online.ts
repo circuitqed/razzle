@@ -4,7 +4,7 @@
 
 import type { GameState } from '../types';
 
-const API_BASE = '/api';
+import { API_BASE, gameWebSocketUrl } from './base';
 
 class OnlineAPIError extends Error {
   constructor(public status: number, public code: string, message: string) {
@@ -232,10 +232,7 @@ export function connectOnlineGameWebSocket(
   gameId: string,
   handlers: OnlineWebSocketHandlers
 ): WebSocket {
-  const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const wsUrl = `${wsProtocol}//${window.location.host}/ws/games/${gameId}/ws`;
-
-  const ws = new WebSocket(wsUrl);
+  const ws = new WebSocket(gameWebSocketUrl(gameId));
 
   ws.onopen = () => {
     handlers.onOpen?.();

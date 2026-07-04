@@ -114,6 +114,10 @@ describe('MCTS cross-validation: TypeScript vs Python', () => {
     temperature: data.config.temperature,
     earlyTermination: data.config.earlyTermination,
     passQuiescence: data.config.passQuiescence,
+    // Fixtures are generated with sequential Python MCTS (batch_size=1).
+    // Without this, TS falls back to auto-batching with virtual loss and
+    // visit counts diverge from the reference.
+    batchSize: data.config.batchSize,
   };
 
   for (const game of data.games) {

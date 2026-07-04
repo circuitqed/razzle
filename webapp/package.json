@@ -10,9 +10,13 @@
     "preview": "vite preview",
     "test": "vitest",
     "test:run": "vitest run",
-    "test:coverage": "vitest run --coverage"
+    "test:coverage": "vitest run --coverage",
+    "test:ios": "bash scripts/test-ios.sh"
   },
   "dependencies": {
+    "@capacitor/cli": "^8.4.1",
+    "@capacitor/core": "^8.4.1",
+    "@capacitor/ios": "^8.4.1",
     "@react-oauth/google": "^0.13.4",
     "gif.js": "^0.2.0",
     "onnxruntime-web": "^1.20.0",

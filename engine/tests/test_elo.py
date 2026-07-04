@@ -183,7 +183,7 @@ class TestComputeAllRatings:
 
         assert "initial" in ratings
         assert "iter_001" in ratings
-        assert ratings["initial"].rating == 1000.0  # Anchored
+        assert ratings["initial"].rating == pytest.approx(1000.0)  # Anchored
         assert ratings["iter_001"].rating > 1000.0  # Won more
 
     def test_anchor_normalization(self):
@@ -207,7 +207,7 @@ class TestComputeAllRatings:
 
         ratings = compute_all_ratings(matches, anchor_model="initial", anchor_rating=1000.0)
 
-        assert ratings["initial"].rating == 1000.0
+        assert ratings["initial"].rating == pytest.approx(1000.0)
 
     def test_chain_of_improvements(self):
         """Test that later models can be rated higher than earlier ones."""

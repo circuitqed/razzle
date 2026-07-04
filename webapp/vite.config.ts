@@ -9,6 +9,7 @@ export default defineConfig({
       input: {
         index: resolve(__dirname, 'index.html'),
         'test-mcts': resolve(__dirname, 'test-mcts.html'),
+        'test-native': resolve(__dirname, 'test-native.html'),
       },
     },
   },

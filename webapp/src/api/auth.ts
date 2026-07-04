@@ -2,7 +2,7 @@
  * Authentication API client
  */
 
-const API_BASE = '/api';
+import { API_BASE } from './base';
 
 export interface User {
   user_id: string;
