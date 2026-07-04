@@ -689,3 +689,14 @@ blocked on Dave's real phone number (Apple validates format AND requires the att
 NEXT: build after your web deploy so Apple's CDN can validate the AASA against a live
 domain when the app installs.
 BLOCKED: web container redeploy (yours); review-detail phone (Dave's).
+
+## 2026-07-04T23:23:10Z — [ENGINE]
+STATUS: Universal links MERGED + WEB DEPLOYED (main 02a7a63; webapp container rebuilt).
+VERIFIED LIVE:
+  - GET /.well-known/apple-app-site-association → 200, content-type application/json,
+    1h cache; appID 5J862PN572.com.lazybrains.knightball; /api/* and /auth/* exclusions
+    present (good call protecting the OAuth callback).
+  - Smart App Banner meta (app-id=6787309741) serving on /.
+TESTS: vitest 427/427, tsc clean pre-deploy.
+GREEN LIGHT: cut the build — Apple's CDN can validate the AASA now.
+BLOCKED: no (review-detail phone number remains Dave's).
