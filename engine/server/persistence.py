@@ -1023,6 +1023,41 @@ def create_user_apple(
             return None
 
 
+def delete_user_account(
+    user_id: str,
+    db_path: Path = None
+) -> bool:
+    """Soft-delete an account (App Store guideline 5.1.1(v)).
+
+    Deactivates the row and scrubs identifiers so the email / OAuth ids /
+    username are freed for reuse (unique partial indexes only cover live
+    values). Game history rows keep the user_id for integrity but no longer
+    resolve to a live identity.
+    """
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+    with get_connection(db_path) as conn:
+        row = conn.execute(
+            "SELECT user_id FROM users WHERE user_id = ? AND is_active = 1",
+            (user_id,)
+        ).fetchone()
+        if row is None:
+            return False
+        conn.execute("""
+            UPDATE users SET is_active = 0,
+                username = 'deleted_' || user_id,
+                display_name = 'Deleted Player',
+                password_hash = '!deleted!',
+                email = NULL,
+                email_verified = 0,
+                google_id = NULL,
+                apple_id = NULL
+            WHERE user_id = ?
+        """, (user_id,))
+        conn.commit()
+        return True
+
+
 def link_apple_account(
     user_id: str,
     apple_id: str,

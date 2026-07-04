@@ -18,6 +18,7 @@ interface AuthContextType {
   appleAuth: (identityToken: string, displayName?: string | null) => Promise<AppleAuthResponse>;
   appleComplete: (tempToken: string, username: string, displayName?: string) => Promise<void>;
   logout: () => Promise<void>;
+  deleteAccount: () => Promise<void>;
   refreshUser: () => Promise<void>;
 }
 
@@ -101,6 +102,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(null);
   }, []);
 
+  const deleteAccount = useCallback(async () => {
+    await authApi.deleteAccount();
+    setUser(null);
+  }, []);
+
   // Native OAuth return: the system-browser flow deep-links back with
   // knightball://auth?ticket=<one-time>; exchange it for a session.
   useEffect(() => {
@@ -143,6 +149,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         appleAuth,
         appleComplete,
         logout,
+        deleteAccount,
         refreshUser,
       }}
     >

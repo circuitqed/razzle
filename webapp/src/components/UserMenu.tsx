@@ -8,8 +8,10 @@ interface UserMenuProps {
 }
 
 export default function UserMenu({ onOpenLogin, onOpenRegister, onOpenBrowser }: UserMenuProps) {
-  const { user, isAuthenticated, logout, isLoading } = useAuth();
+  const { user, isAuthenticated, logout, deleteAccount, isLoading } = useAuth();
   const [isOpen, setIsOpen] = useState(false);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
 
   // Close menu when clicking outside
@@ -23,9 +25,27 @@ export default function UserMenu({ onOpenLogin, onOpenRegister, onOpenBrowser }:
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
+  // Reset the delete confirmation whenever the menu closes
+  useEffect(() => {
+    if (!isOpen) setConfirmingDelete(false);
+  }, [isOpen]);
+
   const handleLogout = async () => {
     await logout();
     setIsOpen(false);
+  };
+
+  const handleDeleteAccount = async () => {
+    setIsDeleting(true);
+    try {
+      await deleteAccount();
+      setIsOpen(false);
+      setConfirmingDelete(false);
+    } catch (err) {
+      console.error('Account deletion failed:', err);
+    } finally {
+      setIsDeleting(false);
+    }
   };
 
   if (isLoading) {
@@ -113,6 +133,39 @@ export default function UserMenu({ onOpenLogin, onOpenRegister, onOpenBrowser }:
           >
             Logout
           </button>
+
+          {/* Account deletion — required in-app by App Store guideline 5.1.1(v) */}
+          {confirmingDelete ? (
+            <div className="px-4 py-3 border-t border-gray-700 space-y-2">
+              <p className="text-xs text-red-300">
+                Permanently delete your account and sign-in details? Your finished
+                games remain anonymized. This cannot be undone.
+              </p>
+              <div className="flex gap-2">
+                <button
+                  onClick={handleDeleteAccount}
+                  disabled={isDeleting}
+                  className="flex-1 px-3 py-1.5 text-sm bg-red-600 hover:bg-red-700 disabled:bg-gray-600 text-white rounded transition-colors"
+                >
+                  {isDeleting ? 'Deleting…' : 'Delete forever'}
+                </button>
+                <button
+                  onClick={() => setConfirmingDelete(false)}
+                  disabled={isDeleting}
+                  className="flex-1 px-3 py-1.5 text-sm bg-gray-700 hover:bg-gray-600 text-white rounded transition-colors"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          ) : (
+            <button
+              onClick={() => setConfirmingDelete(true)}
+              className="w-full px-4 py-2 text-left text-xs text-gray-500 hover:bg-gray-700 hover:text-red-400 transition-colors border-t border-gray-700"
+            >
+              Delete Account…
+            </button>
+          )}
         </div>
       )}
     </div>

@@ -950,6 +950,38 @@ async function groupBackend() {
     setNativeAuthToken(null);
     check('account auth flow', false, e.message);
   }
+
+  // --- Account deletion (guideline 5.1.1(v)) — throwaway account lifecycle ---
+  try {
+    const suffix = crypto.randomUUID().slice(0, 8);
+    const creds = { username: `kb_deltest_${suffix}`, password: 'ios-suite-test-pw' };
+    const reg = await fetch(`${API_BASE}/auth/register`, {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(creds),
+    });
+    if (reg.status === 404) { p('SKIP: deletion tests — endpoint not deployed yet', 'warn'); return; }
+    const regData = await reg.json();
+    if (!reg.ok || !regData.token) { check('deletion: register throwaway account', false, `status ${reg.status}`); return; }
+    setNativeAuthToken(regData.token);
+    try {
+      const del = await fetch(`${API_BASE}/auth/account`, { method: 'DELETE', credentials: 'include' });
+      check('DELETE /auth/account succeeds', del.ok, `status ${del.status}`);
+      const me = await fetch(`${API_BASE}/auth/me`, { credentials: 'include' });
+      check('deleted account token no longer authenticates', me.status === 401, `status ${me.status}`);
+    } finally {
+      setNativeAuthToken(null);
+    }
+    const relogin = await fetch(`${API_BASE}/auth/login`, {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(creds),
+    });
+    check('deleted account cannot log in', relogin.status === 401, `status ${relogin.status}`);
+  } catch (e: any) {
+    setNativeAuthToken(null);
+    check('account deletion flow', false, e.message);
+  }
 }
 
 // --------------------------------------------------------------------- main
