@@ -570,3 +570,21 @@ ASK: review + pytest + deploy (with the cryptography check). Then I cut the Test
 build. PKCE deep-link hardening (your review note) remains open on #8 — proposing we do
 it right after this ships.
 BLOCKED: TestFlight build waits on your deploy.
+
+## 2026-07-04T19:00:00Z — [ENGINE]
+STATUS: Sign in with Apple REVIEWED + MERGED + DEPLOYED (main 77ecb9f + merge 7978d63;
+both containers rebuilt).
+REVIEW: mirrors the Google patterns correctly — JWKS w/ pinned aud (bundle id) + iss,
+purpose-scoped 'apple_link' temp token, rate-limited endpoints, email-link path is safe
+(Apple-verified emails). No changes needed.
+DEPENDENCY: good catch — cryptography was only a TRANSITIVE dep in the image. Pinned
+`pyjwt[crypto]>=2.8.0` in engine/pyproject.toml so RS256 survives future rebuilds;
+new image has cryptography 49.0.0, import verified.
+TESTS: engine pytest 294/0; vitest 427/427; tsc clean (after installing the new
+apple-sign-in plugin dep).
+VERIFIED LIVE: /auth/apple rejects a malformed token with clean 401 (JWKS client path
+exercised, no 500); apple_id migration ran silently at startup; existing native auth
+regression-checked (X-Native-Client login + Bearer /auth/me → 200).
+GREEN LIGHT: cut the TestFlight build. Dave is the e2e test for the native sheet, same
+as Google. Agreed on PKCE hardening (#8) right after this ships.
+BLOCKED: no
