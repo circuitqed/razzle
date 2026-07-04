@@ -24,7 +24,7 @@ import jwt
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Request, Response, Depends, Cookie, Header, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from pydantic import BaseModel, Field
 import shutil
 
@@ -197,6 +197,12 @@ class UserResponse(BaseModel):
 class AuthResponse(BaseModel):
     user: UserResponse
     message: str
+    # Session JWT, returned ONLY to native clients (X-Native-Client: 1) which
+    # can't persist the auth cookie. Web clients get None.
+    token: Optional[str] = None
+    # One-time app-return ticket, set only when completing a native-initiated
+    # OAuth flow (the responding page runs in Safari, not the app).
+    app_ticket: Optional[str] = None
 
 
 # --- Email/OAuth Auth Models ---
@@ -216,6 +222,7 @@ class EmailLoginRequest(BaseModel):
 class GoogleAuthRequest(BaseModel):
     credential: str  # Auth code, ID token, or access token
     redirect_uri: Optional[str] = None  # Required for auth code exchange
+    state: Optional[str] = None  # OAuth state; marks native-initiated flows
 
 
 class GoogleAuthResponse(BaseModel):
@@ -224,12 +231,30 @@ class GoogleAuthResponse(BaseModel):
     temp_token: Optional[str] = None
     email: Optional[str] = None
     suggested_name: Optional[str] = None
+    # One-time ticket for native flows: the web callback page (in Safari)
+    # deep-links knightball://auth?ticket=... and the app exchanges it for
+    # a JWT via /auth/app-ticket/exchange.
+    app_ticket: Optional[str] = None
 
 
 class GoogleCompleteRequest(BaseModel):
     temp_token: str
     username: str = Field(..., min_length=3, max_length=32, pattern=r'^[a-zA-Z0-9_]+$')
     display_name: Optional[str] = Field(None, max_length=64)
+    state: Optional[str] = None  # OAuth state; marks native-initiated flows
+
+
+class AppTicketExchangeRequest(BaseModel):
+    ticket: str
+
+
+class AppTicketExchangeResponse(BaseModel):
+    token: str
+    user: UserResponse
+
+
+class WsTicketResponse(BaseModel):
+    ticket: str
 
 
 class ForgotPasswordRequest(BaseModel):
@@ -1270,8 +1295,16 @@ async def get_current_user(
     request: Request,
     auth_cookie: Optional[str] = Cookie(None, alias=AUTH_COOKIE_NAME)
 ) -> Optional[dict]:
-    """Get the current user from the auth cookie, or None if not authenticated."""
+    """Get the current user from the auth cookie or Authorization header.
+
+    The native iOS app can't persist cross-site cookies (WKWebView tracking
+    prevention), so it sends the same JWT as `Authorization: Bearer <jwt>`.
+    """
     token = auth_cookie
+    if not token and request is not None:
+        auth_header = request.headers.get("authorization", "")
+        if auth_header.lower().startswith("bearer "):
+            token = auth_header[7:].strip()
     if not token:
         return None
 
@@ -1540,6 +1573,70 @@ def _set_auth_cookie(response: Response, user_id: str) -> None:
     )
 
 
+def _native_token(req: Optional[Request], user_id: str) -> Optional[str]:
+    """Return the session JWT in the response body for native clients only.
+
+    The native app can't persist the auth cookie (WKWebView tracking
+    prevention), so it stores the JWT and sends it via Authorization header.
+    Web clients keep the HttpOnly cookie and never see the token in JS.
+    """
+    if req is not None and req.headers.get("x-native-client") == "1":
+        return create_jwt_token(user_id)
+    return None
+
+
+# --- One-time tickets for the native app (in-memory, single-process server) ---
+#
+# app tickets:   returned to the native OAuth flow via the web callback page's
+#                knightball://auth deep link; exchanged once for a JWT.
+# ws tickets:    let an authenticated native client open a WebSocket without
+#                putting the long-lived JWT in the URL (access-log exposure) —
+#                60s TTL, single use, so a logged value is worthless.
+# oauth states:  nonces marking an OAuth round-trip as native-initiated.
+
+_APP_TICKETS: dict = {}  # ticket -> (user_id, expiry_ts)
+_WS_TICKETS: dict = {}  # ticket -> (user_id, expiry_ts)
+_NATIVE_OAUTH_STATES: dict = {}  # nonce -> expiry_ts
+
+APP_TICKET_TTL = 300
+WS_TICKET_TTL = 60
+NATIVE_STATE_TTL = 600
+
+
+def _prune_tickets(store: dict) -> None:
+    now = time.time()
+    for key in [k for k, v in store.items() if (v[1] if isinstance(v, tuple) else v) < now]:
+        store.pop(key, None)
+
+
+def _mint_ticket(store: dict, user_id: str, ttl: int) -> str:
+    _prune_tickets(store)
+    ticket = secrets.token_urlsafe(32)
+    store[ticket] = (user_id, time.time() + ttl)
+    return ticket
+
+
+def _consume_ticket(store: dict, ticket: str) -> Optional[str]:
+    """Return the user_id for a valid ticket and invalidate it, else None."""
+    _prune_tickets(store)
+    entry = store.pop(ticket, None)
+    if entry is None:
+        return None
+    user_id, expiry = entry
+    if expiry < time.time():
+        return None
+    return user_id
+
+
+def _is_native_oauth_state(state: Optional[str]) -> bool:
+    """Check (without consuming) that a state marks a native-initiated OAuth flow."""
+    if not state or not state.startswith("native."):
+        return False
+    _prune_tickets(_NATIVE_OAUTH_STATES)
+    nonce = state[len("native."):]
+    return nonce in _NATIVE_OAUTH_STATES
+
+
 # --- Auth Endpoints ---
 
 @app.post("/auth/register", response_model=AuthResponse)
@@ -1560,7 +1657,8 @@ async def register(request: RegisterRequest, response: Response, req: Request = 
 
     return AuthResponse(
         user=UserResponse(**user),
-        message="Account created successfully"
+        message="Account created successfully",
+        token=_native_token(req, user["user_id"]),
     )
 
 
@@ -1581,7 +1679,8 @@ async def login(request: LoginRequest, response: Response, req: Request = None):
 
     return AuthResponse(
         user=UserResponse(**user),
-        message="Login successful"
+        message="Login successful",
+        token=_native_token(req, user["user_id"]),
     )
 
 
@@ -1636,7 +1735,8 @@ async def register_email(request: EmailRegisterRequest, response: Response, req:
 
     return AuthResponse(
         user=UserResponse(**user),
-        message="Account created. Check your email to verify."
+        message="Account created. Check your email to verify.",
+        token=_native_token(req, user["user_id"]),
     )
 
 
@@ -1661,7 +1761,8 @@ async def login_email(request: EmailLoginRequest, response: Response, req: Reque
 
     return AuthResponse(
         user=UserResponse(**user),
-        message="Login successful"
+        message="Login successful",
+        token=_native_token(req, user["user_id"]),
     )
 
 
@@ -1682,12 +1783,21 @@ async def google_auth(request: GoogleAuthRequest, response: Response, req: Reque
     email = google_info["email"]
     name = google_info["name"]
 
+    # Native-initiated flow: the callback page runs in Safari, so hand back a
+    # one-time ticket it can deep-link into the app (knightball://auth).
+    def _app_ticket_for(user_id: str):
+        if _is_native_oauth_state(request.state):
+            _NATIVE_OAUTH_STATES.pop(request.state[len("native."):], None)
+            return _mint_ticket(_APP_TICKETS, user_id, APP_TICKET_TTL)
+        return None
+
     # Check if user exists by google_id
     user = persistence.get_user_by_google_id(google_id)
     if user:
         # Existing Google user -> login
         _set_auth_cookie(response, user["user_id"])
-        return GoogleAuthResponse(status="logged_in", user=UserResponse(**user))
+        return GoogleAuthResponse(status="logged_in", user=UserResponse(**user),
+                                  app_ticket=_app_ticket_for(user["user_id"]))
 
     # Check if email matches an existing user -> link account
     if email:
@@ -1699,7 +1809,8 @@ async def google_auth(request: GoogleAuthRequest, response: Response, req: Reque
             # Refresh user data
             user = persistence.get_user_by_id(existing["user_id"])
             _set_auth_cookie(response, user["user_id"])
-            return GoogleAuthResponse(status="logged_in", user=UserResponse(**user))
+            return GoogleAuthResponse(status="logged_in", user=UserResponse(**user),
+                                      app_ticket=_app_ticket_for(user["user_id"]))
 
     # New user - needs to pick a username
     temp_token = create_temp_token(google_id, email, name)
@@ -1740,10 +1851,69 @@ async def google_complete(request: GoogleCompleteRequest, response: Response, re
 
     _set_auth_cookie(response, user["user_id"])
 
+    app_ticket = None
+    if _is_native_oauth_state(request.state):
+        _NATIVE_OAUTH_STATES.pop(request.state[len("native."):], None)
+        app_ticket = _mint_ticket(_APP_TICKETS, user["user_id"], APP_TICKET_TTL)
+
     return AuthResponse(
         user=UserResponse(**user),
-        message="Account created successfully"
+        message="Account created successfully",
+        app_ticket=app_ticket,
     )
+
+
+@app.get("/auth/google/start")
+async def google_auth_start(native: int = 0):
+    """Begin the Google OAuth flow server-side.
+
+    The native app opens this URL in the system browser (Google blocks OAuth
+    inside embedded webviews, and the webview's capacitor:// origin isn't a
+    valid redirect URI anyway). Uses the SAME registered redirect URI as the
+    web flow, so no Google Cloud console changes are needed; a `native.` state
+    routes the result back into the app via a one-time ticket.
+    """
+    if not GOOGLE_CLIENT_ID:
+        raise HTTPException(status_code=503, detail="Google sign-in not configured")
+    state = None
+    if native:
+        _prune_tickets(_NATIVE_OAUTH_STATES)
+        nonce = secrets.token_urlsafe(16)
+        _NATIVE_OAUTH_STATES[nonce] = time.time() + NATIVE_STATE_TTL
+        state = f"native.{nonce}"
+    from urllib.parse import urlencode
+    params = {
+        "client_id": GOOGLE_CLIENT_ID,
+        "redirect_uri": f"{FRONTEND_URL}/auth/google/callback",
+        "response_type": "code",
+        "scope": "openid email profile",
+        "access_type": "online",
+        "prompt": "select_account",
+    }
+    if state:
+        params["state"] = state
+    return RedirectResponse(f"https://accounts.google.com/o/oauth2/v2/auth?{urlencode(params)}")
+
+
+@app.post("/auth/app-ticket/exchange", response_model=AppTicketExchangeResponse)
+async def exchange_app_ticket(request: AppTicketExchangeRequest, req: Request = None):
+    """Exchange a one-time app ticket (from the native OAuth deep link) for a JWT."""
+    if req and not auth_limiter.check(get_client_ip(req)):
+        raise HTTPException(status_code=429, detail="Too many requests. Try again later.")
+    user_id = _consume_ticket(_APP_TICKETS, request.ticket)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Invalid or expired ticket")
+    user = persistence.get_user_by_id(user_id)
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+    return AppTicketExchangeResponse(token=create_jwt_token(user_id), user=UserResponse(**user))
+
+
+@app.post("/auth/ws-ticket", response_model=WsTicketResponse)
+async def create_ws_ticket(user: dict = Depends(require_auth)):
+    """Mint a one-time, short-lived ticket for authenticating a WebSocket
+    handshake (native clients can't send cookies or headers on WS)."""
+    return WsTicketResponse(ticket=_mint_ticket(_WS_TICKETS, user["user_id"], WS_TICKET_TTL))
 
 
 @app.post("/auth/verify-email")
@@ -4454,11 +4624,18 @@ def extract_user_from_websocket(websocket: WebSocket) -> Optional[str]:
     """Extract user_id from WebSocket cookies (JWT auth or anonymous session).
 
     The native iOS app can't send cross-site cookies on the WS handshake
-    (WKWebView tracking prevention), so ?anon_id=<id> is accepted as a
-    fallback (same trust level as the cookie). JWT via query param is
-    deliberately NOT supported — tokens in URLs end up in access logs; add a
-    short-lived ticket endpoint instead when real accounts ship on native.
+    (WKWebView tracking prevention), so two fallbacks are accepted:
+    ?ticket=<one-time 60s ticket from /auth/ws-ticket> for logged-in users,
+    and ?anon_id=<id> for anonymous play. Long-lived JWTs via query param are
+    deliberately NOT supported — tokens in URLs end up in access logs.
     """
+    # One-time ws ticket (native logged-in clients; see /auth/ws-ticket)
+    ws_ticket = websocket.query_params.get("ticket")
+    if ws_ticket:
+        user_id = _consume_ticket(_WS_TICKETS, ws_ticket)
+        if user_id:
+            return user_id
+
     cookies = websocket.cookies
     token = cookies.get(AUTH_COOKIE_NAME)
     if token:

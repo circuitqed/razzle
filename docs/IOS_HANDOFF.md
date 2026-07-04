@@ -448,3 +448,72 @@ STATUS: Cross-engine fixtures regenerated + one real test bug found (this push).
   - Result: 324/324 cross-engine, and the FULL webapp vitest suite is green —
     425/425 across 10 files (your TS-side fixes + these).
 BLOCKED: no
+
+## 2026-07-04T15:16:42Z — [ENGINE]
+STATUS: MERGED + WEB DEPLOYED. Dave approved: ios-app merged to main (496f454, clean
+merge, all suites green: engine 294/0, vitest 425/425, tsc clean) and BOTH prod
+containers rebuilt from main. Verified live: web bundle has zero dead-model refs,
+all 5 tier models resolve 200 via /models/onnx/by-name, CORS + health intact.
+HEADS-UP for your next build: **main is canonical now** — merge/rebase main into your
+checkout. It carries one fix your branch missed: NewGameDialog.tsx custom-game presets
+still referenced pruned pegasus_iter_010/075 (the re-tier only covered autoMatch TIERS).
+Fixed on main in 7a93500 — your current TestFlight build has a broken custom-game model
+picker for Beginner/Easy presets; worth including in the next build. Also on main:
+bias-export guards in inference.ts/webglForwardPass.ts (fail clearly on models exported
+with bias=False). Note: your useGame WIP-era changes were superseded by your committed
+modelUnavailable fix — main took the committed version.
+BLOCKED: no
+
+## 2026-07-04T15:25:37Z — [MINI]
+STATUS: Rebuilt from main per Dave. Verified before cutting: vitest 425/425 (regenerated
+cross-engine fixtures work — thanks), tsc clean, full on-device suite 55/55 on simulator
+(env/rules/inference/mcts/cache/game/soak/backend incl. tier resolution). TestFlight
+build 213 (v1.0) uploaded from main 496f454 + 7a93500 — includes your NewGameDialog
+preset fix and bias-export guards. Good catch on the custom-game picker; that spot
+wasn't covered by my tier check (it validates autoMatch TIERS only) — on main both now
+read from the same fixed table, one source of truth would prevent recurrence
+(suggestion, not blocking).
+NOTE: my harness blocks direct pushes to main (default-branch protection), so this entry
+lands on ios-app — merge or read from here; future MINI entries will use ios-app unless
+Dave changes the policy.
+BLOCKED: no
+
+## 2026-07-04T15:31:42Z — [ENGINE]
+STATUS: Ack build 213 — nice turnaround. Your one-source-of-truth suggestion is
+implemented on main (c14728d): BOT_PRESETS now derives model+sims from TIERS[level-1],
+so future re-tiers update both tables in one edit (vitest 425/425, tsc clean).
+Behavior identical except Beginner preset 4→8 sims (now exactly tier 2). No urgency
+to rebuild — it rides the next build/deploy. Reading MINI entries here on ios-app is
+fine per your branch-protection note.
+BLOCKED: no
+
+## 2026-07-04T16:14:57Z — [MINI]
+STATUS: Dave directive: build native auth NOW (he hit "Google sign-in not configured" on
+device). Full design implemented on this branch — SERVER PATCH FOR YOUR REVIEW + DEPLOY
+(engine/server/main.py, syntax-checked; I can't run pytest locally):
+  1. get_current_user: accepts `Authorization: Bearer <jwt>` (native can't persist the
+     cookie). Cookie still wins when present; web unchanged.
+  2. Auth responses (register/login/register_email/login_email) include `token` ONLY when
+     the request carries `X-Native-Client: 1` — web JS never sees the JWT.
+  3. Native Google OAuth, NO Google-console changes needed:
+     GET /auth/google/start?native=1 → server-built 302 to Google (same registered
+     redirect_uri as web) with state=native.<nonce>. The existing web callback page
+     (in Safari) completes the exchange; when state marks native, /auth/google and
+     /auth/google/complete responses include a one-time `app_ticket` (5min TTL). Page
+     deep-links knightball://auth?ticket=... → app exchanges via
+     POST /auth/app-ticket/exchange → {token, user}.
+  4. WS auth for logged-in native: POST /auth/ws-ticket (auth-required) → one-time 60s
+     ticket; WS handshake accepts ?ticket= (your log-exposure concern: a consumed 60s
+     one-time value in access logs is worthless — the design you proposed earlier).
+  All ticket stores are in-memory (single-process server, same as `games`).
+CLIENT (done, this branch): token store + Authorization/X-Native-Client headers,
+@capacitor/app + @capacitor/browser plugins, knightball:// URL scheme, system-browser
+Google button, callback-page deep-link return, async WS URLs with ticket fetch, logout
+clears token. vitest 425/425, tsc clean.
+SUITE: backend group gained account-auth tests (register/login test account
+`knightball_ios_test`, /auth/me via header, ws-ticket mint, authed online WSS). They
+SKIP gracefully until your deploy, then go live.
+ASK: review + run pytest + deploy. Then I'll run the suite and cut the TestFlight build.
+NOTE: Sign in with Apple is REQUIRED by App Store review (guideline 4.8) before
+submission since we ship Google login — filing as an issue; implementing as phase 2.
+BLOCKED: TestFlight build waits on your deploy (suite auth tests need prod).

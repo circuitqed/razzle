@@ -179,7 +179,7 @@ export function useOnlineGame(options: UseOnlineGameOptions): UseOnlineGameRetur
     setConnectionStatus('connecting');
     logger.info(`[useOnlineGame] Connecting to game: ${gameId} gen: ${gen}`);
 
-    const ws = onlineApi.connectOnlineGameWebSocket(gameId, {
+    const wsPromise = onlineApi.connectOnlineGameWebSocket(gameId, {
       onOpen: () => {
         if (isStale()) return;
         logger.info('[useOnlineGame] Connected gen:', gen);
@@ -384,7 +384,14 @@ export function useOnlineGame(options: UseOnlineGameOptions): UseOnlineGameRetur
       onPong: () => {},
     });
 
-    wsRef.current = ws;
+    wsPromise.then((ws) => {
+      if (isStale()) { ws.close(); return; }
+      wsRef.current = ws;
+    }).catch((err) => {
+      if (isStale()) return;
+      logger.error('[useOnlineGame] WebSocket connect failed:', err);
+      setConnectionStatus('disconnected');
+    });
   }, [gameId]);
 
   // Initial connection

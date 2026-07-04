@@ -1,3 +1,6 @@
+import { Browser } from '@capacitor/browser';
+import { API_BASE, isNativeApp } from '../api/base';
+
 const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID || '';
 
 interface GoogleSignInButtonProps {
@@ -6,6 +9,15 @@ interface GoogleSignInButtonProps {
 
 export default function GoogleSignInButton({ onError }: GoogleSignInButtonProps) {
   const handleClick = () => {
+    if (isNativeApp) {
+      // Google blocks OAuth inside embedded webviews, so the native app runs
+      // the flow in the system browser. The server builds the Google URL
+      // (client id lives server-side) and marks the flow native; the web
+      // callback page deep-links back via knightball://auth?ticket=...
+      Browser.open({ url: `${API_BASE}/auth/google/start?native=1` });
+      return;
+    }
+
     if (!GOOGLE_CLIENT_ID) {
       onError?.('Google sign-in not configured');
       return;

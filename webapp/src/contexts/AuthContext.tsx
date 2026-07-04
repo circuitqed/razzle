@@ -1,6 +1,9 @@
 import { createContext, useContext, useState, useEffect, useCallback, ReactNode } from 'react';
 import * as authApi from '../api/auth';
-import type { User, GoogleAuthResponse } from '../api/auth';
+import { App as CapacitorApp } from '@capacitor/app';
+import { Browser } from '@capacitor/browser';
+import { isNativeApp } from '../api/base';
+import type { User, GoogleAuthResponse, AuthResponse } from '../api/auth';
 
 interface AuthContextType {
   user: User | null;
@@ -10,8 +13,8 @@ interface AuthContextType {
   register: (username: string, password: string, displayName?: string) => Promise<void>;
   loginWithEmail: (email: string, password: string) => Promise<void>;
   registerWithEmail: (email: string, username: string, password: string, displayName?: string) => Promise<void>;
-  googleAuth: (credential: string) => Promise<GoogleAuthResponse>;
-  googleComplete: (tempToken: string, username: string, displayName?: string) => Promise<void>;
+  googleAuth: (credential: string, state?: string | null) => Promise<GoogleAuthResponse>;
+  googleComplete: (tempToken: string, username: string, displayName?: string, state?: string | null) => Promise<AuthResponse>;
   logout: () => Promise<void>;
   refreshUser: () => Promise<void>;
 }
@@ -64,22 +67,43 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(response.user);
   }, []);
 
-  const googleAuth = useCallback(async (credential: string): Promise<GoogleAuthResponse> => {
-    const response = await authApi.googleAuth(credential);
+  const googleAuth = useCallback(async (credential: string, state?: string | null): Promise<GoogleAuthResponse> => {
+    const response = await authApi.googleAuth(credential, state);
     if (response.status === 'logged_in' && response.user) {
       setUser(response.user);
     }
     return response;
   }, []);
 
-  const googleComplete = useCallback(async (tempToken: string, username: string, displayName?: string) => {
-    const response = await authApi.googleComplete(tempToken, username, displayName);
+  const googleComplete = useCallback(async (tempToken: string, username: string, displayName?: string, state?: string | null) => {
+    const response = await authApi.googleComplete(tempToken, username, displayName, state);
     setUser(response.user);
+    return response;
   }, []);
 
   const logout = useCallback(async () => {
     await authApi.logout();
     setUser(null);
+  }, []);
+
+  // Native OAuth return: the system-browser flow deep-links back with
+  // knightball://auth?ticket=<one-time>; exchange it for a session.
+  useEffect(() => {
+    if (!isNativeApp) return;
+    const sub = CapacitorApp.addListener('appUrlOpen', async ({ url }) => {
+      try {
+        const parsed = new URL(url);
+        if (parsed.protocol !== 'knightball:' || parsed.hostname !== 'auth') return;
+        const ticket = parsed.searchParams.get('ticket');
+        if (!ticket) return;
+        Browser.close().catch(() => { /* browser may already be closed */ });
+        const { user: signedIn } = await authApi.exchangeAppTicket(ticket);
+        setUser(signedIn);
+      } catch (err) {
+        console.error('[auth] app ticket exchange failed:', err);
+      }
+    });
+    return () => { sub.then((h) => h.remove()); };
   }, []);
 
   return (

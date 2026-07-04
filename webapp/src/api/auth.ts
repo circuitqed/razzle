@@ -2,7 +2,7 @@
  * Authentication API client
  */
 
-import { API_BASE } from './base';
+import { API_BASE, setNativeAuthToken } from './base';
 
 export interface User {
   user_id: string;
@@ -18,6 +18,10 @@ export interface User {
 export interface AuthResponse {
   user: User;
   message: string;
+  /** Session JWT — returned to native clients only. */
+  token?: string | null;
+  /** One-time app-return ticket for native OAuth flows. */
+  app_ticket?: string | null;
 }
 
 export interface GoogleAuthResponse {
@@ -26,6 +30,8 @@ export interface GoogleAuthResponse {
   temp_token: string | null;
   email: string | null;
   suggested_name: string | null;
+  /** One-time app-return ticket for native OAuth flows. */
+  app_ticket?: string | null;
 }
 
 class AuthAPIError extends Error {
@@ -50,7 +56,14 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     throw new AuthAPIError(response.status, error.code || 'UNKNOWN', error.detail || error.message);
   }
 
-  return response.json();
+  const data = await response.json();
+  // Native app: auth endpoints return the session JWT in the body (the
+  // HttpOnly cookie can't persist in the webview) — store it for the
+  // Authorization header.
+  if (data && typeof data === 'object' && typeof data.token === 'string') {
+    setNativeAuthToken(data.token);
+  }
+  return data as T;
 }
 
 // Legacy username-only registration
@@ -104,12 +117,12 @@ export async function loginWithEmail(email: string, password: string): Promise<A
 }
 
 // Google OAuth
-export async function googleAuth(credential: string): Promise<GoogleAuthResponse> {
+export async function googleAuth(credential: string, state?: string | null): Promise<GoogleAuthResponse> {
   // Include redirect_uri so backend can exchange auth codes
   const redirectUri = `${window.location.origin}/auth/google/callback`;
   return request('/auth/google', {
     method: 'POST',
-    body: JSON.stringify({ credential, redirect_uri: redirectUri }),
+    body: JSON.stringify({ credential, redirect_uri: redirectUri, state }),
   });
 }
 
@@ -117,7 +130,8 @@ export async function googleAuth(credential: string): Promise<GoogleAuthResponse
 export async function googleComplete(
   tempToken: string,
   username: string,
-  displayName?: string
+  displayName?: string,
+  state?: string | null
 ): Promise<AuthResponse> {
   return request('/auth/google/complete', {
     method: 'POST',
@@ -125,6 +139,7 @@ export async function googleComplete(
       temp_token: tempToken,
       username,
       display_name: displayName,
+      state,
     }),
   });
 }
@@ -158,7 +173,18 @@ export async function resetPassword(token: string, password: string): Promise<{ 
   });
 }
 
+/** Exchange a one-time native OAuth app ticket for a session (native only). */
+export async function exchangeAppTicket(ticket: string): Promise<{ token: string; user: User }> {
+  const result = await request<{ token: string; user: User }>('/auth/app-ticket/exchange', {
+    method: 'POST',
+    body: JSON.stringify({ ticket }),
+  });
+  setNativeAuthToken(result.token);
+  return result;
+}
+
 export async function logout(): Promise<{ message: string }> {
+  setNativeAuthToken(null);
   return request('/auth/logout', { method: 'POST' });
 }
 

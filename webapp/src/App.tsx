@@ -513,15 +513,20 @@ function AppContent() {
   // WebSocket for waiting game
   useEffect(() => {
     if (!waitingGame) return;
-    const ws = onlineApi.connectOnlineGameWebSocket(waitingGame.gameId, {
+    let ws: WebSocket | null = null;
+    let cancelled = false;
+    onlineApi.connectOnlineGameWebSocket(waitingGame.gameId, {
       onPlayerJoined: () => {
         setWaitingGame(null);
         navigate(`/online/${waitingGame.gameId}`);
       },
       onError: (error) => console.error('WebSocket error:', error),
       onClose: () => {},
-    });
-    return () => { ws.close(); };
+    }).then((socket) => {
+      if (cancelled) { socket.close(); return; }
+      ws = socket;
+    }).catch((error) => console.error('WebSocket connect failed:', error));
+    return () => { cancelled = true; ws?.close(); };
   }, [waitingGame, navigate]);
 
   // Show landing page for first-time visitors

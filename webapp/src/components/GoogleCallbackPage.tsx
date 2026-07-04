@@ -18,6 +18,16 @@ export default function GoogleCallbackPage() {
 
   const code = searchParams.get('code');
   const authError = searchParams.get('error');
+  // 'native.<nonce>' marks a flow started from the iOS app; the server then
+  // returns a one-time app_ticket we hand back via the knightball:// deep link.
+  const oauthState = searchParams.get('state');
+  const [appReturn, setAppReturn] = useState<string | null>(null);
+
+  const returnToApp = (ticket: string) => {
+    const deepLink = `knightball://auth?ticket=${encodeURIComponent(ticket)}`;
+    setAppReturn(deepLink);
+    window.location.href = deepLink;
+  };
 
   useEffect(() => {
     if (authError) {
@@ -33,8 +43,12 @@ export default function GoogleCallbackPage() {
     const doAuth = async () => {
       setIsLoading(true);
       try {
-        const result = await googleAuth(code);
+        const result = await googleAuth(code, oauthState);
         if (result.status === 'logged_in') {
+          if (result.app_ticket) {
+            returnToApp(result.app_ticket);
+            return;
+          }
           navigate('/', { replace: true });
         } else if (result.status === 'needs_username') {
           setNeedsUsername({
@@ -70,7 +84,11 @@ export default function GoogleCallbackPage() {
 
     setIsLoading(true);
     try {
-      await googleComplete(needsUsername.tempToken, username, displayName || undefined);
+      const result = await googleComplete(needsUsername.tempToken, username, displayName || undefined, oauthState);
+      if (result.app_ticket) {
+        returnToApp(result.app_ticket);
+        return;
+      }
       navigate('/', { replace: true });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create account');
@@ -78,6 +96,22 @@ export default function GoogleCallbackPage() {
       setIsLoading(false);
     }
   };
+
+  // Native flow: signed in — hand control back to the app
+  if (appReturn) {
+    return (
+      <div className="min-h-screen bg-gray-900 text-white flex flex-col items-center justify-center p-4">
+        <h1 className="text-2xl font-bold mb-4">Signed in!</h1>
+        <p className="text-gray-400 mb-6">Returning to the KnightBall app…</p>
+        <a
+          href={appReturn}
+          className="px-6 py-3 bg-blue-600 hover:bg-blue-700 rounded font-medium"
+        >
+          Open KnightBall
+        </a>
+      </div>
+    );
+  }
 
   // Username picker for new Google users
   if (needsUsername) {

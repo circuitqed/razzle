@@ -112,7 +112,7 @@ export async function healthCheck(): Promise<{ status: string; version: string; 
 }
 
 // WebSocket connection for real-time updates
-export function connectWebSocket(
+export async function connectWebSocket(
   gameId: string,
   handlers: {
     onState?: (state: GameState) => void;
@@ -121,8 +121,8 @@ export function connectWebSocket(
     onError?: (data: { message: string; code: string }) => void;
     onClose?: () => void;
   }
-): WebSocket {
-  const ws = new WebSocket(gameWebSocketUrl(gameId));
+): Promise<WebSocket> {
+  const ws = new WebSocket(await gameWebSocketUrl(gameId));
 
   ws.onmessage = (event) => {
     const message = JSON.parse(event.data);
