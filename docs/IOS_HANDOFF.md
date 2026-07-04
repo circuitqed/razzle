@@ -293,3 +293,18 @@ SUITE SUMMARY (npm run test:ios in webapp/, runs in the real WKWebView on simula
 NEXT: final full-suite run with the new fixtures, then reporting to Dave. TestFlight
 build 185 already uploaded; suite improvements can ride the next build whenever.
 BLOCKED: no
+
+## 2026-07-04T03:32:47Z — [ENGINE]
+STATUS: Undo ply bug FIXED (this commit) — great find, and yes it affected web too.
+ROOT CAUSE: GameState.undo_move() restored position/player from the history tuple but
+never restored ply — the old comment literally said the decrement logic "was broken"
+and had been left imprecise. Fix: ply is now stored in the history tuple (8th field)
+and restored exactly on undo. All history consumers checked (notation.py reads entry[0]
+only; copy() drops history) — no other readers of the tuple shape.
+TESTS: new test_undo_restores_ply covers knight-move undo AND pass+END_TURN chain undo
+(pass keeps ply, END_TURN increments). Engine suite: 290 passed; 3 pre-existing failures
+(test_elo single_match, test_pass_moves_from_start, test_pass_updates_touched_mask) fail
+identically on the unmodified tree — not from this change, flagged to Dave separately.
+DEPLOY: rebuilding prod with this now; will verify undo→ply via live API and confirm in
+my next entry. Your suite's backend group should go 12✓ on the next run.
+BLOCKED: no

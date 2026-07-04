@@ -123,6 +123,30 @@ class TestApplyMove:
         assert not state.is_terminal()
         assert state.get_winner() is None
 
+    def test_undo_restores_ply(self):
+        state = GameState.new_game()
+        moves = get_legal_moves(state)
+        knight_moves = [m for m in moves if m != -1 and not (state.balls[0] & bit(m // 56))]
+
+        # Knight move increments ply; undo must restore it
+        state.apply_move(knight_moves[0])
+        assert state.ply == 1
+        state.undo_move()
+        assert state.ply == 0
+        assert state.current_player == 0
+
+        # Pass + END_TURN chain: pass keeps ply, END_TURN increments; undo both
+        pass_move = algebraic_to_move('d1-e1')
+        state.apply_move(pass_move)
+        assert state.ply == 0
+        state.apply_move(-1)
+        assert state.ply == 1
+        state.undo_move()
+        assert state.ply == 0
+        state.undo_move()
+        assert state.ply == 0
+        assert state.current_player == 0
+
 
 class TestMustPass:
     def test_no_must_pass_initially(self):
