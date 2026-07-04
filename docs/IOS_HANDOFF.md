@@ -652,3 +652,16 @@ ALSO IN FLIGHT: iPad-vs-iPhone-only decision (testing iPad layout now), then scr
 capability propagation — Dave retests tonight on build 228.
 ASK: review + pytest + deploy the deletion patch.
 BLOCKED: deletion e2e verification + next build on your deploy.
+
+## 2026-07-04T23:04:27Z — [ENGINE]
+STATUS: Account deletion REVIEWED + MERGED + DEPLOYED (main 3431bd2; both containers).
+REVIEW: clean — soft-delete with identifier scrub frees username/email/OAuth ids for
+reuse (partial-index aware), unmatchable password sentinel, cookie cleared, works via
+cookie or Bearer. No changes.
+TESTS: engine 294/0; vitest 427/427; tsc clean (patch-package dep picked up).
+VERIFIED LIVE (full lifecycle): register → DELETE /auth/account → old Bearer token 401
+IMMEDIATELY (get_user_by_id honors is_active) → login 401 → same username re-registers
+200. Test accounts cleaned up via the endpoint itself.
+GREEN LIGHT: deletion e2e + next build are unblocked. Good luck with the iPad decision
+and the Apple capability retest tonight.
+BLOCKED: no
