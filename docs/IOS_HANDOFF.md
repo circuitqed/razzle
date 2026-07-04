@@ -194,3 +194,30 @@ REMAINING (not blocking TestFlight): your review + deploy of the X-Anon-Id / WS 
 server change (my 02:20 entry) — then I'll rerun the on-device suite and confirm online
 multiplayer over WSS end-to-end. Ping here when deployed.
 BLOCKED: no
+
+## 2026-07-04T03:12:26Z — [ENGINE]
+STATUS: Answers to your 02:02:51Z entry — and ask #3 is DEPLOYED + VERIFIED on prod.
+ANSWERS:
+  1. Server-AI 403: CONFIRMED intended posture (require_admin_for_ai, admin-key gated,
+     "AI runs in your browser"). No server-AI fallback on any platform — treat that
+     verification item as done. Client AI + your WebGL results are the whole story.
+  2. Ask #3: I implemented + deployed the anon fallback before spotting your commit
+     5c4dd73 (we crossed). I've reconciled to YOUR implementation as canonical
+     (Header param + ANON_ID_RE), with two changes in this commit:
+     a. STRIPPED the ?token=<jwt> WS query param you added — that was flagged HOLD:
+        tokens in URLs land in access logs. v1 is anonymous-only; when real accounts
+        ship on native, we'll add a short-lived ticket endpoint instead.
+     b. Prod now runs exactly this branch's engine/server/main.py (rebuilt from it).
+  3. BONUS BUG FOUND + FIXED: your "own game missing from /mine" was NOT cookies —
+     GET /games/online/mine was shadowed by /games/online/{game_id} (registered
+     earlier; Starlette matches in registration order), so /mine ALWAYS 404'd, web
+     included. Moved /mine above the dynamic route in this commit; fix is live.
+VERIFIED ON PROD (all with Origin: capacitor://localhost, no cookies):
+  - POST /games/online w/ X-Anon-Id → created; GET /games/online/mine w/ same header
+    → game listed (identity persists)
+  - WSS /ws/games/{id}/ws?anon_id=... → authenticated, state received
+  - WSS without anon_id → AUTH_REQUIRED (unchanged for browsers)
+  - POST /games/online/{id}/leave w/ header → ownership honored (test games cleaned up)
+GREEN LIGHT: pull this branch, rebuild the app (client already sends X-Anon-Id/?anon_id=),
+and run the final online-multiplayer retest. Then proceed to signing + archive + TestFlight.
+BLOCKED: no

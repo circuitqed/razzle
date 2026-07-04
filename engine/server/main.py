@@ -3486,6 +3486,25 @@ async def join_online_game(
     )
 
 
+@app.get("/games/online/mine", response_model=MyOnlineGamesResponse)
+async def get_my_online_games(
+    user: dict = Depends(get_user_or_anon)
+):
+    """
+    List all online games for the current user.
+
+    Returns active (playing) and waiting games separately.
+    """
+    result = persistence.get_user_online_games(user["user_id"])
+
+    return MyOnlineGamesResponse(
+        active=[OnlineGameSummary(**g) for g in result["active"]],
+        waiting=[OnlineGameSummary(**g) for g in result["waiting"]],
+    )
+
+
+# NOTE: must be registered AFTER /games/online/mine — Starlette matches routes in
+# registration order, so this dynamic route would otherwise shadow the static one.
 @app.get("/games/online/{game_id}", response_model=OnlineGameStatusResponse)
 async def get_online_game_status(
     game_id: str,
@@ -3614,23 +3633,6 @@ async def leave_online_game(
     return LeaveOnlineGameResponse(
         status=result["status"],
         winner=result.get("winner"),
-    )
-
-
-@app.get("/games/online/mine", response_model=MyOnlineGamesResponse)
-async def get_my_online_games(
-    user: dict = Depends(get_user_or_anon)
-):
-    """
-    List all online games for the current user.
-
-    Returns active (playing) and waiting games separately.
-    """
-    result = persistence.get_user_online_games(user["user_id"])
-
-    return MyOnlineGamesResponse(
-        active=[OnlineGameSummary(**g) for g in result["active"]],
-        waiting=[OnlineGameSummary(**g) for g in result["waiting"]],
     )
 
 
@@ -4452,11 +4454,13 @@ def extract_user_from_websocket(websocket: WebSocket) -> Optional[str]:
     """Extract user_id from WebSocket cookies (JWT auth or anonymous session).
 
     The native iOS app can't send cross-site cookies on the WS handshake
-    (WKWebView tracking prevention), so query params are accepted as a
-    fallback: ?token=<jwt> or ?anon_id=<id> (same trust level as the cookie).
+    (WKWebView tracking prevention), so ?anon_id=<id> is accepted as a
+    fallback (same trust level as the cookie). JWT via query param is
+    deliberately NOT supported — tokens in URLs end up in access logs; add a
+    short-lived ticket endpoint instead when real accounts ship on native.
     """
     cookies = websocket.cookies
-    token = cookies.get(AUTH_COOKIE_NAME) or websocket.query_params.get("token")
+    token = cookies.get(AUTH_COOKIE_NAME)
     if token:
         user_id = decode_jwt_token(token)
         if user_id:
