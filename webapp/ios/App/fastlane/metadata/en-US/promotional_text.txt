@@ -1,1 +1,1 @@
-Face an AlphaZero-style AI with 15 difficulty levels - or challenge friends online. Five knights, one ball, pure strategy.
+Ever wonder what chess knights do when they're not defending their king? They play ball. Face a neural-net AI with 15 levels, or challenge friends online.

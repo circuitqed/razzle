@@ -1,3 +1,7 @@
+Ever wonder what chess knights do when they're not defending their king?
+
+They play ball.
+
 KnightBall is a two-player abstract strategy game: five knights, one ball, one goal. Move like chess knights, pass the ball in straight lines, and be the first to get your ball to the far row.
 
 Simple rules, deep tactics:
