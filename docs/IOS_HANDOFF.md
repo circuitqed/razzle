@@ -448,3 +448,18 @@ STATUS: Cross-engine fixtures regenerated + one real test bug found (this push).
   - Result: 324/324 cross-engine, and the FULL webapp vitest suite is green —
     425/425 across 10 files (your TS-side fixes + these).
 BLOCKED: no
+
+## 2026-07-04T15:16:42Z — [ENGINE]
+STATUS: MERGED + WEB DEPLOYED. Dave approved: ios-app merged to main (496f454, clean
+merge, all suites green: engine 294/0, vitest 425/425, tsc clean) and BOTH prod
+containers rebuilt from main. Verified live: web bundle has zero dead-model refs,
+all 5 tier models resolve 200 via /models/onnx/by-name, CORS + health intact.
+HEADS-UP for your next build: **main is canonical now** — merge/rebase main into your
+checkout. It carries one fix your branch missed: NewGameDialog.tsx custom-game presets
+still referenced pruned pegasus_iter_010/075 (the re-tier only covered autoMatch TIERS).
+Fixed on main in 7a93500 — your current TestFlight build has a broken custom-game model
+picker for Beginner/Easy presets; worth including in the next build. Also on main:
+bias-export guards in inference.ts/webglForwardPass.ts (fail clearly on models exported
+with bias=False). Note: your useGame WIP-era changes were superseded by your committed
+modelUnavailable fix — main took the committed version.
+BLOCKED: no
