@@ -180,27 +180,42 @@ async function getModelUrl(): Promise<{ url: string; version: string }> {
  * checks. Returns null when that model is no longer available anywhere —
  * callers should then skip reference checks (CPU-vs-GPU agreement still runs).
  */
+/**
+ * Fetch a bundled file, or null if absent. Capacitor's WKURLSchemeHandler
+ * REJECTS the fetch promise for missing local files ("Load failed") rather
+ * than returning a 404 — treat rejection as absence.
+ */
+async function fetchLocal(path: string): Promise<ArrayBuffer | null> {
+  try {
+    const resp = await fetch(path);
+    if (resp.ok && (resp.headers.get('content-type') ?? '').indexOf('html') === -1) {
+      return await resp.arrayBuffer();
+    }
+  } catch { /* missing bundled file */ }
+  return null;
+}
+
 async function getFixtureModelBuffer(fixturesModel: string): Promise<ArrayBuffer | null> {
   // Bundled copy first (runner drops it in dist/), then on-demand API export.
-  const local = await fetch('/test-model-fixtures.onnx');
-  if (local.ok && (local.headers.get('content-type') ?? '').indexOf('html') === -1) {
-    return local.arrayBuffer();
+  const local = await fetchLocal('/test-model-fixtures.onnx');
+  if (local) return local;
+  try {
+    const infoResp = await fetch(`${API_BASE}/models/onnx/by-name/${encodeURIComponent(fixturesModel)}`, { credentials: 'include' });
+    if (!infoResp.ok) return null;
+    const info = await infoResp.json();
+    const modelResp = await fetch(`${API_BASE}${info.url}`, { credentials: 'include' });
+    if (!modelResp.ok) return null;
+    return await modelResp.arrayBuffer();
+  } catch {
+    return null;
   }
-  const infoResp = await fetch(`${API_BASE}/models/onnx/by-name/${encodeURIComponent(fixturesModel)}`, { credentials: 'include' });
-  if (!infoResp.ok) return null;
-  const info = await infoResp.json();
-  const modelResp = await fetch(`${API_BASE}${info.url}`, { credentials: 'include' });
-  if (!modelResp.ok) return null;
-  return modelResp.arrayBuffer();
 }
 
 /** Any usable model (weights don't matter — CPU and GPU must agree on the SAME weights). */
 async function getAnyModelBuffer(): Promise<ArrayBuffer> {
   for (const path of ['/test-model-fixtures.onnx', '/test-model.onnx']) {
-    const local = await fetch(path);
-    if (local.ok && (local.headers.get('content-type') ?? '').indexOf('html') === -1) {
-      return local.arrayBuffer();
-    }
+    const local = await fetchLocal(path);
+    if (local) return local;
   }
   const model = await getModelUrl();
   const resp = await fetch(model.url, { credentials: 'include' });
@@ -509,14 +524,19 @@ async function groupMcts() {
   const gpuModel = createGPUModelFromOnnx(modelBuffer, gpuCanvas);
   const gpuEval = new GPUEvaluator(gpuModel);
 
+  // batchSize 1 forces the sequential search path for BOTH evaluators.
+  // GPUEvaluator supports evaluateBatch, so at the default (auto) batch size
+  // it takes the virtual-loss batched path while PureTSEvaluator goes
+  // sequential — legitimately different trees, not an accuracy bug.
+  const cfg = { ...DEFAULT_CONFIG, numSimulations: sims, batchSize: 1 };
   const positions = generatePositions(6);
   let moveMatches = 0, valueMaxDiff = 0, cpuMsTot = 0, gpuMsTot = 0;
   for (let i = 0; i < positions.length; i++) {
     const st = positions[i];
     const t0 = performance.now();
-    const cpu = await search(st, cpuEval, { ...DEFAULT_CONFIG, numSimulations: sims }, { aborted: false });
+    const cpu = await search(st, cpuEval, cfg, { aborted: false });
     const t1 = performance.now();
-    const gpu = await search(st, gpuEval, { ...DEFAULT_CONFIG, numSimulations: sims }, { aborted: false });
+    const gpu = await search(st, gpuEval, cfg, { aborted: false });
     const t2 = performance.now();
     cpuMsTot += t1 - t0; gpuMsTot += t2 - t1;
     if (cpu.bestMove === gpu.bestMove) moveMatches++;

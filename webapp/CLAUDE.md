@@ -88,6 +88,23 @@ The webapp includes a full TypeScript port of the game engine and MCTS, enabling
 - `src/engine/__tests__/inference-fixtures.json` — 20 positions with Python reference outputs
 - Run via Playwright: `mcr.microsoft.com/playwright:v1.58.2-noble`
 
+### iOS on-device test suite
+
+`npm run test:ios` builds the app, installs it on a simulator, runs the full
+self-test suite inside the real WKWebView, streams results back over the app's
+stdout, and exits nonzero on failure. Artifacts land in `test-results/ios/`.
+
+- Suite source: `test-native.html` + `src/test-native-entry.ts`; runner: `scripts/test-ios.sh`
+- Groups (each maps to a historical bug class — see the entry file header):
+  `env`, `rules`, `inference`, `mcts`, `cache`, `game`, `soak`, `backend`
+- Subset: `npm run test:ios -- 'groups=rules,game'`; knobs: `gamesims`, `mctssims`, `soakn`, `model=local`
+- Simulator: `IOS_TEST_DEVICE` env (name or UDID), default "iPhone 17 Pro"
+- The `backend` group runs against production `knightball.org`
+- Python-reference inference checks auto-skip while `inference-fixtures.json`
+  targets a model the server no longer hosts (regenerate fixtures to restore)
+- Also runs manually on any device: build with the meta-refresh redirect the
+  runner injects, or navigate the webview to `/test-native.html`
+
 ## Engine API
 
 The webapp communicates with the engine via REST/WebSocket API through an nginx proxy (`/api` -> engine:8000).

@@ -65,7 +65,11 @@ open(p, 'w').write(html)
 EOF
 
 step "Booting simulator: $DEVICE"
-UDID=$(xcrun simctl list devices available | grep "$DEVICE (" | head -1 | grep -oE '[0-9A-F-]{36}')
+if [[ "$DEVICE" =~ ^[0-9A-F-]{36}$ ]]; then
+  UDID="$DEVICE"
+else
+  UDID=$(xcrun simctl list devices available | grep "$DEVICE (" | head -1 | grep -oE '[0-9A-F-]{36}')
+fi
 [ -n "$UDID" ] || { echo "No available simulator named '$DEVICE'"; exit 1; }
 xcrun simctl bootstatus "$UDID" -b >/dev/null
 
@@ -83,13 +87,12 @@ step "Installing + launching"
 xcrun simctl install "$UDID" "$APP"
 xcrun simctl terminate "$UDID" "$BUNDLE_ID" 2>/dev/null || true
 
+# Capacitor bridges JS console via Swift print() → app stdout, which only
+# --console-pty exposes (os_log streaming never sees console messages).
 : > "$SIMLOG"
-xcrun simctl spawn "$UDID" log stream \
-  --predicate 'processImagePath CONTAINS "App"' --style compact > "$SIMLOG" 2>&1 &
-STREAM_PID=$!
-trap 'kill $STREAM_PID 2>/dev/null || true' EXIT
-
-xcrun simctl launch "$UDID" "$BUNDLE_ID" >/dev/null
+xcrun simctl launch --console-pty "$UDID" "$BUNDLE_ID" > "$SIMLOG" 2>&1 &
+LAUNCH_PID=$!
+trap 'kill $LAUNCH_PID 2>/dev/null || true' EXIT
 
 step "Waiting for RESULT (timeout ${TIMEOUT}s)"
 DEADLINE=$(( $(date +%s) + TIMEOUT ))
