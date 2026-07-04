@@ -47,9 +47,16 @@ export default function AppleSignInButton({ onError }: AppleSignInButtonProps) {
       }
       // logged_in: AuthContext set the user; modals auto-close
     } catch (err: any) {
-      // User cancelling the sheet is not an error worth surfacing
+      // ASAuthorizationError 1001 = canceled — the user dismissed the sheet
+      // (or iOS closed it). Not an error worth surfacing.
       const msg = String(err?.message ?? err);
-      if (!/cancel/i.test(msg)) onError?.(`Apple sign-in failed: ${msg}`);
+      if (/cancel/i.test(msg) || /error 1001/i.test(msg)) return;
+      // 1000 = unknown — most often the device isn't signed into iCloud
+      if (/error 1000/i.test(msg)) {
+        onError?.('Apple sign-in needs an iCloud account — check Settings › Apple ID.');
+        return;
+      }
+      onError?.(`Apple sign-in failed: ${msg}`);
     }
   };
 
