@@ -51,6 +51,7 @@ import { PureTSEvaluator, GPUEvaluator } from './engine/evaluator';
 import { search, DEFAULT_CONFIG } from './engine/mcts';
 import { clearModelCache } from './engine/modelCache';
 import { API_BASE, isNativeApp, gameWebSocketUrl, installNativeIdentity } from './api/base';
+import { TIERS } from './utils/autoMatch';
 
 installNativeIdentity();
 
@@ -699,6 +700,22 @@ async function groupBackend() {
   } catch (e: any) {
     check('GET /health', false, e.message + ' (CORS?)');
     return;
+  }
+
+  // Every difficulty-tier model must resolve — a pruned model file silently
+  // kills client AI for those levels, and server AI is 403-disabled, so
+  // affected levels have NO working AI at all (worse for Level 1: default).
+  try {
+    const tierModels = [...new Set(TIERS.map((t) => t.model))];
+    const missing: string[] = [];
+    for (const m of tierModels) {
+      const r = await fetch(`${API_BASE}/models/onnx/by-name/${encodeURIComponent(m)}`, { credentials: 'include' });
+      if (!r.ok) missing.push(`${m} (${r.status})`);
+    }
+    check(`all ${tierModels.length} difficulty-tier models resolve`, missing.length === 0,
+      missing.length ? 'missing: ' + missing.join(', ') : undefined);
+  } catch (e: any) {
+    check('all difficulty-tier models resolve', false, e.message);
   }
 
   try {

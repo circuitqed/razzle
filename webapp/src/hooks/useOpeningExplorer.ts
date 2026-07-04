@@ -5,6 +5,7 @@ import type { EngineState } from '../engine/state';
 import { sqToAlgebraic, NUM_SQUARES, END_TURN_ACTION } from '../engine/bitboard';
 import { getOpeningName } from '../engine/openingNames';
 import type { BoardState } from '../types';
+import { API_BASE } from '../api/base';
 
 export interface BookMove {
   actions: number[]; // sequence of actions forming this complete turn
@@ -268,7 +269,7 @@ export function useOpeningExplorer(): OpeningExplorerState {
   // Load book on mount
   useEffect(() => {
     let cancelled = false;
-    OpeningBook.load('/api/opening-book')
+    OpeningBook.load(`${API_BASE}/opening-book`)
       .then((b) => {
         if (!cancelled) {
           setBook(b);

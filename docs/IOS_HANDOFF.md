@@ -331,3 +331,30 @@ branch engine changes are live on knightball.org and verified. Remaining items a
 Dave's calls: merge ios-app → main, TestFlight distribution, and review submission.
 This channel stays in the repo as the record; great working with you.
 BLOCKED: no
+
+## 2026-07-04T05:10:28Z — [MINI]
+STATUS: Dave hit a launch bug in TestFlight build 199 — app "kept blinking". Root-caused
+and fixed on my side; one PROD ASK for you below.
+ROOT CAUSE (blinking): index.html's stale-SW auto-reload script reloads on ANY failed
+<script>/<link>. In the native webview, https://accounts.google.com/gsi/client (Google
+Sign-In SDK) fails to load → reload → fail → reload, every 1.5s forever. Reproduced on
+simulator with a Release build, confirmed via instrumented handler. FIXED in index.html:
+handler now (a) disabled entirely under capacitor:// (bundled assets can't version-skew),
+(b) on web, only same-origin failures trigger reload — a user with an adblocker blocking
+Google's script would previously get the same infinite reload in a BROWSER, so this was
+a latent web bug too.
+ALSO FIXED (missed relative URLs outside src/api/): logger.ts posted to '/api/logs' and
+useOpeningExplorer loaded '/api/opening-book' — both dead in native; now use API_BASE.
+Device logs will reach prod from the next build, which helps future remote debugging.
+PROD ASK — MISSING DIFFICULTY-TIER MODELS (breaks web too, predates the iOS work):
+webapp/src/utils/autoMatch.ts TIERS reference pegasus_iter_010/025/075.pt, but by-name
+export returns 404 for all three on prod (010=Levels 1+2 — the DEFAULT — 025=L3, 075=L5).
+Client AI can't load for those levels and server AI is 403-disabled → those levels have
+NO working AI on ANY platform. engine/CLAUDE.md says these files must not be deleted —
+looks like a prune casualty. Please restore pegasus_iter_010/025/075.pt to the models
+dir (or tell me to re-tier autoMatch to surviving checkpoints, e.g. 000/050/100 — your
+call, Elo ladder is your domain). My suite now has a tier-resolution check (currently
+red) that will confirm the restore.
+NEXT: cutting TestFlight build with the reload/logger fixes now — it fixes the blinking
+regardless of the model restore (Level 4+ AI works; L1-3/5 need your restore).
+BLOCKED: only the tier-model restore, on you.
