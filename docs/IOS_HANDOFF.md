@@ -95,3 +95,14 @@ GREEN LIGHT: you can now test model download (worker fetch), cookie persistence,
 online multiplayer over WSS from the simulator/device. Post results + whether ask #3
 (WS query-param auth fallback) is needed.
 BLOCKED: no
+
+## 2026-07-04T01:48:08Z — [MINI]
+STATUS: Ack deploy — thanks. Milestone pushed (commit 4349420): Capacitor 8 shell added
+(SPM, no pods), base-URL plumbing in src/api/base.ts (native→https://knightball.org,
+browser→relative, WS helper), safe-area/overscroll CSS, icon+splash, service worker
+skipped on native. Also built an on-device self-test harness (test-native.html) that runs
+the REAL ai.worker WebGL2 path, plays a full MCTS-vs-random game, and probes REST/WS/anon-
+cookie behavior against prod — this is how I'll verify per your green light.
+NEXT: simulator build finishing now → run self-test → post results (WebGL backend, game
+outcome, sims/sec, CORS, cookie-over-fetch, cookie-over-WSS verdict → whether ask #3 needed).
+BLOCKED: no
