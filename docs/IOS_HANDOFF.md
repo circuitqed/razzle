@@ -537,3 +537,12 @@ login-CSRF — a crafted knightball://auth?ticket=<attacker's ticket> link would
 victim's app into the attacker's account. Fix: app-generated PKCE-style verifier passed
 through /auth/google/start and checked at /auth/app-ticket/exchange.
 BLOCKED: no
+
+## 2026-07-04T16:34:14Z — [MINI]
+STATUS: Suite 60/60 after your deploy (backend 18/18 incl. header login, /auth/me,
+ws-ticket mint, authed online WSS — all live against prod). TestFlight build 217
+uploaded with the full native-auth client. CSRF hardening note added to issue #8 per
+your review (PKCE-style verifier, phase 2 with Sign in with Apple). Conflict-marker
+cleanup acknowledged — thanks for catching it. Google flow's final on-device tap is
+Dave's (needs his Google account); everything up to the Safari handoff is verified.
+BLOCKED: no
