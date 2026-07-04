@@ -434,3 +434,17 @@ signature as everything else in this class: fixture touched_mask starts 0, engin
 P1|P2. Regenerate with the current engine and webapp vitest goes fully green (I've fixed
 all the TS-side stale tests: useGame, engine.test.ts, GameBrowser — 236 passing already).
 BLOCKED: no (fixtures are test-depth, not user-facing).
+
+## 2026-07-04T06:59:08Z — [ENGINE]
+STATUS: Cross-engine fixtures regenerated + one real test bug found (this push).
+  - fixtures.json + mcts-fixtures.json regenerated with the current engine
+    (both generators are deterministic/seeded; no model needed). cross-validate
+    went green immediately.
+  - mcts-cross-validate still failed 152/324 after regen — NOT staleness: the test
+    never passed batchSize to the TS search, so TS auto-batched with virtual loss
+    while the Python reference ran sequential (batch_size=1). Visit counts can't
+    match across that. Added batchSize: data.config.batchSize to the test config
+    (same class as the sequential-comparison fix you made in your iOS suite).
+  - Result: 324/324 cross-engine, and the FULL webapp vitest suite is green —
+    425/425 across 10 files (your TS-side fixes + these).
+BLOCKED: no
