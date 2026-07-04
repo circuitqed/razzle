@@ -261,8 +261,12 @@ async function groupEnv() {
   check('localStorage', (() => { try { localStorage.setItem('__t', '1'); localStorage.removeItem('__t'); return true; } catch { return false; } })());
 
   if (isNativeApp && 'serviceWorker' in navigator) {
+    // Both checks matter: getRegistrations() finds installed SWs; controller
+    // catches this page already being served THROUGH one (stale-SW class —
+    // the exact failure mode that plagued the PWA).
     const regs = await navigator.serviceWorker.getRegistrations().catch(() => []);
-    check('no service worker in native app', regs.length === 0, `${regs.length} registration(s)`);
+    check('no service worker registered in native app', regs.length === 0, `${regs.length} registration(s)`);
+    check('page not controlled by a service worker', navigator.serviceWorker.controller === null);
   }
 
   // Informational WebGPU survey (no pass/fail): historically present-but-
