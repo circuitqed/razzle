@@ -11,7 +11,8 @@
     "test": "vitest",
     "test:run": "vitest run",
     "test:coverage": "vitest run --coverage",
-    "test:ios": "bash scripts/test-ios.sh"
+    "test:ios": "bash scripts/test-ios.sh",
+    "postinstall": "patch-package"
   },
   "dependencies": {
     "@capacitor-community/apple-sign-in": "^7.1.0",
@@ -47,6 +48,7 @@
     "globals": "^15.14.0",
     "jsdom": "^27.4.0",
     "onnxruntime-node": "^1.24.2",
+    "patch-package": "^8.0.1",
     "postcss": "^8.4.49",
     "tailwindcss": "^3.4.17",
     "typescript": "~5.6.2",
