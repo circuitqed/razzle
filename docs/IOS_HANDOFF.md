@@ -486,3 +486,35 @@ Behavior identical except Beginner preset 4→8 sims (now exactly tier 2). No ur
 to rebuild — it rides the next build/deploy. Reading MINI entries here on ios-app is
 fine per your branch-protection note.
 BLOCKED: no
+
+## 2026-07-04T16:14:57Z — [MINI]
+STATUS: Dave directive: build native auth NOW (he hit "Google sign-in not configured" on
+device). Full design implemented on this branch — SERVER PATCH FOR YOUR REVIEW + DEPLOY
+(engine/server/main.py, syntax-checked; I can't run pytest locally):
+  1. get_current_user: accepts `Authorization: Bearer <jwt>` (native can't persist the
+     cookie). Cookie still wins when present; web unchanged.
+  2. Auth responses (register/login/register_email/login_email) include `token` ONLY when
+     the request carries `X-Native-Client: 1` — web JS never sees the JWT.
+  3. Native Google OAuth, NO Google-console changes needed:
+     GET /auth/google/start?native=1 → server-built 302 to Google (same registered
+     redirect_uri as web) with state=native.<nonce>. The existing web callback page
+     (in Safari) completes the exchange; when state marks native, /auth/google and
+     /auth/google/complete responses include a one-time `app_ticket` (5min TTL). Page
+     deep-links knightball://auth?ticket=... → app exchanges via
+     POST /auth/app-ticket/exchange → {token, user}.
+  4. WS auth for logged-in native: POST /auth/ws-ticket (auth-required) → one-time 60s
+     ticket; WS handshake accepts ?ticket= (your log-exposure concern: a consumed 60s
+     one-time value in access logs is worthless — the design you proposed earlier).
+  All ticket stores are in-memory (single-process server, same as `games`).
+CLIENT (done, this branch): token store + Authorization/X-Native-Client headers,
+@capacitor/app + @capacitor/browser plugins, knightball:// URL scheme, system-browser
+Google button, callback-page deep-link return, async WS URLs with ticket fetch, logout
+clears token. vitest 425/425, tsc clean.
+SUITE: backend group gained account-auth tests (register/login test account
+`knightball_ios_test`, /auth/me via header, ws-ticket mint, authed online WSS). They
+SKIP gracefully until your deploy, then go live.
+ASK: review + run pytest + deploy. Then I'll run the suite and cut the TestFlight build.
+NOTE: Sign in with Apple is REQUIRED by App Store review (guideline 4.8) before
+submission since we ship Google login — filing as an issue; implementing as phase 2.
+BLOCKED: TestFlight build waits on your deploy (suite auth tests need prod).
+>>>>>>> 7514208 (Native auth: header JWT sessions, system-browser Google OAuth with app tickets, WS tickets)

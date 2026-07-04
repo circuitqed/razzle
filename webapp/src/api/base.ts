@@ -43,7 +43,27 @@ export function nativeAnonId(): string | null {
 }
 
 /**
- * Patch global fetch so every request to the backend carries X-Anon-Id.
+ * Session token for the native app (accounts). Web uses the HttpOnly cookie;
+ * native can't persist cross-site cookies, so the server hands native clients
+ * the JWT in auth responses and accepts it via Authorization: Bearer.
+ */
+const AUTH_TOKEN_KEY = 'knightball_native_auth_token';
+
+export function getNativeAuthToken(): string | null {
+  if (!isNativeApp) return null;
+  return localStorage.getItem(AUTH_TOKEN_KEY);
+}
+
+export function setNativeAuthToken(token: string | null): void {
+  if (!isNativeApp) return;
+  if (token) localStorage.setItem(AUTH_TOKEN_KEY, token);
+  else localStorage.removeItem(AUTH_TOKEN_KEY);
+}
+
+/**
+ * Patch global fetch so every request to the backend carries the native
+ * identity: X-Native-Client (server returns tokens in auth responses),
+ * Authorization: Bearer when logged in, and X-Anon-Id otherwise.
  * No-op in the browser. Call once at app startup, before any API use.
  */
 export function installNativeIdentity(): void {
@@ -54,6 +74,9 @@ export function installNativeIdentity(): void {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
     if (url.startsWith(BACKEND_ORIGIN)) {
       const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
+      headers.set('X-Native-Client', '1');
+      const token = getNativeAuthToken();
+      if (token) headers.set('Authorization', `Bearer ${token}`);
       headers.set('X-Anon-Id', anonId);
       init = { ...init, headers };
     }
@@ -61,11 +84,26 @@ export function installNativeIdentity(): void {
   };
 }
 
-/** WebSocket URL for a game (local or online). */
-export function gameWebSocketUrl(gameId: string): string {
+/**
+ * WebSocket URL for a game (local or online).
+ *
+ * Native + logged in: the handshake can't carry cookies or headers, so a
+ * one-time short-lived ticket is fetched from /auth/ws-ticket (hence async).
+ * Native + anonymous: ?anon_id=. Browser: cookies, relative URL.
+ */
+export async function gameWebSocketUrl(gameId: string): Promise<string> {
   if (isNativeApp) {
-    const anonParam = `?anon_id=${nativeAnonId()}`;
-    return `wss://${NATIVE_BACKEND_HOST}/ws/games/${gameId}/ws${anonParam}`;
+    const wsBase = `wss://${NATIVE_BACKEND_HOST}/ws/games/${gameId}/ws`;
+    if (getNativeAuthToken()) {
+      try {
+        const resp = await fetch(`${API_BASE}/auth/ws-ticket`, { method: 'POST', credentials: 'include' });
+        if (resp.ok) {
+          const { ticket } = await resp.json();
+          return `${wsBase}?ticket=${encodeURIComponent(ticket)}`;
+        }
+      } catch { /* fall through to anonymous */ }
+    }
+    return `${wsBase}?anon_id=${nativeAnonId()}`;
   }
   const wsProtocol = globalThis.location.protocol === 'https:' ? 'wss:' : 'ws:';
   return `${wsProtocol}//${globalThis.location.host}/ws/games/${gameId}/ws`;

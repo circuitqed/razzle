@@ -50,7 +50,7 @@ import { createGPUModelFromOnnx } from './engine/webglForwardPass';
 import { PureTSEvaluator, GPUEvaluator } from './engine/evaluator';
 import { search, DEFAULT_CONFIG } from './engine/mcts';
 import { clearModelCache } from './engine/modelCache';
-import { API_BASE, isNativeApp, gameWebSocketUrl, installNativeIdentity } from './api/base';
+import { API_BASE, isNativeApp, gameWebSocketUrl, installNativeIdentity, setNativeAuthToken } from './api/base';
 import { TIERS } from './utils/autoMatch';
 
 installNativeIdentity();
@@ -794,8 +794,9 @@ async function groupBackend() {
     }
 
     try {
+      const wsUrl = await gameWebSocketUrl(gameId!);
       const ok = await new Promise<boolean>((resolve) => {
-        const ws = new WebSocket(gameWebSocketUrl(gameId!));
+        const ws = new WebSocket(wsUrl);
         const timer = setTimeout(() => { ws.close(); resolve(false); }, 8000);
         ws.onmessage = () => { clearTimeout(timer); ws.close(); resolve(true); };
         ws.onerror = () => { clearTimeout(timer); resolve(false); };
@@ -839,8 +840,9 @@ async function groupBackend() {
 
   if (onlineGameId) {
     try {
+      const onlineWsUrl = await gameWebSocketUrl(onlineGameId!);
       const result = await new Promise<string>((resolve) => {
-        const ws = new WebSocket(gameWebSocketUrl(onlineGameId!));
+        const ws = new WebSocket(onlineWsUrl);
         const timer = setTimeout(() => { ws.close(); resolve('timeout'); }, 8000);
         ws.onmessage = (event) => {
           const msg = JSON.parse(event.data);
@@ -857,6 +859,76 @@ async function groupBackend() {
     try {
       await fetch(`${API_BASE}/games/online/${onlineGameId}/leave`, { method: 'POST', credentials: 'include' });
     } catch { /* best-effort cleanup */ }
+  }
+
+  // --- Account auth via Authorization header (native session flow) ---
+  // Uses a dedicated test account. Runs LAST in the group: it switches the
+  // request identity from anonymous to logged-in, then restores it.
+  try {
+    const creds = { username: 'knightball_ios_test', password: 'ios-suite-test-pw' };
+    let authResp = await fetch(`${API_BASE}/auth/login`, {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(creds),
+    });
+    if (authResp.status === 401) {
+      authResp = await fetch(`${API_BASE}/auth/register`, {
+        method: 'POST', credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(creds),
+      });
+    }
+    if (authResp.status === 404) {
+      p('SKIP: account-auth tests — server predates native auth endpoints', 'warn');
+      return;
+    }
+    const authData = await authResp.json();
+    check('login/register returns session token to native client', authResp.ok && typeof authData.token === 'string');
+    if (!authData.token) return;
+
+    setNativeAuthToken(authData.token);
+    try {
+      const me = await fetch(`${API_BASE}/auth/me`, { credentials: 'include' });
+      const meData = me.ok ? await me.json() : null;
+      check('GET /auth/me authenticates via Authorization header', me.ok && meData?.username === creds.username,
+        meData?.username);
+
+      const wt = await fetch(`${API_BASE}/auth/ws-ticket`, { method: 'POST', credentials: 'include' });
+      const wtData = wt.ok ? await wt.json() : null;
+      check('POST /auth/ws-ticket mints a ticket', wt.ok && typeof wtData?.ticket === 'string');
+
+      // Authed online game over WS via one-time ticket
+      const og = await fetch(`${API_BASE}/games/online`, {
+        method: 'POST', credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ host_color: 0, game_mode: 'realtime', is_public: false, client_type: 'webapp-native-test' }),
+      });
+      const ogData = await og.json();
+      if (og.ok && ogData.game_id) {
+        const authedWsUrl = await gameWebSocketUrl(ogData.game_id);
+        check('authed WS URL uses one-time ticket (not anon_id)', authedWsUrl.includes('ticket='), undefined);
+        const wsResult = await new Promise<string>((resolve) => {
+          const ws = new WebSocket(authedWsUrl);
+          const timer = setTimeout(() => { ws.close(); resolve('timeout'); }, 8000);
+          ws.onmessage = (event) => {
+            const msg = JSON.parse(event.data);
+            if (msg.type === 'error') { clearTimeout(timer); ws.close(); resolve(msg.data?.code ?? 'error'); }
+            else { clearTimeout(timer); ws.close(); resolve('ok'); }
+          };
+          ws.onclose = (e) => { clearTimeout(timer); resolve('closed:' + e.code); };
+          ws.onerror = () => {};
+        });
+        check('online-game WSS authenticates via ws ticket', wsResult === 'ok', wsResult);
+        await fetch(`${API_BASE}/games/online/${ogData.game_id}/leave`, { method: 'POST', credentials: 'include' }).catch(() => {});
+      } else {
+        check('authed online game creation', false, `status ${og.status}`);
+      }
+    } finally {
+      setNativeAuthToken(null); // restore anonymous identity for other groups
+    }
+  } catch (e: any) {
+    setNativeAuthToken(null);
+    check('account auth flow', false, e.message);
   }
 }
 

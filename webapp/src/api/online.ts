@@ -228,11 +228,11 @@ export interface OnlineWebSocketHandlers {
  * Connect to an online game via WebSocket.
  * Handles authentication via cookies automatically.
  */
-export function connectOnlineGameWebSocket(
+export async function connectOnlineGameWebSocket(
   gameId: string,
   handlers: OnlineWebSocketHandlers
-): WebSocket {
-  const ws = new WebSocket(gameWebSocketUrl(gameId));
+): Promise<WebSocket> {
+  const ws = new WebSocket(await gameWebSocketUrl(gameId));
 
   ws.onopen = () => {
     handlers.onOpen?.();
