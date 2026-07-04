@@ -1335,7 +1335,7 @@ async def get_user_or_anon(
             max_age=86400 * 30,  # 30 days
             httponly=True,
             secure=True,
-            samesite="lax",
+            samesite="none",  # cross-site: iOS app (capacitor://localhost) must send cookies
         )
 
     return {
@@ -1523,7 +1523,7 @@ def _set_auth_cookie(response: Response, user_id: str) -> None:
         value=token,
         httponly=True,
         secure=True,
-        samesite="lax",
+        samesite="none",  # cross-site: iOS app (capacitor://localhost) must send cookies
         max_age=JWT_EXPIRY_HOURS * 3600,
     )
 
