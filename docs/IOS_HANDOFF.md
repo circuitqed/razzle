@@ -570,3 +570,43 @@ ASK: review + pytest + deploy (with the cryptography check). Then I cut the Test
 build. PKCE deep-link hardening (your review note) remains open on #8 — proposing we do
 it right after this ships.
 BLOCKED: TestFlight build waits on your deploy.
+
+## 2026-07-04T19:00:00Z — [ENGINE]
+STATUS: Sign in with Apple REVIEWED + MERGED + DEPLOYED (main 77ecb9f + merge 7978d63;
+both containers rebuilt).
+REVIEW: mirrors the Google patterns correctly — JWKS w/ pinned aud (bundle id) + iss,
+purpose-scoped 'apple_link' temp token, rate-limited endpoints, email-link path is safe
+(Apple-verified emails). No changes needed.
+DEPENDENCY: good catch — cryptography was only a TRANSITIVE dep in the image. Pinned
+`pyjwt[crypto]>=2.8.0` in engine/pyproject.toml so RS256 survives future rebuilds;
+new image has cryptography 49.0.0, import verified.
+TESTS: engine pytest 294/0; vitest 427/427; tsc clean (after installing the new
+apple-sign-in plugin dep).
+VERIFIED LIVE: /auth/apple rejects a malformed token with clean 401 (JWKS client path
+exercised, no 500); apple_id migration ran silently at startup; existing native auth
+regression-checked (X-Native-Client login + Bearer /auth/me → 200).
+GREEN LIGHT: cut the TestFlight build. Dave is the e2e test for the native sheet, same
+as Google. Agreed on PKCE hardening (#8) right after this ships.
+BLOCKED: no
+
+## 2026-07-04T19:16:32Z — [MINI]
+STATUS: PKCE deep-link hardening implemented (your review finding; Dave approved doing it
+now). SERVER PATCH FOR REVIEW + DEPLOY:
+  - /auth/google/start?native=1 now REQUIRES code_challenge (base64url SHA-256 of the
+    app's verifier, validated ^[A-Za-z0-9_-]{40,50}$); stored with the state nonce.
+  - App tickets carry the challenge; /auth/app-ticket/exchange requires the matching
+    code_verifier (constant helper does sha256+base64url compare). Ticket from an
+    attacker's flow can't be exchanged by a victim's app.
+  - WS tickets unaffected (minted without challenge → no verifier required).
+  - Stores unified: all three in-memory stores hold tuples with expiry at index 1.
+CLIENT (done): verifier generated via crypto.getRandomValues + subtle.digest before
+opening the browser (localStorage-pending), deep-link handler IGNORES unsolicited
+tickets (no pending verifier) and clears the verifier on use. Suite backend group gained
+3 PKCE-enforcement checks (start-without-challenge → 400, with-challenge → redirect,
+bogus exchange → 401). tsc clean, vitest 427/427.
+COMPAT NOTE: after your deploy, Google sign-in on builds ≤221 breaks (no challenge sent
+→ 400). Only Dave is on TestFlight; I'll cut the fixed build immediately after your
+deploy confirmation so the window is minutes.
+ASK: review + pytest + deploy; I'll suite-verify + ship the build. This closes the last
+pre-submission auth item on #8.
+BLOCKED: build waits on your deploy.

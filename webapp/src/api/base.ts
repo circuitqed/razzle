@@ -61,6 +61,40 @@ export function setNativeAuthToken(token: string | null): void {
 }
 
 /**
+ * PKCE for the native OAuth deep-link return (login-CSRF hardening).
+ *
+ * A crafted knightball://auth?ticket=<attacker's ticket> link must not sign
+ * this app into the attacker's account. The app generates a verifier before
+ * opening the system browser and sends SHA-256(verifier) with the flow; the
+ * ticket exchange then requires the original verifier, which only this app
+ * instance holds — a planted ticket can never match.
+ */
+const PKCE_VERIFIER_KEY = 'knightball_native_pkce_verifier';
+
+function base64url(bytes: Uint8Array): string {
+  let s = '';
+  bytes.forEach((b) => { s += String.fromCharCode(b); });
+  return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+/** Generate + persist a fresh PKCE verifier; returns its SHA-256 challenge. */
+export async function beginPkceFlow(): Promise<string> {
+  const raw = new Uint8Array(32);
+  crypto.getRandomValues(raw);
+  const verifier = base64url(raw);
+  localStorage.setItem(PKCE_VERIFIER_KEY, verifier);
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier));
+  return base64url(new Uint8Array(digest));
+}
+
+/** Take (and clear) the pending PKCE verifier, or null if no flow is pending. */
+export function takePkceVerifier(): string | null {
+  const v = localStorage.getItem(PKCE_VERIFIER_KEY);
+  localStorage.removeItem(PKCE_VERIFIER_KEY);
+  return v;
+}
+
+/**
  * Patch global fetch so every request to the backend carries the native
  * identity: X-Native-Client (server returns tokens in auth responses),
  * Authorization: Bearer when logged in, and X-Anon-Id otherwise.

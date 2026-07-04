@@ -861,6 +861,26 @@ async function groupBackend() {
     } catch { /* best-effort cleanup */ }
   }
 
+  // --- PKCE enforcement on the native OAuth flow (login-CSRF hardening) ---
+  try {
+    const noChallenge = await fetch(`${API_BASE}/auth/google/start?native=1`, { credentials: 'include', redirect: 'manual' });
+    check('OAuth start without code_challenge is rejected', noChallenge.status === 400 || noChallenge.status === 503,
+      `status ${noChallenge.status}`);
+    const fakeChallenge = 'A'.repeat(43);
+    const withChallenge = await fetch(`${API_BASE}/auth/google/start?native=1&code_challenge=${fakeChallenge}`, { credentials: 'include', redirect: 'manual' });
+    check('OAuth start with code_challenge redirects to Google',
+      withChallenge.type === 'opaqueredirect' || (withChallenge.status >= 300 && withChallenge.status < 400) || withChallenge.status === 503,
+      `type=${withChallenge.type} status=${withChallenge.status}`);
+    const badExchange = await fetch(`${API_BASE}/auth/app-ticket/exchange`, {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ticket: 'bogus', code_verifier: 'bogus' }),
+    });
+    check('bogus app-ticket exchange rejected', badExchange.status === 401, `status ${badExchange.status}`);
+  } catch (e: any) {
+    check('PKCE enforcement checks', false, e.message);
+  }
+
   // --- Account auth via Authorization header (native session flow) ---
   // Uses a dedicated test account. Runs LAST in the group: it switches the
   // request identity from anonymous to logged-in, then restores it.
