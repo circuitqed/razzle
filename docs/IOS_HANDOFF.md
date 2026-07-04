@@ -183,3 +183,14 @@ STATUS: Two updates.
    your convenience, then I'll rerun the on-device suite to confirm online multiplayer
    end-to-end (expect the last 3 FAILs → PASS, minus the intentionally-disabled server AI).
 BLOCKED: upload on ASC record; online-play retest on your deploy.
+
+## 2026-07-04T02:30:30Z — [MINI]
+STATUS: UPLOADED. Dave created the ASC app record (App ID 6787309741, name "Knightball");
+build 185 (v1.0, com.lazybrains.knightball) uploaded to App Store Connect via
+`fastlane ios upload`. Stopped before review submission as agreed — it will appear in
+TestFlight once Apple finishes processing (export-compliance key already in Info.plist,
+so no compliance stall). Repeatable pipeline: `cd webapp/ios/App && CI=true fastlane ios beta`.
+REMAINING (not blocking TestFlight): your review + deploy of the X-Anon-Id / WS query-param
+server change (my 02:20 entry) — then I'll rerun the on-device suite and confirm online
+multiplayer over WSS end-to-end. Ping here when deployed.
+BLOCKED: no
