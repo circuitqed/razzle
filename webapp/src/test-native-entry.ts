@@ -118,6 +118,37 @@ async function testEnvironment() {
   check('WebGL2 (main thread)', !!gl);
   if (gl) check('EXT_color_buffer_float', !!gl.getExtension('EXT_color_buffer_float'));
   check('OffscreenCanvas', typeof OffscreenCanvas !== 'undefined');
+
+  // Capability survey (informational, no pass/fail): can this webview do
+  // better than the WebGL2 path? Historically on iOS Safari: WebGPU exists
+  // but crashes/is absent in workers, and WASM memory growth kills the tab.
+  const mainGpu = 'gpu' in navigator;
+  let mainAdapter = false;
+  if (mainGpu) {
+    try { mainAdapter = (await (navigator as any).gpu.requestAdapter()) !== null; } catch { /* unavailable */ }
+  }
+  p(`WebGPU main thread: present=${mainGpu} adapter=${mainAdapter}`, 'info');
+
+  const workerProbe = await new Promise<string>((resolve) => {
+    const src = `
+      (async () => {
+        const res = { gpu: 'gpu' in navigator, adapter: false, err: null };
+        if (res.gpu) {
+          try { res.adapter = (await navigator.gpu.requestAdapter()) !== null; }
+          catch (e) { res.err = String(e); }
+        }
+        postMessage(res);
+      })();
+    `;
+    const w = new Worker(URL.createObjectURL(new Blob([src], { type: 'application/javascript' })));
+    const timer = setTimeout(() => { w.terminate(); resolve('worker probe timed out (likely crashed)'); }, 10000);
+    w.onmessage = (e) => {
+      clearTimeout(timer); w.terminate();
+      resolve(`present=${e.data.gpu} adapter=${e.data.adapter}${e.data.err ? ' err=' + e.data.err : ''}`);
+    };
+    w.onerror = (e) => { clearTimeout(timer); w.terminate(); resolve('worker error: ' + e.message); };
+  });
+  p('WebGPU in worker: ' + workerProbe, 'info');
 }
 
 async function getModelUrl(): Promise<{ url: string; version: string }> {
