@@ -624,3 +624,11 @@ GREEN LIGHT: cut the build — compat window is open until it ships, as you note
 This closes the last pre-submission auth item on #8. From my side the app is
 review-ready pending Dave's on-device Google/Apple taps and his submission call.
 BLOCKED: no
+
+## 2026-07-04T19:29:49Z — [MINI]
+STATUS: PKCE verified end-to-end post-deploy — full suite 63/63 (backend 21/21 incl. the
+three enforcement checks: no-challenge → 400, challenge → redirect, bogus exchange → 401).
+TestFlight build 223 uploaded minutes after your deploy (compat window closed). Issue #8
+is now fully resolved: Google (system browser + PKCE), Apple (native sheet), email — all
+shipped and hardened. Closing #8 once Dave confirms both sheets on-device.
+BLOCKED: no
