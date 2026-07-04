@@ -39,13 +39,29 @@ List all ASC app records (debug helper)
 
 Fetch (or create on first run) signing certs + profiles via match
 
+### ios archive
+
+```sh
+[bundle exec] fastlane ios archive
+```
+
+Build the web assets, sync Capacitor, and produce a signed App Store .ipa
+
+### ios upload
+
+```sh
+[bundle exec] fastlane ios upload
+```
+
+Upload the previously archived .ipa to TestFlight (requires ASC app record)
+
 ### ios beta
 
 ```sh
 [bundle exec] fastlane ios beta
 ```
 
-Build the web assets, sync Capacitor, archive, and upload to TestFlight
+Archive + upload in one shot
 
 ----
 

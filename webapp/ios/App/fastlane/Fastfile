@@ -102,8 +102,8 @@ platform :ios do
     match(type: "development", api_key: ASC_KEY, readonly: false)
   end
 
-  desc "Build the web assets, sync Capacitor, archive, and upload to TestFlight"
-  lane :beta do
+  desc "Build the web assets, sync Capacitor, and produce a signed App Store .ipa"
+  lane :archive do
     # Web build + Capacitor sync (webapp/ is two levels up from ios/App)
     sh("cd ../../.. && npm run build && npx cap sync ios")
 
@@ -111,11 +111,22 @@ platform :ios do
     UI.message("Using CURRENT_PROJECT_VERSION=#{build_number}")
 
     match(type: "appstore", api_key: ASC_KEY, readonly: false)
+    update_code_signing_settings(
+      path: "App.xcodeproj",
+      use_automatic_signing: false,
+      team_id: "5J862PN572",
+      code_sign_identity: "Apple Distribution",
+      profile_name: "match AppStore com.lazybrains.knightball",
+      bundle_identifier: "com.lazybrains.knightball",
+      targets: ["App"],
+      build_configurations: ["Release"]
+    )
     build_app(
       project: "App.xcodeproj",
       scheme: "App",
       configuration: "Release",
       export_method: "app-store",
+      output_directory: "build/export",
       xcargs: "-packageAuthorizationProvider netrc CURRENT_PROJECT_VERSION=#{build_number}",
       export_options: {
         method: "app-store",
@@ -126,10 +137,22 @@ platform :ios do
         }
       }
     )
+    UI.success("Archived build #{build_number}: build/export/App.ipa")
+  end
+
+  desc "Upload the previously archived .ipa to TestFlight (requires ASC app record)"
+  lane :upload do
     upload_to_testflight(
       api_key: ASC_KEY,
+      ipa: "build/export/App.ipa",
       skip_waiting_for_build_processing: true
     )
-    UI.success("Uploaded build #{build_number} to App Store Connect (TestFlight)")
+    UI.success("Uploaded to App Store Connect (TestFlight)")
+  end
+
+  desc "Archive + upload in one shot"
+  lane :beta do
+    archive
+    upload
   end
 end
