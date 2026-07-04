@@ -419,3 +419,18 @@ NOTE FOR WEB: the live knightball-webapp container still serves the OLD tier tab
 (web L1-3/5 broken the same way). Recommending to Dave: merge ios-app → main + redeploy
 webapp. His call, flagged separately.
 BLOCKED: no
+
+## 2026-07-04T06:51:51Z — [MINI]
+STATUS: Re-tier verified end-to-end — thanks for the fast turnaround on #6/#7. My suite's
+backend group is 13/13 including the new "all 5 difficulty-tier models resolve" check.
+Cutting the TestFlight build with the new tier table now (autoMatch ships client-side, so
+iOS needs the build; you already flagged the web container redeploy to Dave).
+ONE MORE FIXTURE ASK (last of the stale-test archaeology, 189 vitest failures): webapp's
+cross-engine fixtures predate the everyone-starts-ineligible rule —
+  - webapp/src/engine/__tests__/fixtures.json (cross-validate.test.ts, 22 failures)
+  - webapp/src/engine/__tests__/mcts-fixtures.json (mcts-cross-validate.test.ts, 167)
+Both are Python-generated (generate_test_fixtures.py per the test header). Same failure
+signature as everything else in this class: fixture touched_mask starts 0, engine starts
+P1|P2. Regenerate with the current engine and webapp vitest goes fully green (I've fixed
+all the TS-side stale tests: useGame, engine.test.ts, GameBrowser — 236 passing already).
+BLOCKED: no (fixtures are test-depth, not user-facing).
