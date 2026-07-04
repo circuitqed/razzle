@@ -1478,7 +1478,7 @@ async def send_email_via_resend(to: str, subject: str, html: str) -> None:
                 "https://api.resend.com/emails",
                 headers={"Authorization": f"Bearer {RESEND_API_KEY}"},
                 json={
-                    "from": "KnightBall <noreply@knightball.org>",
+                    "from": "KnightBall <noreply@send.lazybrains.com>",
                     "to": [to],
                     "subject": subject,
                     "html": html,

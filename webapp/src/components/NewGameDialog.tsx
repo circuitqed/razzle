@@ -63,8 +63,8 @@ const SIMULATION_OPTIONS = [
 
 // Bot difficulty presets from pegasus training run Elo tournament
 export const BOT_PRESETS = [
-  { id: 'beginner', name: 'Beginner', model: 'pegasus_iter_010.pt', sims: 16, elo: 661 },
-  { id: 'easy', name: 'Easy', model: 'pegasus_iter_075.pt', sims: 64, elo: 998 },
+  { id: 'beginner', name: 'Beginner', model: 'pegasus_iter_050.pt', sims: 4, elo: 700 },
+  { id: 'easy', name: 'Easy', model: 'pegasus_iter_050.pt', sims: 64, elo: 950 },
   { id: 'medium', name: 'Medium', model: 'pegasus_iter_150.pt', sims: 256, elo: 1070 },
   { id: 'hard', name: 'Hard', model: 'pegasus_iter_250.pt', sims: 1024, elo: 1219 },
   { id: 'expert', name: 'Expert', model: 'pegasus_iter_250.pt', sims: 4096, elo: 1300 },
