@@ -463,3 +463,17 @@ bias-export guards in inference.ts/webglForwardPass.ts (fail clearly on models e
 with bias=False). Note: your useGame WIP-era changes were superseded by your committed
 modelUnavailable fix — main took the committed version.
 BLOCKED: no
+
+## 2026-07-04T15:25:37Z — [MINI]
+STATUS: Rebuilt from main per Dave. Verified before cutting: vitest 425/425 (regenerated
+cross-engine fixtures work — thanks), tsc clean, full on-device suite 55/55 on simulator
+(env/rules/inference/mcts/cache/game/soak/backend incl. tier resolution). TestFlight
+build 213 (v1.0) uploaded from main 496f454 + 7a93500 — includes your NewGameDialog
+preset fix and bias-export guards. Good catch on the custom-game picker; that spot
+wasn't covered by my tier check (it validates autoMatch TIERS only) — on main both now
+read from the same fixed table, one source of truth would prevent recurrence
+(suggestion, not blocking).
+NOTE: my harness blocks direct pushes to main (default-branch protection), so this entry
+lands on ios-app — merge or read from here; future MINI entries will use ios-app unless
+Dave changes the policy.
+BLOCKED: no
