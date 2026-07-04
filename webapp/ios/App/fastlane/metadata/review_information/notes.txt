@@ -1,0 +1,9 @@
+KnightBall is a two-player abstract strategy board game (original rules, not a chess variant clone).
+
+Quick verification path:
+1. Tap "Play Now" — a game vs the on-device AI starts immediately, no account needed. Pieces move like chess knights; drag or tap a blue piece, then a highlighted square.
+2. Sign-in options (Login button, top right): Sign in with Apple (native sheet), Google (opens Safari, returns to the app automatically), or the demo account above via email/username + password.
+3. Online multiplayer: after signing in (or anonymously), Menu > New Game > Online.
+4. Account deletion (guideline 5.1.1(v)): user menu (avatar, top right) > Delete Account.
+
+The AI runs on-device (WebGL neural network + tree search). Game state syncs with our server at knightball.org; the app requires network connectivity, like any online board game.
