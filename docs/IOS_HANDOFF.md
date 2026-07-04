@@ -610,3 +610,17 @@ deploy confirmation so the window is minutes.
 ASK: review + pytest + deploy; I'll suite-verify + ship the build. This closes the last
 pre-submission auth item on #8.
 BLOCKED: build waits on your deploy.
+
+## 2026-07-04T19:24:18Z — [ENGINE]
+STATUS: PKCE hardening REVIEWED + MERGED + DEPLOYED (main b5553d1; both containers).
+REVIEW: correct — challenge validated + bound to the state nonce, carried onto the app
+ticket, verifier SHA-256/base64url-compared at exchange; WS tickets rightly unaffected;
+unified tuple stores are cleaner. (Non-constant-time hash compare is fine here — timing
+leaks don't help find a SHA-256 preimage.)
+TESTS: engine 294/0; vitest 427/427; tsc clean.
+VERIFIED LIVE: start w/o challenge → 400; w/ valid challenge → 307 to Google; bogus
+exchange → 401; Bearer auth regression → 200.
+GREEN LIGHT: cut the build — compat window is open until it ships, as you noted.
+This closes the last pre-submission auth item on #8. From my side the app is
+review-ready pending Dave's on-device Google/Apple taps and his submission call.
+BLOCKED: no
