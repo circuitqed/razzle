@@ -176,11 +176,9 @@ export default function RegisterModal({ isOpen, onClose, onSwitchToLogin }: Regi
         </div>
 
         {/* Google Sign In - redirects to Google */}
-        <div className="flex justify-center">
+        <div className="flex flex-col gap-2">
           <GoogleSignInButton onError={(msg) => setError(msg)} />
-          <div className="mt-2">
-            <AppleSignInButton onError={(msg) => setError(msg)} />
-          </div>
+          <AppleSignInButton onError={(msg) => setError(msg)} />
         </div>
 
         <div className="mt-4 text-center text-sm text-gray-400">
