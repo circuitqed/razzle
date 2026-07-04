@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>Native App Self-Test</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+body { font-family: monospace; padding: 10px; background: #111; color: #ddd; font-size: 12px; }
+.pass { color: #4f4; } .fail { color: #f44; } .warn { color: #ff4; }
+.info { color: #8af; } .dim { color: #888; }
+pre { white-space: pre-wrap; word-wrap: break-word; }
+.summary { font-size: 14px; padding: 8px; margin: 8px 0; border: 2px solid; }
+.summary.pass { border-color: #4f4; } .summary.fail { border-color: #f44; }
+</style>
+</head>
+<body>
+<h2>Native App Self-Test</h2>
+<p style="color:#888">Verifies the real app AI path (ai.worker + WebGL2) by playing a full
+game of MCTS-AI vs a random mover, then checks backend REST/WS connectivity.
+Query params: ?model=local uses bundled /test-model.onnx; ?skipbackend=1 skips network tests.</p>
+<pre id="log"><div>Loading test script...</div></pre>
+<div id="result" data-status="running"></div>
+<script type="module" src="/src/test-native-entry.ts"></script>
+</body>
+</html>

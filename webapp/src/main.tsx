@@ -2,6 +2,11 @@ import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import './index.css'
 import App from './App'
+import { isNativeApp } from './api/base'
+
+if (isNativeApp) {
+  document.body.classList.add('native-app');
+}
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
@@ -11,7 +16,9 @@ createRoot(document.getElementById('root')!).render(
 
 // Register service worker in production for PWA support + offline play.
 // Uses network-first for HTML to prevent stale cache issues on deploy.
-if ('serviceWorker' in navigator && import.meta.env.PROD) {
+// Skipped in the native app: assets ship in the bundle and WKWebView does
+// not support service workers on the capacitor:// scheme.
+if ('serviceWorker' in navigator && import.meta.env.PROD && !isNativeApp) {
   window.addEventListener('load', () => {
     navigator.serviceWorker.register('/sw.js').then((registration) => {
       registration.addEventListener('updatefound', () => {

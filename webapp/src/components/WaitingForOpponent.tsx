@@ -4,6 +4,7 @@
  */
 
 import { useState, useEffect } from 'react';
+import { SHARE_ORIGIN } from '../api/base';
 
 interface WaitingForOpponentProps {
   joinCode: string;
@@ -38,7 +39,7 @@ export default function WaitingForOpponent({
   };
 
   const handleCopyLink = async () => {
-    const url = `${window.location.origin}/join/${joinCode}`;
+    const url = `${SHARE_ORIGIN}/join/${joinCode}`;
     try {
       await navigator.clipboard.writeText(url);
       setCopied(true);
@@ -49,7 +50,7 @@ export default function WaitingForOpponent({
   };
 
   const handleShare = async () => {
-    const url = `${window.location.origin}/join/${joinCode}`;
+    const url = `${SHARE_ORIGIN}/join/${joinCode}`;
     const text = `Join my KnightBall game! Code: ${joinCode}`;
 
     if (navigator.share) {
@@ -133,7 +134,7 @@ export default function WaitingForOpponent({
             onClick={handleCopyLink}
             className="w-full px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded font-medium transition-colors text-sm"
           >
-            Copy Link: {window.location.origin}/join/{joinCode}
+            Copy Link: {SHARE_ORIGIN}/join/{joinCode}
           </button>
         </div>
 

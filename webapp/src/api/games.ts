@@ -2,7 +2,7 @@
  * Games listing and analysis API client
  */
 
-const API_BASE = '/api';
+import { API_BASE } from './base';
 
 export interface GameSummary {
   game_id: string;

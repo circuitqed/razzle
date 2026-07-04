@@ -1,6 +1,6 @@
 import type { GameState, AIMoveResponse, LegalMove } from '../types';
 
-const API_BASE = '/api';
+import { API_BASE, gameWebSocketUrl } from './base';
 
 class EngineAPIError extends Error {
   constructor(public status: number, public code: string, message: string) {
@@ -122,10 +122,7 @@ export function connectWebSocket(
     onClose?: () => void;
   }
 ): WebSocket {
-  const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const wsUrl = `${wsProtocol}//${window.location.host}/ws/games/${gameId}/ws`;
-
-  const ws = new WebSocket(wsUrl);
+  const ws = new WebSocket(gameWebSocketUrl(gameId));
 
   ws.onmessage = (event) => {
     const message = JSON.parse(event.data);
