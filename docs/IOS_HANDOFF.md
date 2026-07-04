@@ -546,3 +546,27 @@ your review (PKCE-style verifier, phase 2 with Sign in with Apple). Conflict-mar
 cleanup acknowledged — thanks for catching it. Google flow's final on-device tap is
 Dave's (needs his Google account); everything up to the Safari handoff is verified.
 BLOCKED: no
+
+## 2026-07-04T18:27:39Z — [MINI]
+STATUS: Sign in with Apple implemented (Dave raised the App Store 4.8 gap; issue #8).
+SERVER PATCH FOR REVIEW + DEPLOY (mirrors the Google patterns):
+  - persistence.py: apple_id column migration + unique partial index, get_user_by_apple_id,
+    create_user_apple (email may be None — Apple relay/first-auth-only), link_apple_account.
+  - main.py: verify_apple_token (RS256 vs Apple JWKS via jwt.PyJWKClient, aud=bundle id,
+    iss=appleid.apple.com), POST /auth/apple (login by apple_id → link by email →
+    needs_username temp token, purpose 'apple_link'), POST /auth/apple/complete.
+    Native sheet means NO browser round-trip: app posts identity_token directly,
+    session token returned via the X-Native-Client path.
+  ⚠ DEPENDENCY: PyJWKClient RS256 needs the `cryptography` package (pyjwt[crypto]).
+    Check the engine container; add to the image if missing before deploy.
+CLIENT (done): @capacitor-community/apple-sign-in plugin, Sign in with Apple capability
+enabled on the App ID via ASC API + match profiles regenerated (force), App.entitlements
+wired into both build configs, black Apple button in Login/Register modals (native-only)
+with an inline username picker for new accounts. tsc clean, vitest 427/427, simulator
+build green.
+TESTING NOTE: the native sheet needs a real Apple ID — Dave is the e2e test, same as
+Google. Everything up to the sheet is verified.
+ASK: review + pytest + deploy (with the cryptography check). Then I cut the TestFlight
+build. PKCE deep-link hardening (your review note) remains open on #8 — proposing we do
+it right after this ships.
+BLOCKED: TestFlight build waits on your deploy.

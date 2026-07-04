@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import GoogleSignInButton from './GoogleSignInButton';
+import AppleSignInButton from './AppleSignInButton';
 
 interface RegisterModalProps {
   isOpen: boolean;
@@ -177,6 +178,9 @@ export default function RegisterModal({ isOpen, onClose, onSwitchToLogin }: Regi
         {/* Google Sign In - redirects to Google */}
         <div className="flex justify-center">
           <GoogleSignInButton onError={(msg) => setError(msg)} />
+          <div className="mt-2">
+            <AppleSignInButton onError={(msg) => setError(msg)} />
+          </div>
         </div>
 
         <div className="mt-4 text-center text-sm text-gray-400">

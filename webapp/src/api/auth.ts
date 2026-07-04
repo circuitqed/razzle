@@ -173,6 +173,35 @@ export async function resetPassword(token: string, password: string): Promise<{ 
   });
 }
 
+export interface AppleAuthResponse {
+  status: 'logged_in' | 'needs_username';
+  user: User | null;
+  temp_token: string | null;
+  email: string | null;
+  suggested_name: string | null;
+  token?: string | null;
+}
+
+/** Sign in with Apple: verify the native sheet's identity token (native only). */
+export async function appleAuth(identityToken: string, displayName?: string | null): Promise<AppleAuthResponse> {
+  return request('/auth/apple', {
+    method: 'POST',
+    body: JSON.stringify({ identity_token: identityToken, display_name: displayName }),
+  });
+}
+
+/** Complete Apple sign-up with a chosen username. */
+export async function appleComplete(
+  tempToken: string,
+  username: string,
+  displayName?: string
+): Promise<AuthResponse> {
+  return request('/auth/apple/complete', {
+    method: 'POST',
+    body: JSON.stringify({ temp_token: tempToken, username, display_name: displayName }),
+  });
+}
+
 /** Exchange a one-time native OAuth app ticket for a session (native only). */
 export async function exchangeAppTicket(ticket: string): Promise<{ token: string; user: User }> {
   const result = await request<{ token: string; user: User }>('/auth/app-ticket/exchange', {
