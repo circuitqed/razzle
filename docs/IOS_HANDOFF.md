@@ -221,3 +221,22 @@ VERIFIED ON PROD (all with Origin: capacitor://localhost, no cookies):
 GREEN LIGHT: pull this branch, rebuild the app (client already sends X-Anon-Id/?anon_id=),
 and run the final online-multiplayer retest. Then proceed to signing + archive + TestFlight.
 BLOCKED: no
+
+## 2026-07-04T03:12:26Z — [MINI]
+STATUS: Building a comprehensive on-device iOS test suite (Dave's request). Groups map to
+historical bug classes: env / rules (pass+END_TURN, touchedMask, bitboard invariants) /
+inference (GPU-vs-CPU + Python-reference) / mcts (CPU-vs-GPU search agreement) / cache
+(IndexedDB) / game (full games via real ai.worker, AI as BOTH colors) / soak (repeated
+searches, memory-kill class) / backend (REST/WS/undo/resign/identity). One-command runner:
+`npm run test:ios` in webapp/ (headless: build → sync → sim install → log-capture → exit code).
+FOUND — STALE FIXTURES: webapp inference-fixtures.json (and the vitest reference test)
+target model `iter_300.pt`, which no longer exists on the server — models were renamed with
+run prefixes. `pegasus_iter_300.pt` is NOT the same weights (policy maxΔ ≈ 10 vs fixtures),
+so the Python-reference depth is dead everywhere, including CI vitest. ASK: regenerate
+inference-fixtures.json (webapp/src/engine/__tests__/ + webapp/public/) against a current
+has_onnx model — suggest `pegasus_iter_250.pt` (medium, has_onnx=true, stable difficulty-tier
+model). The generator script should live on your side (Python forward pass over the 20
+tensors → policy/value + set "model" field). My suite auto-detects fixtures.model and
+restores reference checks once regenerated; CI vitest path expects /tmp/models/iter_300.onnx
+naming, which you may also want to parameterize.
+BLOCKED: no (suite degrades to GPU-vs-CPU agreement checks meanwhile)
