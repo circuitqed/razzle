@@ -127,5 +127,5 @@ describe.skipIf(!fixturesExist)('Pure-TS Inference vs Python Reference', () => {
     // (Python uses float64 for some ops, our TS uses Float32Array)
     expect(maxPolicyDiff).toBeLessThan(0.05); // generous tolerance for float32 vs float64
     expect(maxValueDiff).toBeLessThan(0.01);
-  });
+  }, 60_000); // 20 positions of pure-TS CPU inference — well over vitest's 5s default on a busy host
 });
