@@ -951,6 +951,25 @@ async function groupBackend() {
     check('account auth flow', false, e.message);
   }
 
+  // --- Magic-link request (existence-safe; can't verify without the emailed token) ---
+  try {
+    const req = await fetch(`${API_BASE}/auth/magic-link/request`, {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: 'nobody-suite@knightball.invalid' }),
+    });
+    if (req.status === 404) { p('SKIP: magic-link — endpoint not deployed', 'warn'); }
+    else check('POST /auth/magic-link/request is existence-safe (200)', req.ok, `status ${req.status}`);
+    const badVerify = await fetch(`${API_BASE}/auth/magic-link/verify`, {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: 'bogus-token' }),
+    });
+    if (badVerify.status !== 404) check('bogus magic-link token rejected', badVerify.status === 400, `status ${badVerify.status}`);
+  } catch (e: any) {
+    check('magic-link endpoints', false, e.message);
+  }
+
   // --- Account deletion (guideline 5.1.1(v)) — throwaway account lifecycle ---
   try {
     const suffix = crypto.randomUUID().slice(0, 8);

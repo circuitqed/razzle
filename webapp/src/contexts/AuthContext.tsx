@@ -19,6 +19,8 @@ interface AuthContextType {
   appleComplete: (tempToken: string, username: string, displayName?: string) => Promise<void>;
   logout: () => Promise<void>;
   deleteAccount: () => Promise<void>;
+  verifyMagicLink: (token: string) => Promise<void>;
+  requestMagicLink: (email: string) => Promise<void>;
   refreshUser: () => Promise<void>;
 }
 
@@ -107,6 +109,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(null);
   }, []);
 
+  const verifyMagicLink = useCallback(async (token: string) => {
+    const response = await authApi.verifyMagicLink(token);
+    setUser(response.user);
+  }, []);
+
+  const requestMagicLink = useCallback(async (email: string) => {
+    await authApi.requestMagicLink(email);
+  }, []);
+
   // Native OAuth return: the system-browser flow deep-links back with
   // knightball://auth?ticket=<one-time>; exchange it for a session.
   useEffect(() => {
@@ -150,6 +161,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         appleComplete,
         logout,
         deleteAccount,
+        verifyMagicLink,
+        requestMagicLink,
         refreshUser,
       }}
     >

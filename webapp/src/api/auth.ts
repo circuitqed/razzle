@@ -212,6 +212,22 @@ export async function exchangeAppTicket(ticket: string, codeVerifier: string): P
   return result;
 }
 
+/** Request a passwordless sign-in link by email (always succeeds). */
+export async function requestMagicLink(email: string): Promise<{ message: string }> {
+  return request('/auth/magic-link/request', {
+    method: 'POST',
+    body: JSON.stringify({ email }),
+  });
+}
+
+/** Consume a magic-link token and start a session. */
+export async function verifyMagicLink(token: string): Promise<AuthResponse> {
+  return request('/auth/magic-link/verify', {
+    method: 'POST',
+    body: JSON.stringify({ token }),
+  });
+}
+
 /** Permanently delete the authenticated account (guideline 5.1.1(v)). */
 export async function deleteAccount(): Promise<{ message: string }> {
   const result = await request<{ message: string }>('/auth/account', { method: 'DELETE' });

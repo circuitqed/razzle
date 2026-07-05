@@ -265,6 +265,14 @@ class AppleCompleteRequest(BaseModel):
     display_name: Optional[str] = Field(None, max_length=64)
 
 
+class MagicLinkRequest(BaseModel):
+    email: str = Field(..., min_length=5, max_length=255)
+
+
+class MagicLinkVerifyRequest(BaseModel):
+    token: str
+
+
 class AppTicketExchangeRequest(BaseModel):
     ticket: str
     code_verifier: Optional[str] = None  # PKCE verifier matching the flow's challenge
@@ -2163,6 +2171,44 @@ async def reset_password(request: ResetPasswordRequest):
 
     persistence.update_password(user_id, request.password)
     return {"message": "Password updated successfully"}
+
+
+@app.post("/auth/magic-link/request")
+async def magic_link_request(request: MagicLinkRequest, req: Request = None):
+    """Email a passwordless sign-in link for an existing account. Always
+    returns success so the endpoint can't be used to probe which emails
+    are registered."""
+    if req and not auth_limiter.check(get_client_ip(req)):
+        raise HTTPException(status_code=429, detail="Too many requests. Try again later.")
+    user = persistence.get_user_by_email(request.email)
+    if user:
+        # Cap link requests per account to limit inbox spam.
+        if persistence.count_recent_tokens(user["user_id"], "magic_link", hours=1) < 5:
+            token = persistence.create_auth_token(user["user_id"], "magic_link", expires_hours=1)
+            link = f"{FRONTEND_URL}/auth/magic?token={token}"
+            await send_email_via_resend(
+                to=request.email,
+                subject="Your KnightBall sign-in link",
+                html=f'<p>Tap to sign in to KnightBall:</p><p><a href="{link}">Sign in</a></p><p>This link expires in 1 hour and can be used once. If you didn\'t request it, ignore this email.</p>',
+            )
+    return {"message": "If an account exists with that email, a sign-in link has been sent."}
+
+
+@app.post("/auth/magic-link/verify", response_model=AuthResponse)
+async def magic_link_verify(request: MagicLinkVerifyRequest, response: Response, req: Request = None):
+    """Consume a magic-link token and start a session (single-use)."""
+    user_id = persistence.validate_auth_token(request.token, "magic_link")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="Invalid or expired sign-in link")
+    user = persistence.get_user_by_id(user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="Account not found")
+    _set_auth_cookie(response, user_id)
+    return AuthResponse(
+        user=UserResponse(**user),
+        message="Signed in",
+        token=_native_token(req, user_id),
+    )
 
 
 # --- REST Endpoints ---

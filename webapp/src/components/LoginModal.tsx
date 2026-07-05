@@ -1,7 +1,5 @@
 import { useState, useEffect } from 'react';
 import { useAuth } from '../contexts/AuthContext';
-import GoogleSignInButton from './GoogleSignInButton';
-import AppleSignInButton from './AppleSignInButton';
 
 interface LoginModalProps {
   isOpen: boolean;
@@ -11,11 +9,13 @@ interface LoginModalProps {
 }
 
 export default function LoginModal({ isOpen, onClose, onSwitchToRegister, onForgotPassword }: LoginModalProps) {
-  const { loginWithEmail, isAuthenticated } = useAuth();
+  const { loginWithEmail, requestMagicLink, isAuthenticated } = useAuth();
   const [emailOrUsername, setEmailOrUsername] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [magicSent, setMagicSent] = useState(false);
+  const [magicLoading, setMagicLoading] = useState(false);
 
   // Reset form when modal opens
   useEffect(() => {
@@ -23,8 +23,27 @@ export default function LoginModal({ isOpen, onClose, onSwitchToRegister, onForg
       setEmailOrUsername('');
       setPassword('');
       setError(null);
+      setMagicSent(false);
+      setMagicLoading(false);
     }
   }, [isOpen]);
+
+  const handleMagicLink = async () => {
+    setError(null);
+    if (!emailOrUsername.includes('@')) {
+      setError('Enter your email address above to get a sign-in link.');
+      return;
+    }
+    setMagicLoading(true);
+    try {
+      await requestMagicLink(emailOrUsername);
+      setMagicSent(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not send the link.');
+    } finally {
+      setMagicLoading(false);
+    }
+  };
 
   // Close when sign-in completes outside the form — the native Google flow
   // finishes via a deep link (Safari round-trip), not through this modal.
@@ -111,17 +130,22 @@ export default function LoginModal({ isOpen, onClose, onSwitchToRegister, onForg
           </div>
         </form>
 
-        {/* Divider */}
-        <div className="flex items-center gap-3 my-4">
-          <div className="flex-1 h-px bg-gray-600" />
-          <span className="text-sm text-gray-500">or</span>
-          <div className="flex-1 h-px bg-gray-600" />
-        </div>
-
-        {/* Google Sign In - redirects to Google */}
-        <div className="flex flex-col gap-2">
-          <GoogleSignInButton onError={(msg) => setError(msg)} />
-          <AppleSignInButton onError={(msg) => setError(msg)} />
+        {/* Passwordless alternative — works the same on web and in the app */}
+        <div className="mt-4 pt-4 border-t border-gray-700">
+          {magicSent ? (
+            <p className="text-sm text-green-300 text-center">
+              Check your email for a sign-in link. It works on this device or your phone.
+            </p>
+          ) : (
+            <button
+              type="button"
+              onClick={handleMagicLink}
+              disabled={magicLoading}
+              className="w-full px-4 py-2 text-sm bg-gray-700 hover:bg-gray-600 disabled:bg-gray-800 text-white rounded transition-colors"
+            >
+              {magicLoading ? 'Sending…' : 'Email me a sign-in link instead'}
+            </button>
+          )}
         </div>
 
         <div className="mt-4 text-center text-sm text-gray-400">
