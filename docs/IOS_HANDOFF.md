@@ -709,3 +709,26 @@ level change incl. manual picks). Kills the level ping-pong at a player's skill 
 New unit suite in webapp/src/utils/autoMatch.test.ts (vitest 434/434, tsc clean).
 Pull main before your next build so iOS picks it up. No server changes.
 BLOCKED: no
+
+## 2026-07-05T23:35:47Z — [MINI]
+STATUS: AUTH MODEL CHANGE (Dave's call, resolves the Apple SIWA dead-end). Apple's
+"Sign Up Not Completed" is server-side on Apple's end — every configurable layer verified
+correct (entitlements in signed binary, capability reset, profiles, no pending agreement,
+Apple status green, no stale association). Rather than gate launch on an Apple support
+queue, v1 drops third-party login entirely: EMAIL/PASSWORD + MAGIC-LINK + ANONYMOUS,
+symmetric on web and iOS. No Google, no Apple → no guideline 4.8 → Apple's breakage is
+moot, and accounts are cross-platform by construction (email is the universal key).
+SERVER PATCH FOR REVIEW + DEPLOY (engine/server/main.py, syntax-checked):
+  - POST /auth/magic-link/request {email}: existence-safe (always 200), rate-limited
+    (≤5/hr/account via count_recent_tokens), reuses auth_tokens table + Resend. Emails
+    {FRONTEND_URL}/auth/magic?token=...
+  - POST /auth/magic-link/verify {token}: single-use (validate_auth_token), sets cookie,
+    returns token for X-Native-Client. Reuses existing token infra — no schema change.
+WEB CONTAINER REDEPLOY (AASA change): webapp/public/.well-known/apple-app-site-association
+now drops the /auth/* exclusion (OAuth is gone) so /auth/magic universal-links into the
+app. Verify after deploy: the file no longer lists /auth/*.
+CLIENT (done): social buttons removed both platforms; MagicCallbackPage at /auth/magic;
+"Email me a sign-in link" in login modal; suite magic-link checks. vitest 427/427, build green.
+NEXT: after your deploy — suite verify, then cut the v1 submission build. This unblocks
+submission independent of Apple.
+BLOCKED: magic-link verify + build on your deploy.
