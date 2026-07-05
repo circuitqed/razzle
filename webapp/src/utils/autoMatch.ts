@@ -1,12 +1,19 @@
 /**
  * Auto-matching difficulty system for KnightBall.
  *
- * Players start at level 1 (very easy) and climb/drop one level per win/loss.
- * Each level maps to a specific model iteration + simulation count, providing
- * a smooth difficulty curve from random-ish play up to near-maximum strength.
+ * Players start at level 1 (very easy). A win promotes one level immediately;
+ * a demotion requires LOSS_STREAK_TO_DEMOTE consecutive losses (hysteresis —
+ * without it, a player at their skill boundary ping-pongs between two levels
+ * every other game, which feels bad). Each level maps to a specific model
+ * iteration + simulation count, providing a smooth difficulty curve from
+ * random-ish play up to near-maximum strength.
  */
 
 const STORAGE_KEY = 'knightball_ai_level';
+const LOSS_STREAK_KEY = 'knightball_ai_loss_streak';
+
+/** Consecutive losses at a level required before dropping down. */
+export const LOSS_STREAK_TO_DEMOTE = 2;
 
 export interface TierSettings {
   model: string;
@@ -49,25 +56,52 @@ export function getAutoMatchLevel(): number {
   return 1;
 }
 
-/** Persist the auto-match level to localStorage. */
+/** Persist the auto-match level to localStorage. Resets the loss streak —
+ * any level change (earned or manual) starts fresh at the new level. */
 export function setAutoMatchLevel(level: number): void {
   const clamped = Math.max(1, Math.min(MAX_LEVEL, level));
   try {
     localStorage.setItem(STORAGE_KEY, String(clamped));
+    localStorage.setItem(LOSS_STREAK_KEY, '0');
+  } catch { /* ignore */ }
+}
+
+function getLossStreak(): number {
+  try {
+    const n = parseInt(localStorage.getItem(LOSS_STREAK_KEY) ?? '0', 10);
+    if (Number.isFinite(n) && n >= 0) return n;
+  } catch { /* ignore */ }
+  return 0;
+}
+
+function setLossStreak(n: number): void {
+  try {
+    localStorage.setItem(LOSS_STREAK_KEY, String(n));
   } catch { /* ignore */ }
 }
 
 /**
  * Adjust level after a game result.
- * Win => level + 1, Loss => level - 1, clamped to [1, MAX_LEVEL].
- * Returns the new level.
+ * Win => level + 1 immediately (and the loss streak resets).
+ * Loss => level - 1 only after LOSS_STREAK_TO_DEMOTE consecutive losses;
+ * a single loss at a freshly reached level keeps you there (hysteresis).
+ * Clamped to [1, MAX_LEVEL]. Returns the new level.
  */
 export function adjustAfterGame(won: boolean): number {
   const current = getAutoMatchLevel();
-  const next = won ? current + 1 : current - 1;
-  const clamped = Math.max(1, Math.min(MAX_LEVEL, next));
-  setAutoMatchLevel(clamped);
-  return clamped;
+  if (won) {
+    const next = Math.min(MAX_LEVEL, current + 1);
+    setAutoMatchLevel(next); // also resets the loss streak
+    return next;
+  }
+  const streak = getLossStreak() + 1;
+  if (streak >= LOSS_STREAK_TO_DEMOTE) {
+    const next = Math.max(1, current - 1);
+    setAutoMatchLevel(next); // also resets the loss streak
+    return next;
+  }
+  setLossStreak(streak);
+  return current;
 }
 
 /** Get the model + sims config for a given level (1-indexed). */
