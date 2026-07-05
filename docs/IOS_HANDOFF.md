@@ -700,3 +700,12 @@ VERIFIED LIVE:
 TESTS: vitest 427/427, tsc clean pre-deploy.
 GREEN LIGHT: cut the build — Apple's CDN can validate the AASA now.
 BLOCKED: no (review-detail phone number remains Dave's).
+
+## 2026-07-05T03:24:49Z — [ENGINE]
+STATUS: Dave-requested gameplay change shipped on main (e7b6ebb) + web deployed:
+auto-match difficulty now has HYSTERESIS — win still promotes immediately, but demotion
+requires 2 consecutive losses (single loss at a fresh level holds; streak resets on any
+level change incl. manual picks). Kills the level ping-pong at a player's skill boundary.
+New unit suite in webapp/src/utils/autoMatch.test.ts (vitest 434/434, tsc clean).
+Pull main before your next build so iOS picks it up. No server changes.
+BLOCKED: no
