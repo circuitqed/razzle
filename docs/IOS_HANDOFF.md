@@ -689,3 +689,46 @@ blocked on Dave's real phone number (Apple validates format AND requires the att
 NEXT: build after your web deploy so Apple's CDN can validate the AASA against a live
 domain when the app installs.
 BLOCKED: web container redeploy (yours); review-detail phone (Dave's).
+
+## 2026-07-04T23:23:10Z — [ENGINE]
+STATUS: Universal links MERGED + WEB DEPLOYED (main 02a7a63; webapp container rebuilt).
+VERIFIED LIVE:
+  - GET /.well-known/apple-app-site-association → 200, content-type application/json,
+    1h cache; appID 5J862PN572.com.lazybrains.knightball; /api/* and /auth/* exclusions
+    present (good call protecting the OAuth callback).
+  - Smart App Banner meta (app-id=6787309741) serving on /.
+TESTS: vitest 427/427, tsc clean pre-deploy.
+GREEN LIGHT: cut the build — Apple's CDN can validate the AASA now.
+BLOCKED: no (review-detail phone number remains Dave's).
+
+## 2026-07-05T03:24:49Z — [ENGINE]
+STATUS: Dave-requested gameplay change shipped on main (e7b6ebb) + web deployed:
+auto-match difficulty now has HYSTERESIS — win still promotes immediately, but demotion
+requires 2 consecutive losses (single loss at a fresh level holds; streak resets on any
+level change incl. manual picks). Kills the level ping-pong at a player's skill boundary.
+New unit suite in webapp/src/utils/autoMatch.test.ts (vitest 434/434, tsc clean).
+Pull main before your next build so iOS picks it up. No server changes.
+BLOCKED: no
+
+## 2026-07-05T23:35:47Z — [MINI]
+STATUS: AUTH MODEL CHANGE (Dave's call, resolves the Apple SIWA dead-end). Apple's
+"Sign Up Not Completed" is server-side on Apple's end — every configurable layer verified
+correct (entitlements in signed binary, capability reset, profiles, no pending agreement,
+Apple status green, no stale association). Rather than gate launch on an Apple support
+queue, v1 drops third-party login entirely: EMAIL/PASSWORD + MAGIC-LINK + ANONYMOUS,
+symmetric on web and iOS. No Google, no Apple → no guideline 4.8 → Apple's breakage is
+moot, and accounts are cross-platform by construction (email is the universal key).
+SERVER PATCH FOR REVIEW + DEPLOY (engine/server/main.py, syntax-checked):
+  - POST /auth/magic-link/request {email}: existence-safe (always 200), rate-limited
+    (≤5/hr/account via count_recent_tokens), reuses auth_tokens table + Resend. Emails
+    {FRONTEND_URL}/auth/magic?token=...
+  - POST /auth/magic-link/verify {token}: single-use (validate_auth_token), sets cookie,
+    returns token for X-Native-Client. Reuses existing token infra — no schema change.
+WEB CONTAINER REDEPLOY (AASA change): webapp/public/.well-known/apple-app-site-association
+now drops the /auth/* exclusion (OAuth is gone) so /auth/magic universal-links into the
+app. Verify after deploy: the file no longer lists /auth/*.
+CLIENT (done): social buttons removed both platforms; MagicCallbackPage at /auth/magic;
+"Email me a sign-in link" in login modal; suite magic-link checks. vitest 427/427, build green.
+NEXT: after your deploy — suite verify, then cut the v1 submission build. This unblocks
+submission independent of Apple.
+BLOCKED: magic-link verify + build on your deploy.

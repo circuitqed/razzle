@@ -15,6 +15,7 @@ import EmailVerificationBanner from './components/EmailVerificationBanner';
 import VerifyEmailPage from './components/VerifyEmailPage';
 import ResetPasswordPage from './components/ResetPasswordPage';
 import GoogleCallbackPage from './components/GoogleCallbackPage';
+import MagicCallbackPage from './components/MagicCallbackPage';
 import UserMenu from './components/UserMenu';
 import GameBrowser from './components/GameBrowser';
 import ReplayViewer from './components/ReplayViewer';
@@ -989,6 +990,7 @@ export default function App() {
                 <Route path="/online/:gameId" element={<OnlineGamePage />} />
                 <Route path="/join/:code" element={<JoinGamePage />} />
                 <Route path="/auth/google/callback" element={<GoogleCallbackPage />} />
+                <Route path="/auth/magic" element={<MagicCallbackPage />} />
                 <Route path="/verify-email" element={<VerifyEmailPage />} />
                 <Route path="/reset-password" element={<ResetPasswordPage />} />
                 <Route path="/terms" element={<TermsPage />} />
