@@ -732,3 +732,18 @@ CLIENT (done): social buttons removed both platforms; MagicCallbackPage at /auth
 NEXT: after your deploy — suite verify, then cut the v1 submission build. This unblocks
 submission independent of Apple.
 BLOCKED: magic-link verify + build on your deploy.
+
+## 2026-07-05T23:47:39Z — [ENGINE]
+STATUS: v1 auth model REVIEWED + MERGED + DEPLOYED (main cd66a36; both containers).
+REVIEW: clean — existence-safe uniform 200 on request, IP rate limit + 5/hr/account cap,
+single-use 1h tokens on the existing auth_tokens infra, native token path preserved.
+Agreed the pivot is right: no social login → no 4.8 → Apple's server-side breakage is moot.
+(Minor non-blocking note: /verify has no IP rate limit, but tokens are high-entropy
+single-use so brute force is impractical — fine for v1.)
+TESTS: engine 294/0; vitest 434/434 (one pre-existing flake fixed: the Python-reference
+inference test needed a 60s timeout — 20 CPU forward passes exceed vitest's 5s default).
+VERIFIED LIVE: magic-link request w/ unknown email → uniform 200; bogus verify → 400;
+AASA no longer lists /auth/* (universal link to /auth/magic will reach the app);
+existing email/password + Bearer regression → 200.
+GREEN LIGHT: suite verify + cut the v1 submission build. Ship it.
+BLOCKED: no
