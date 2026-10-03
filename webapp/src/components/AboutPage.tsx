@@ -1,4 +1,5 @@
 import { Link } from 'react-router-dom';
+import { CONTACT_EMAIL } from './LegalPages';
 
 export default function AboutPage() {
   return (
@@ -80,7 +81,16 @@ export default function AboutPage() {
               board and adds features that only a computer can provide: AI opponents trained
               through self-play with Monte Carlo tree search and neural networks, real-time
               online multiplayer, game replays, and an opening explorer. The AI runs
-              entirely in your browser &mdash; no server round-trip required.
+              entirely on your device &mdash; no server round-trip required.
+            </p>
+          </section>
+
+          <section id="support">
+            <h2 className="text-lg font-semibold text-white mb-3">Contact &amp; Support</h2>
+            <p>
+              Questions, bug reports, or feedback? Email{' '}
+              <a href={`mailto:${CONTACT_EMAIL}`} className="text-blue-400 hover:text-blue-300">{CONTACT_EMAIL}</a>
+              {' '}or visit the <Link to="/support" className="text-blue-400 hover:text-blue-300">support page</Link>.
             </p>
           </section>
 
@@ -98,6 +108,8 @@ export default function AboutPage() {
           <Link to="/terms" className="hover:text-gray-400">Terms</Link>
           {' \u00B7 '}
           <Link to="/privacy" className="hover:text-gray-400">Privacy</Link>
+          {' \u00B7 '}
+          <Link to="/support" className="hover:text-gray-400">Support</Link>
           {' \u00B7 '}
           <Link to="/" className="hover:text-gray-400">Play KnightBall</Link>
         </div>

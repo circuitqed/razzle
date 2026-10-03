@@ -1,4 +1,5 @@
 import { useEffect } from 'react';
+import { Link } from 'react-router-dom';
 import Board from './Board';
 import { useOpeningExplorer } from '../hooks/useOpeningExplorer';
 import type { BookMove, Turn } from '../hooks/useOpeningExplorer';
@@ -166,9 +167,9 @@ export default function OpeningExplorer() {
     <div className="min-h-[100dvh] bg-gray-900 text-white flex flex-col">
       {/* Header */}
       <header className="flex items-center justify-between px-4 py-2 shrink-0">
-        <a href="/" className="text-gray-400 hover:text-white transition-colors text-sm">
+        <Link to="/" className="py-2 text-gray-400 hover:text-white transition-colors text-sm">
           &larr; Back
-        </a>
+        </Link>
         <h1 className="text-xl sm:text-2xl font-bold">Opening Explorer</h1>
         <div className="w-16" />
       </header>

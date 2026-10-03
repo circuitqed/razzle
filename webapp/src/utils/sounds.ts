@@ -2,18 +2,27 @@
 // No external audio files needed - generates sounds programmatically
 
 let audioContext: AudioContext | null = null;
-// Load preference from localStorage, default to OFF
+// Load preference from localStorage. Default: ON in the native app (players
+// expect game sounds there, and the ambient session below respects the silent
+// switch), OFF on the web.
+const isNative = globalThis.location?.protocol === 'capacitor:';
 let soundEnabled = (() => {
   try {
     const stored = localStorage.getItem('knightball_sound');
-    return stored === 'true';
+    return stored === null ? isNative : stored === 'true';
   } catch {
-    return false;
+    return isNative;
   }
 })();
 
 function getAudioContext(): AudioContext {
   if (!audioContext) {
+    // Ambient: obey the ringer/silent switch and mix with the player's music
+    // instead of pausing it (WebKit 16.4+; ignored elsewhere).
+    const session = (navigator as unknown as { audioSession?: { type: string } }).audioSession;
+    if (session) {
+      try { session.type = 'ambient'; } catch { /* unsupported */ }
+    }
     audioContext = new (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)();
   }
   return audioContext;

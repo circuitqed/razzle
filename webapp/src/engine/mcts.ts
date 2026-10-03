@@ -30,6 +30,8 @@ export interface MCTSConfig {
   batchSize: number;
   /** Virtual loss applied during batched selection to encourage exploration diversity. */
   virtualLoss: number;
+  /** Wall-clock budget for the simulation loop in ms (0 = unlimited). Keeps high levels responsive on slow devices. */
+  maxTimeMs: number;
 }
 
 export const DEFAULT_CONFIG: MCTSConfig = {
@@ -42,6 +44,7 @@ export const DEFAULT_CONFIG: MCTSConfig = {
   checkEarlyStopInterval: 50,
   passQuiescence: true,
   passQuiescenceMaxDepth: 10,
+  maxTimeMs: 0,
   batchSize: 0,
   virtualLoss: 3,
 };
@@ -218,8 +221,11 @@ export async function search(
   const progressInterval = 50;
   const batchSize = cfg.batchSize > 0 ? cfg.batchSize : autoBatchSize(cfg.numSimulations);
 
+  const deadline = cfg.maxTimeMs > 0 ? performance.now() + cfg.maxTimeMs : Infinity;
+
   while (simsDone < cfg.numSimulations) {
     if (abortSignal?.aborted) break;
+    if (simsDone > 0 && performance.now() > deadline) break;
 
     const currentBatch = Math.min(batchSize, cfg.numSimulations - simsDone);
 

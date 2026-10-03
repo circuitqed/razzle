@@ -1,3 +1,5 @@
+import { Link } from 'react-router-dom';
+
 interface RulesModalProps {
   isOpen: boolean;
   onClose: () => void;
@@ -104,7 +106,7 @@ export default function RulesModal({ isOpen, onClose, onStartTutorial }: RulesMo
 
         <p className="mt-6 text-xs text-gray-500 text-center">
           KnightBall is based on Razzle Dazzle (also known as Knight Moves) by Don Green.{' '}
-          <a href="/about" className="text-blue-400 hover:text-blue-300 underline">Learn more</a>
+          <Link to="/about" onClick={onClose} className="text-blue-400 hover:text-blue-300 underline">Learn more</Link>
         </p>
 
         {onStartTutorial && (

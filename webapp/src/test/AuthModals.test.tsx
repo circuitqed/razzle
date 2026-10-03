@@ -26,10 +26,6 @@ vi.mock('../contexts/AuthContext', () => ({
   useAuth: () => mockAuth,
 }));
 
-vi.mock('../components/GoogleSignInButton', () => ({
-  default: () => null,
-}));
-
 describe('auth modals close on out-of-band sign-in', () => {
   it('LoginModal calls onClose when authenticated while open', () => {
     const onClose = vi.fn();

@@ -1,7 +1,6 @@
 import { Component, Suspense, lazy, useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import type { ReactNode, ErrorInfo } from 'react';
-import { BrowserRouter, Routes, Route, useParams, useNavigate, useLocation } from 'react-router-dom';
-import { GoogleOAuthProvider } from '@react-oauth/google';
+import { BrowserRouter, Routes, Route, Link, useParams, useNavigate, useLocation } from 'react-router-dom';
 import { App as CapacitorApp } from '@capacitor/app';
 import { isNativeApp } from './api/base';
 import BugReportDialog from './components/BugReportDialog';
@@ -14,7 +13,6 @@ import UsernamePickerModal from './components/UsernamePickerModal';
 import EmailVerificationBanner from './components/EmailVerificationBanner';
 import VerifyEmailPage from './components/VerifyEmailPage';
 import ResetPasswordPage from './components/ResetPasswordPage';
-import GoogleCallbackPage from './components/GoogleCallbackPage';
 import MagicCallbackPage from './components/MagicCallbackPage';
 import UserMenu from './components/UserMenu';
 import GameBrowser from './components/GameBrowser';
@@ -22,7 +20,7 @@ import ReplayViewer from './components/ReplayViewer';
 import OpeningExplorer from './components/OpeningExplorer';
 import WaitingForOpponent from './components/WaitingForOpponent';
 import OnlineGame from './components/OnlineGame';
-import { TermsPage, PrivacyPage } from './components/LegalPages';
+import { TermsPage, PrivacyPage, SupportPage } from './components/LegalPages';
 import AboutPage from './components/AboutPage';
 import NewGameDialog from './components/NewGameDialog';
 import type { NewGameSettings } from './components/NewGameDialog';
@@ -33,14 +31,13 @@ import { adjustAfterGame, getAutoMatchLevel, getLevelLabel, getTierSettings } fr
 import { listModels, type ModelInfo } from './api/engine';
 import * as onlineApi from './api/online';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
+import { useOnlineStatus } from './hooks/useOnlineStatus';
 import LandingPage from './components/LandingPage';
 import Tutorial from './components/Tutorial';
 
 // Lazy-loaded heavy routes
 const TrainingDashboard = lazy(() => import('./components/TrainingDashboard'));
 const AnalysisBoard = lazy(() => import('./components/AnalysisBoard'));
-
-const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID || '';
 
 /**
  * Universal links (https://knightball.org/...) arriving in the native app —
@@ -142,6 +139,7 @@ function AppContent() {
   const navigate = useNavigate();
   const location = useLocation();
   const { user } = useAuth();
+  const online = useOnlineStatus();
 
   // If arriving from an online game, don't resume saved AI game
   const fromOnline = (location.state as { fromOnline?: boolean })?.fromOnline === true;
@@ -166,6 +164,7 @@ function AppContent() {
     lastTurnAnimMoves,
     rawMoves,
     evaluation,
+    aiProgress,
     viewPly,
     isViewingHistory,
     startNewGame,
@@ -232,10 +231,14 @@ function AppContent() {
 
   // Adjust auto-match level when an AI game finishes
   const prevGameStatusRef = useRef<string | null>(null);
+  // Games whose result already moved the level — undoing a finished game and
+  // replaying the ending must not count again.
+  const levelAdjustedGamesRef = useRef(new Set<string>());
   useEffect(() => {
     if (!gameState) return;
     const wasPlaying = prevGameStatusRef.current === 'playing';
     prevGameStatusRef.current = gameState.status;
+    if (levelAdjustedGamesRef.current.has(gameState.game_id)) return;
 
     if (
       wasPlaying &&
@@ -244,6 +247,7 @@ function AppContent() {
       settings.mode === 'ai' &&
       settings.difficulty === 'auto'
     ) {
+      levelAdjustedGamesRef.current.add(gameState.game_id);
       const won = gameState.winner === playerColor;
       const oldLevel = getAutoMatchLevel();
       const newLevel = adjustAfterGame(won);
@@ -257,6 +261,14 @@ function AppContent() {
       }
     }
   }, [gameState?.status, gameState?.winner, settings.mode, settings.difficulty, playerColor]);
+
+  // Resign needs a second tap within a few seconds
+  const [confirmResign, setConfirmResign] = useState(false);
+  useEffect(() => {
+    if (!confirmResign) return;
+    const timer = setTimeout(() => setConfirmResign(false), 3000);
+    return () => clearTimeout(timer);
+  }, [confirmResign]);
 
   // Auto-dismiss level toast
   useEffect(() => {
@@ -396,74 +408,78 @@ function AppContent() {
     return { text, colorClass, isThinking: aiThinking };
   }, [gameState, settings.mode, playerColor, opponentName, aiThinking]);
 
-  // Keyboard shortcuts
+  // Keyboard shortcuts. The handler is re-created every render and read via a
+  // ref, so it always sees the current endTurn/undo (a stale endTurn would
+  // commit only part of a pass chain).
+  const keyHandlerRef = useRef<(e: KeyboardEvent) => void>(() => {});
+  keyHandlerRef.current = (e: KeyboardEvent) => {
+    if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+
+    if (showNewGameDialog || showRules) {
+      if (e.key === 'Escape') {
+        setShowNewGameDialog(false);
+        setShowRules(false);
+      }
+      return;
+    }
+
+    switch (e.key.toLowerCase()) {
+      case 'n':
+        handleNewGameClick();
+        break;
+      case 'u':
+        if (gameState && gameState.ply > 0 && !isLoading && !aiThinking) undoMove();
+        break;
+      case 'e':
+        if (canEndTurn && !isLoading && !aiThinking) endTurn();
+        break;
+      case 'm':
+        toggleSound();
+        break;
+      case 'f':
+        setFlipBoard(f => !f);
+        break;
+      case 'arrowleft':
+        e.preventDefault();
+        goBack();
+        break;
+      case 'arrowright':
+        e.preventDefault();
+        goForward();
+        break;
+      case 'home':
+        e.preventDefault();
+        goToStart();
+        break;
+      case 'end':
+        e.preventDefault();
+        goToEnd();
+        break;
+      case 'escape':
+        setShowGameBrowser(false);
+        setReplayGameId(null);
+        setShowAnalysisBoard(false);
+        setShowTrainingDashboard(false);
+        if (isViewingHistory) goToEnd();
+        break;
+      case '?':
+      case '/':
+        setShowRules(true);
+        break;
+      case 'b':
+        setShowGameBrowser(prev => !prev);
+        break;
+      case 't':
+        // Developer training dashboard — not exposed in the App Store build.
+        if (!isNativeApp) setShowTrainingDashboard(prev => !prev);
+        break;
+    }
+  };
   useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
-
-      if (showNewGameDialog || showRules) {
-        if (e.key === 'Escape') {
-          setShowNewGameDialog(false);
-          setShowRules(false);
-        }
-        return;
-      }
-
-      switch (e.key.toLowerCase()) {
-        case 'n':
-          handleNewGameClick();
-          break;
-        case 'u':
-          if (gameState && gameState.ply > 0 && !isLoading && !aiThinking) undoMove();
-          break;
-        case 'e':
-          if (canEndTurn && !isLoading && !aiThinking) endTurn();
-          break;
-        case 'm':
-          toggleSound();
-          break;
-        case 'f':
-          setFlipBoard(f => !f);
-          break;
-        case 'arrowleft':
-          e.preventDefault();
-          goBack();
-          break;
-        case 'arrowright':
-          e.preventDefault();
-          goForward();
-          break;
-        case 'home':
-          e.preventDefault();
-          goToStart();
-          break;
-        case 'end':
-          e.preventDefault();
-          goToEnd();
-          break;
-        case 'escape':
-          setShowGameBrowser(false);
-          setReplayGameId(null);
-          setShowAnalysisBoard(false);
-          setShowTrainingDashboard(false);
-          if (isViewingHistory) goToEnd();
-          break;
-        case '?':
-        case '/':
-          setShowRules(true);
-          break;
-        case 'b':
-          setShowGameBrowser(prev => !prev);
-          break;
-        case 't':
-          setShowTrainingDashboard(prev => !prev);
-          break;
-      }
-    };
-
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [gameState, isLoading, aiThinking, canEndTurn, showNewGameDialog, showRules, isViewingHistory]);
+    const onKeyDown = (e: KeyboardEvent) => keyHandlerRef.current(e);
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, []);
 
   // Tab title: show "(Your Turn)" when it's the human's turn in AI mode
   useEffect(() => {
@@ -535,23 +551,68 @@ function AppContent() {
     }
   }, [gameState, startNewGame, fetchModels]);
 
-  // WebSocket for waiting game
+  // WebSocket for waiting game. Survives the phone sleeping: the socket is
+  // reopened when it drops, and on resume we ask the server directly whether
+  // the opponent joined while we weren't listening.
   useEffect(() => {
     if (!waitingGame) return;
+    const gameId = waitingGame.gameId;
     let ws: WebSocket | null = null;
     let cancelled = false;
-    onlineApi.connectOnlineGameWebSocket(waitingGame.gameId, {
-      onPlayerJoined: () => {
-        setWaitingGame(null);
-        navigate(`/online/${waitingGame.gameId}`);
-      },
-      onError: (error) => console.error('WebSocket error:', error),
-      onClose: () => {},
-    }).then((socket) => {
-      if (cancelled) { socket.close(); return; }
-      ws = socket;
-    }).catch((error) => console.error('WebSocket connect failed:', error));
-    return () => { cancelled = true; ws?.close(); };
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const joined = () => {
+      if (cancelled) return;
+      cancelled = true;
+      setWaitingGame(null);
+      navigate(`/online/${gameId}`);
+    };
+
+    const connect = () => {
+      if (cancelled) return;
+      onlineApi.connectOnlineGameWebSocket(gameId, {
+        onPlayerJoined: joined,
+        onError: (error) => console.error('WebSocket error:', error),
+        onClose: () => {
+          ws = null;
+          if (!cancelled) retryTimer = setTimeout(connect, 3000);
+        },
+      }).then((socket) => {
+        if (cancelled) { socket.close(); return; }
+        ws = socket;
+      }).catch((error) => {
+        console.error('WebSocket connect failed:', error);
+        if (!cancelled) retryTimer = setTimeout(connect, 5000);
+      });
+    };
+
+    const checkStatus = () => {
+      if (cancelled) return;
+      onlineApi.getOnlineGameStatus(gameId)
+        .then((status) => { if (status.status === 'playing') joined(); })
+        .catch(() => { /* offline — the socket retry will catch up */ });
+      if (!ws || ws.readyState === WebSocket.CLOSED) {
+        if (retryTimer) clearTimeout(retryTimer);
+        connect();
+      }
+    };
+
+    const onVisible = () => { if (document.visibilityState === 'visible') checkStatus(); };
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('online', checkStatus);
+    const appSub = isNativeApp
+      ? CapacitorApp.addListener('appStateChange', ({ isActive }) => { if (isActive) checkStatus(); })
+      : null;
+
+    connect();
+    return () => {
+      cancelled = true;
+      if (retryTimer) clearTimeout(retryTimer);
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('online', checkStatus);
+      appSub?.then((h) => h.remove());
+      ws?.close();
+    };
   }, [waitingGame, navigate]);
 
   // Show landing page for first-time visitors
@@ -570,26 +631,37 @@ function AppContent() {
       <EmailVerificationBanner />
 
       {/* Header bar */}
-      <header className="flex items-center justify-end px-4 py-2 shrink-0">
-        <div className="flex items-center gap-2">
+      <header className="flex items-center justify-end px-2 sm:px-4 py-1 shrink-0">
+        <div className="flex items-center gap-1">
+          {!online && (
+            <span
+              className="mr-1 px-2 py-0.5 rounded-full bg-gray-800 text-xs text-yellow-400"
+              title="No internet connection — AI and Local 2P games still work"
+            >
+              Offline
+            </span>
+          )}
           <button
             onClick={() => setShowGameBrowser(true)}
-            className="p-1.5 text-gray-400 hover:text-white transition-colors"
+            className="w-11 h-11 flex items-center justify-center text-xl text-gray-400 hover:text-white transition-colors"
             title="Game history (B)"
+            aria-label="Game history"
           >
 {'\u{1F4CB}'}
           </button>
           <button
             onClick={() => setShowBugReport(true)}
-            className="p-1.5 text-gray-400 hover:text-white transition-colors"
+            className="w-11 h-11 flex items-center justify-center text-xl text-gray-400 hover:text-white transition-colors"
             title="Report a bug"
+            aria-label="Report a bug"
           >
 {'\u{1F41B}'}
           </button>
           <button
             onClick={() => setShowTutorial(true)}
-            className="p-1.5 text-gray-400 hover:text-white transition-colors"
+            className="w-11 h-11 flex items-center justify-center text-xl text-gray-400 hover:text-white transition-colors"
             title="How to Play"
+            aria-label="How to play"
           >
 {'\u{1F393}'}
           </button>
@@ -634,13 +706,25 @@ function AppContent() {
               {gameState?.status === 'finished' && winnerDisplay && (
                 <span className={`text-xl font-bold ${winnerDisplay.colorClass}`}>{winnerDisplay.text}</span>
               )}
+              {gameState?.status === 'finished' && !user && settings.mode === 'ai' && (
+                <button
+                  onClick={() => setShowRegisterModal(true)}
+                  className="text-xs text-blue-400 underline underline-offset-2"
+                >
+                  Save your progress
+                </button>
+              )}
               {turnIndicator && gameState?.status === 'playing' && (
                 <>
                   <span className={`inline-block px-3 py-0.5 rounded text-white text-sm font-medium ${turnIndicator.colorClass}`}>
                     {turnIndicator.text}
                   </span>
                   {turnIndicator.isThinking && (
-                    <span className="text-blue-400 text-sm animate-pulse">thinking...</span>
+                    <span className="text-blue-400 text-sm animate-pulse">
+                      thinking{aiProgress && aiProgress.totalSims > 0
+                        ? ` ${Math.min(99, Math.round((100 * aiProgress.simsDone) / aiProgress.totalSims))}%`
+                        : '...'}
+                    </span>
                   )}
                   {aiModelLoading && !turnIndicator.isThinking && (
                     <span className="text-yellow-400 text-xs animate-pulse">loading model...</span>
@@ -654,10 +738,29 @@ function AppContent() {
           }
           extraActions={
             <>
-              {/* New Game */}
-              {gameState && (
+              {/* Game over: one-tap rematch (same settings) or change settings. Review = the history arrows above. */}
+              {gameState?.status === 'finished' && (
+                <>
+                  <button
+                    onClick={handleQuickNewGame}
+                    disabled={isLoading}
+                    className="px-3 py-2 sm:px-4 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 rounded font-medium transition-colors text-sm sm:text-base"
+                  >
+                    {settings.mode === 'ai' ? 'Rematch' : 'Play Again'}
+                  </button>
+                  <button
+                    onClick={handleNewGameClick}
+                    className="px-3 py-2 sm:px-4 bg-gray-600 hover:bg-gray-700 rounded font-medium transition-colors text-sm sm:text-base"
+                  >
+                    {settings.mode === 'ai' ? 'Change Level' : 'New Game'}
+                  </button>
+                </>
+              )}
+
+              {/* New Game (mid-game opens the dialog, which doubles as confirmation) */}
+              {gameState && gameState.status !== 'finished' && (
                 <button
-                  onClick={gameState.status === 'finished' ? handleQuickNewGame : handleNewGameClick}
+                  onClick={handleNewGameClick}
                   disabled={isLoading}
                   className="px-3 py-2 sm:px-4 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 rounded font-medium transition-colors text-sm sm:text-base"
                 >
@@ -665,19 +768,24 @@ function AppContent() {
                 </button>
               )}
 
-              {/* Resign - only during active game, no confirmation needed vs AI */}
+              {/* Resign - only during active game; second tap confirms (it sits next to Undo) */}
               {gameState && gameState.ply > 0 && gameState.status === 'playing' && !isPassing && !isViewingHistory && (
                 <button
-                  onClick={() => resign()}
+                  onClick={() => {
+                    if (confirmResign) { setConfirmResign(false); resign(); }
+                    else setConfirmResign(true);
+                  }}
                   disabled={isLoading}
-                  className="px-3 py-2 sm:px-4 bg-gray-600 hover:bg-red-700 text-gray-300 hover:text-white disabled:bg-gray-600 rounded font-medium transition-colors text-sm sm:text-base"
+                  className={`px-3 py-2 sm:px-4 rounded font-medium transition-colors text-sm sm:text-base disabled:bg-gray-600 ${
+                    confirmResign ? 'bg-red-700 text-white' : 'bg-gray-600 hover:bg-red-700 text-gray-300 hover:text-white'
+                  }`}
                 >
-                  Resign
+                  {confirmResign ? 'Confirm?' : 'Resign'}
                 </button>
               )}
 
               {/* Undo - not during pass */}
-              {gameState && settings.mode === 'ai' && !isPassing && !isViewingHistory && (
+              {gameState && settings.mode === 'ai' && gameState.status !== 'finished' && !isPassing && !isViewingHistory && (
                 <button
                   onClick={undoMove}
                   disabled={isLoading || aiThinking || gameState.ply === 0}
@@ -692,6 +800,7 @@ function AppContent() {
                 onClick={toggleSound}
                 className="px-3 py-2 bg-gray-600 hover:bg-gray-700 rounded font-medium transition-colors text-sm"
                 title={soundOn ? 'Mute (M)' : 'Unmute (M)'}
+                aria-label={soundOn ? 'Mute sound' : 'Turn sound on'}
               >
                 {soundOn ? '\u{1F50A}' : '\u{1F507}'}
               </button>
@@ -701,6 +810,7 @@ function AppContent() {
                 onClick={() => setFlipBoard(f => !f)}
                 className="px-3 py-2 bg-gray-600 hover:bg-gray-700 rounded font-medium transition-colors text-sm"
                 title="Flip board (F)"
+                aria-label="Flip board"
               >
                 {'\u{21C5}'}
               </button>
@@ -710,6 +820,7 @@ function AppContent() {
                 onClick={() => setShowRules(true)}
                 className="px-3 py-2 bg-gray-600 hover:bg-gray-700 rounded font-medium transition-colors text-sm"
                 title="Rules (?)"
+                aria-label="Rules"
               >
                 ?
               </button>
@@ -725,12 +836,14 @@ function AppContent() {
             Keys: N=New Game, U=Undo, E=End Turn, F=Flip, M=Mute, ?=Rules, {'\u{2190}\u{2192}'}=History
           </p>
         </div>
-        <div className="mt-2 text-xs text-gray-700">
-          <a href="/about" className="hover:text-gray-500">About</a>
+        <div className="mt-2 text-xs text-gray-500">
+          <Link to="/about" className="inline-block py-2 hover:text-gray-300">About</Link>
           {' \u00B7 '}
-          <a href="/terms" className="hover:text-gray-500">Terms</a>
+          <Link to="/terms" className="inline-block py-2 hover:text-gray-300">Terms</Link>
           {' \u00B7 '}
-          <a href="/privacy" className="hover:text-gray-500">Privacy</a>
+          <Link to="/privacy" className="inline-block py-2 hover:text-gray-300">Privacy</Link>
+          {' \u00B7 '}
+          <Link to="/support" className="inline-block py-2 hover:text-gray-300">Support</Link>
         </div>
       </main>
 
@@ -834,7 +947,7 @@ function AppContent() {
 
       {/* Auto-match level toast */}
       {levelToast && (
-        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50">
+        <div className="safe-bottom-toast fixed bottom-6 left-1/2 -translate-x-1/2 z-50">
           <div className="px-4 py-2 bg-gray-800 border border-gray-600 rounded-lg shadow-lg text-sm text-white whitespace-nowrap">
             {levelToast}
           </div>
@@ -978,30 +1091,28 @@ function AppContentWrapper() {
 export default function App() {
   return (
     <ErrorBoundary>
-      <GoogleOAuthProvider clientId={GOOGLE_CLIENT_ID}>
-        <BrowserRouter>
-          <AuthProvider>
-            <NativeLinkHandler />
-            <Suspense fallback={<div className="min-h-screen bg-gray-900 flex items-center justify-center text-gray-400">Loading...</div>}>
-              <Routes>
-                <Route path="/" element={<AppContentWrapper />} />
-                <Route path="/openings" element={<OpeningExplorer />} />
-                <Route path="/dashboard" element={<TrainingDashboardPage />} />
-                <Route path="/online/:gameId" element={<OnlineGamePage />} />
-                <Route path="/join/:code" element={<JoinGamePage />} />
-                <Route path="/auth/google/callback" element={<GoogleCallbackPage />} />
-                <Route path="/auth/magic" element={<MagicCallbackPage />} />
-                <Route path="/verify-email" element={<VerifyEmailPage />} />
-                <Route path="/reset-password" element={<ResetPasswordPage />} />
-                <Route path="/terms" element={<TermsPage />} />
-                <Route path="/privacy" element={<PrivacyPage />} />
-                <Route path="/about" element={<AboutPage />} />
-                <Route path="*" element={<NotFoundPage />} />
-              </Routes>
-            </Suspense>
-          </AuthProvider>
-        </BrowserRouter>
-      </GoogleOAuthProvider>
+      <BrowserRouter>
+        <AuthProvider>
+          <NativeLinkHandler />
+          <Suspense fallback={<div className="min-h-screen bg-gray-900 flex items-center justify-center text-gray-400">Loading...</div>}>
+            <Routes>
+              <Route path="/" element={<AppContentWrapper />} />
+              <Route path="/openings" element={<OpeningExplorer />} />
+              {!isNativeApp && <Route path="/dashboard" element={<TrainingDashboardPage />} />}
+              <Route path="/online/:gameId" element={<OnlineGamePage />} />
+              <Route path="/join/:code" element={<JoinGamePage />} />
+              <Route path="/auth/magic" element={<MagicCallbackPage />} />
+              <Route path="/verify-email" element={<VerifyEmailPage />} />
+              <Route path="/reset-password" element={<ResetPasswordPage />} />
+              <Route path="/terms" element={<TermsPage />} />
+              <Route path="/privacy" element={<PrivacyPage />} />
+              <Route path="/about" element={<AboutPage />} />
+              <Route path="/support" element={<SupportPage />} />
+              <Route path="*" element={<NotFoundPage />} />
+            </Routes>
+          </Suspense>
+        </AuthProvider>
+      </BrowserRouter>
     </ErrorBoundary>
   );
 }

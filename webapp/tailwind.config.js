@@ -5,6 +5,11 @@ export default {
     "./src/**/*.{js,ts,jsx,tsx}",
   ],
   darkMode: 'class',
+  // Apply hover: styles only on devices that really hover — on iOS a tapped
+  // button otherwise stays stuck in its hover color.
+  future: {
+    hoverOnlyWhenSupported: true,
+  },
   theme: {
     extend: {
       colors: {

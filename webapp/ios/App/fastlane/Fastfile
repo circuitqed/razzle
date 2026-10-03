@@ -198,8 +198,8 @@ end
 
   desc "Build the web assets, sync Capacitor, and produce a signed App Store .ipa"
   lane :archive do
-    # Web build + Capacitor sync (webapp/ is two levels up from ios/App)
-    sh("cd ../../.. && npm run build && npx cap sync ios")
+    # Web build (+ bundled offline AI models) + Capacitor sync (webapp/ is two levels up from ios/App)
+    sh("cd ../../.. && npm run build:ios && npx cap sync ios")
 
     build_number = ENV["BUILD_NUMBER"] || sh("git rev-list --count HEAD").strip
     UI.message("Using CURRENT_PROJECT_VERSION=#{build_number}")

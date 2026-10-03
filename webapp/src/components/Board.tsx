@@ -5,6 +5,7 @@ import {
   BOARD_ROWS,
   hasPiece,
   decodeMove,
+  squareToAlgebraic,
 } from '../types';
 import Piece from './Piece';
 
@@ -91,9 +92,12 @@ export default function Board({
   // Track SVG position of the last drag-drop so the animation starts from there
   const lastDragDropRef = useRef<{ from: number; to: number; x: number; y: number } | null>(null);
 
-  // Suppress click events immediately after a drag-drop completes
-  // (pointerup fires before click, so drag can complete and then click fires on the original square)
-  const dragJustCompletedRef = useRef(false);
+  // Suppress the click that may follow a drag-drop (pointerup fires before
+  // click, so a drag can complete and then click fires on the original square).
+  // Time-boxed rather than cleared by the next click: iOS WebKit often fires no
+  // click after a touch-drag, and a sticky flag would swallow the next real tap.
+  const dragCompletedAtRef = useRef(0);
+  const CLICK_SUPPRESS_MS = 350;
 
   // Convert client coordinates to SVG coordinates (accounts for viewBox offset and scale)
   const clientToSvg = (clientX: number, clientY: number): { x: number; y: number } | null => {
@@ -168,7 +172,7 @@ export default function Board({
     if (draggingSquare === null) return;
 
     // Mark that a drag just completed to suppress the subsequent click event
-    dragJustCompletedRef.current = true;
+    dragCompletedAtRef.current = performance.now();
 
     if (onDragMove) {
       const svgPos = clientToSvg(e.clientX, e.clientY);
@@ -196,6 +200,16 @@ export default function Board({
       }
     }
 
+    setDraggingSquare(null);
+    setDragPosition(null);
+  };
+
+  // Pointer cancelled (e.g. an iOS system gesture mid-drag): abandon the drag
+  // without committing a move, so the ghost disappears and the piece reappears.
+  const handlePointerCancel = () => {
+    setPendingDragSquare(null);
+    dragStartRef.current = null;
+    if (draggingSquare !== null) dragCompletedAtRef.current = performance.now();
     setDraggingSquare(null);
     setDragPosition(null);
   };
@@ -443,10 +457,15 @@ export default function Board({
     return (
       <g
         key={square}
+        role="button"
+        aria-label={`${squareToAlgebraic(square)}${
+          hasP1Piece ? (hasP1Ball ? ', blue piece with ball' : ', blue piece')
+          : hasP2Piece ? (hasP2Ball ? ', red piece with ball' : ', red piece')
+          : ''}${isLegalDest ? ', legal move' : ''}`}
         onClick={() => {
-          // Suppress click events that fire immediately after a drag completes
-          if (dragJustCompletedRef.current) {
-            dragJustCompletedRef.current = false;
+          // Suppress the click that fires immediately after a drag completes
+          if (performance.now() - dragCompletedAtRef.current < CLICK_SUPPRESS_MS) {
+            dragCompletedAtRef.current = 0;
             return;
           }
           onSquareClick(square);
@@ -521,6 +540,7 @@ export default function Board({
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
         onPointerLeave={handlePointerUp}
+        onPointerCancel={handlePointerCancel}
         style={{ touchAction: 'none' }}
       >
         {squares}

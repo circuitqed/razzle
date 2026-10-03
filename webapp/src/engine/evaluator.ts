@@ -175,6 +175,9 @@ export class WebGLEvaluator implements Evaluator {
  * GPU-resident evaluator — keeps activations on GPU, only reads back final output.
  * Verified accurate to 3e-5 against CPU on 200 positions.
  */
+/** Search error sent by the worker when the GPU context is gone and the worker must be rebuilt. */
+export const GL_CONTEXT_LOST = 'GL_CONTEXT_LOST';
+
 export class GPUEvaluator implements Evaluator {
   private model: GPUForwardPass;
   private tensorBuf: Float32Array;
@@ -184,6 +187,10 @@ export class GPUEvaluator implements Evaluator {
     this.model = model;
     this.tensorBuf = new Float32Array(7 * 8 * 7);
     this.policyBuf = new Float32Array(NUM_ACTIONS);
+  }
+
+  isContextLost(): boolean {
+    return this.model.isContextLost();
   }
 
   async evaluate(

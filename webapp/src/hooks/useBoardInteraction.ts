@@ -139,6 +139,14 @@ export function useBoardInteraction(
     prevLoadingRef.current = isLoading;
   }, [isLoading, pendingMoves.length]);
 
+  // Also clear when the committed position itself changes (new game, undo,
+  // resume, or a commit that resolved without a visible isLoading transition —
+  // on-device games commit almost instantly and React may batch the toggle).
+  useEffect(() => {
+    setPendingMoves([]);
+    setLocalEngine(null);
+  }, [gameState?.game_id, gameState?.ply]);
+
   // --- Effective state (local override or committed) ---
 
   const localLegalMoves = useMemo(() => {

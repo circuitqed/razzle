@@ -40,3 +40,46 @@ body.native-app {
 body.native-app .h-\[100dvh\] {
   height: calc(100dvh - env(safe-area-inset-top) - env(safe-area-inset-bottom));
 }
+
+/* Fixed overlays (modals, dialogs, tutorial) ignore body padding, so on notch /
+   Dynamic Island phones their content could sit under the status bar or home
+   indicator. Inset them by the safe area and keep panels within the visible
+   height (panels with max-h-[90vh] would otherwise overflow it). */
+body.native-app .fixed.inset-0 {
+  padding-top: calc(env(safe-area-inset-top) + 0.75rem);
+  padding-bottom: calc(env(safe-area-inset-bottom) + 0.75rem);
+  padding-left: calc(env(safe-area-inset-left) + 0.75rem);
+  padding-right: calc(env(safe-area-inset-right) + 0.75rem);
+}
+body.native-app .fixed.inset-0 > * {
+  max-height: 100%;
+}
+
+/* Bottom toasts sit above the home indicator. */
+body.native-app .safe-bottom-toast {
+  bottom: calc(env(safe-area-inset-bottom) + 1.5rem);
+}
+
+/* Touch screens: pressed feedback in place of hover. */
+@media (hover: none) {
+  button:not(:disabled):active,
+  a:active {
+    filter: brightness(0.8);
+  }
+}
+
+/* Native app feel: no text-selection / long-press callout / tap flash outside
+   form fields, and no double-tap zoom (two quick taps on the board would zoom). */
+body.native-app {
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}
+body.native-app input,
+body.native-app textarea,
+body.native-app [contenteditable="true"] {
+  -webkit-user-select: text;
+  user-select: text;
+}

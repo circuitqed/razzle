@@ -27,9 +27,9 @@ SIMLOG="$OUT_DIR/simulator-stream.log"
 
 step() { echo "==> $*"; }
 
-step "Building web assets"
+step "Building web assets (with bundled models + test pages)"
 cd "$WEBAPP_DIR"
-npm run build >/dev/null
+KB_TEST_PAGES=1 npm run build:ios >/dev/null
 
 # Bundle the fixtures' reference model (fixtures.model) when the server still
 # has it, so the inference group gets Python-reference depth without network.

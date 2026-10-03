@@ -118,6 +118,29 @@ export function installNativeIdentity(): void {
   };
 }
 
+export const OFFLINE_MESSAGE = 'No internet connection — check your connection and try again.';
+
+/**
+ * Patch global fetch so a network failure talking to the backend surfaces as a
+ * readable message instead of the browser's "Failed to fetch" / "Load failed",
+ * which the UI shows verbatim. Still a TypeError, so callers that distinguish
+ * network errors from HTTP errors keep working. Call once at startup.
+ */
+export function installFriendlyNetworkErrors(): void {
+  const origFetch = globalThis.fetch.bind(globalThis);
+  globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+    try {
+      return await origFetch(input, init);
+    } catch (err) {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      const isBackend = url.startsWith(API_BASE) || url.startsWith(`${BACKEND_ORIGIN}/api`);
+      const aborted = err instanceof DOMException && err.name === 'AbortError';
+      if (isBackend && !aborted && err instanceof TypeError) throw new TypeError(OFFLINE_MESSAGE);
+      throw err;
+    }
+  };
+}
+
 /**
  * WebSocket URL for a game (local or online).
  *

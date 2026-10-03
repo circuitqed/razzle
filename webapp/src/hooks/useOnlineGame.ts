@@ -18,6 +18,8 @@ import {
   playSelectSound,
 } from '../utils/sounds';
 import { useBoardInteraction } from './useBoardInteraction';
+import { App as CapacitorApp } from '@capacitor/app';
+import { isNativeApp } from '../api/base';
 
 const END_TURN_MOVE = -1;
 const PING_INTERVAL = 30000; // 30 seconds
@@ -117,6 +119,9 @@ export function useOnlineGame(options: UseOnlineGameOptions): UseOnlineGameRetur
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('connecting');
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectAttemptRef = useRef(0);
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // True while a connect() is awaiting its socket (wsRef isn't set until then)
+  const connectPendingRef = useRef(false);
   const pingIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   // Generation counter: incremented on each cleanup so stale WS handlers are ignored
   const connectionGenRef = useRef(0);
@@ -163,13 +168,22 @@ export function useOnlineGame(options: UseOnlineGameOptions): UseOnlineGameRetur
       if (pingIntervalRef.current) {
         clearInterval(pingIntervalRef.current);
       }
+      if (reconnectTimerRef.current) {
+        clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
     };
   }, []);
 
   // Connect to WebSocket
   const connect = useCallback(() => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
+    const rs = wsRef.current?.readyState;
+    if (rs === WebSocket.OPEN || rs === WebSocket.CONNECTING || connectPendingRef.current) {
       return;
+    }
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
     }
 
     // Capture generation at connect-time; all handlers check this to ignore stale connections
@@ -368,13 +382,17 @@ export function useOnlineGame(options: UseOnlineGameOptions): UseOnlineGameRetur
             setConnectionStatus('reconnecting');
             const delay = RECONNECT_DELAYS[attempt];
             logger.info(`[useOnlineGame] Reconnecting in ${delay}ms (attempt ${attempt + 1})`);
-            setTimeout(() => {
+            if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+            reconnectTimerRef.current = setTimeout(() => {
+              reconnectTimerRef.current = null;
+              // The game may have changed or unmounted during the delay
+              if (isStale()) return;
               reconnectAttemptRef.current++;
               connect();
             }, delay);
           } else {
             setConnectionStatus('disconnected');
-            setError('Connection lost. Please refresh the page.');
+            setError("Connection lost — we'll reconnect when you're back online.");
           }
         } else {
           setConnectionStatus('disconnected');
@@ -384,11 +402,15 @@ export function useOnlineGame(options: UseOnlineGameOptions): UseOnlineGameRetur
       onPong: () => {},
     });
 
+    connectPendingRef.current = true;
     wsPromise.then((ws) => {
+      // A stale promise must not clear a newer connect's pending flag
       if (isStale()) { ws.close(); return; }
+      connectPendingRef.current = false;
       wsRef.current = ws;
     }).catch((err) => {
       if (isStale()) return;
+      connectPendingRef.current = false;
       logger.error('[useOnlineGame] WebSocket connect failed:', err);
       setConnectionStatus('disconnected');
     });
@@ -400,6 +422,11 @@ export function useOnlineGame(options: UseOnlineGameOptions): UseOnlineGameRetur
     return () => {
       // Bump generation so any handlers from this connection become stale
       connectionGenRef.current++;
+      connectPendingRef.current = false;
+      if (reconnectTimerRef.current) {
+        clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
       if (wsRef.current) {
         wsRef.current.close();
         wsRef.current = null;
@@ -481,12 +508,46 @@ export function useOnlineGame(options: UseOnlineGameOptions): UseOnlineGameRetur
     reconnectAttemptRef.current = 0;
     // Bump generation so the old connection's onClose won't trigger auto-reconnect
     connectionGenRef.current++;
+    connectPendingRef.current = false;
     if (wsRef.current) {
       wsRef.current.close();
       wsRef.current = null;
     }
     connect();
   }, [connect]);
+
+  // Reconnect immediately when the app returns to the foreground or the
+  // network comes back — iOS suspends sockets in the background, and backoff
+  // may have given up while we were away. A fresh connection resyncs state
+  // (the server sends the full game state on connect).
+  const reconnectRef = useRef(reconnect);
+  reconnectRef.current = reconnect;
+  useEffect(() => {
+    const resumeIfDropped = () => {
+      const rs = wsRef.current?.readyState;
+      const alive = rs === WebSocket.OPEN || rs === WebSocket.CONNECTING || connectPendingRef.current;
+      if (alive) return;
+      const status = onlineStatusRef.current;
+      if (status !== 'playing' && status !== 'waiting') return;
+      logger.info('[useOnlineGame] Resumed with dropped socket — reconnecting');
+      reconnectRef.current();
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') resumeIfDropped();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener('online', resumeIfDropped);
+    const sub = isNativeApp
+      ? CapacitorApp.addListener('appStateChange', ({ isActive }) => {
+          if (isActive) resumeIfDropped();
+        })
+      : null;
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('online', resumeIfDropped);
+      sub?.then((h) => h.remove());
+    };
+  }, []);
 
   // Rematch actions
   const requestRematch = useCallback(() => {

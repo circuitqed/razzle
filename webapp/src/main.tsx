@@ -2,9 +2,10 @@ import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import './index.css'
 import App from './App'
-import { isNativeApp, installNativeIdentity } from './api/base'
+import { isNativeApp, installNativeIdentity, installFriendlyNetworkErrors } from './api/base'
 
 installNativeIdentity()
+installFriendlyNetworkErrors()
 
 if (isNativeApp) {
   document.body.classList.add('native-app');

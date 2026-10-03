@@ -1,5 +1,17 @@
 import { Link } from 'react-router-dom';
 
+// TODO(Dave): set the real support/privacy contact address before App Store submission.
+// Shown on the privacy policy, terms, and About page (the App Store support URL).
+export const CONTACT_EMAIL = 'CONTACT_EMAIL_TBD';
+
+function ContactEmail() {
+  return (
+    <a href={`mailto:${CONTACT_EMAIL}`} className="text-blue-400 hover:text-blue-300">
+      {CONTACT_EMAIL}
+    </a>
+  );
+}
+
 function LegalLayout({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <div className="min-h-screen bg-gray-900 text-gray-300">
@@ -17,6 +29,8 @@ function LegalLayout({ title, children }: { title: string; children: React.React
           <Link to="/terms" className="hover:text-gray-400">Terms</Link>
           {' \u00B7 '}
           <Link to="/privacy" className="hover:text-gray-400">Privacy</Link>
+          {' \u00B7 '}
+          <Link to="/support" className="hover:text-gray-400">Support</Link>
         </div>
       </div>
     </div>
@@ -26,7 +40,7 @@ function LegalLayout({ title, children }: { title: string; children: React.React
 export function TermsPage() {
   return (
     <LegalLayout title="Terms of Service">
-      <p className="text-gray-400 text-xs">Last updated: March 2026</p>
+      <p className="text-gray-400 text-xs">Last updated: October 3, 2026</p>
 
       <section>
         <h2 className="text-lg font-semibold text-white mb-2">1. Acceptance of Terms</h2>
@@ -109,8 +123,7 @@ export function TermsPage() {
       <section>
         <h2 className="text-lg font-semibold text-white mb-2">10. Contact</h2>
         <p>
-          For questions about these terms, please open an issue on our GitHub repository or
-          contact us at the email listed on the project page.
+          For questions about these terms, email us at <ContactEmail />.
         </p>
       </section>
     </LegalLayout>
@@ -120,7 +133,7 @@ export function TermsPage() {
 export function PrivacyPage() {
   return (
     <LegalLayout title="Privacy Policy">
-      <p className="text-gray-400 text-xs">Last updated: March 2026</p>
+      <p className="text-gray-400 text-xs">Last updated: October 3, 2026</p>
 
       <section>
         <h2 className="text-lg font-semibold text-white mb-2">1. Information We Collect</h2>
@@ -128,15 +141,30 @@ export function PrivacyPage() {
         <ul className="list-disc list-inside mt-2 space-y-1 text-gray-400">
           <li>
             <strong className="text-gray-300">Account information:</strong> If you register, we store
-            your username, display name, and a hashed password. No email is required.
+            your email address, username, display name, and a hashed password. Your email is used to
+            sign you in (including one-time sign-in links), verify your account, and reset your
+            password. You can play without an account.
           </li>
           <li>
             <strong className="text-gray-300">Game data:</strong> We record game moves, results,
-            timestamps, and ELO ratings for all played games.
+            timestamps, and ELO ratings for all played games. Games you play against the AI in the
+            iOS app run on your device and are uploaded to our server when you are online, so they
+            appear in your game history and can help train the AI.
           </li>
           <li>
             <strong className="text-gray-300">Technical data:</strong> Standard server logs may include
             IP addresses, browser type, and request timestamps for security and debugging.
+          </li>
+          <li>
+            <strong className="text-gray-300">Diagnostics:</strong> The app sends error logs to our
+            server, and bug reports (submitted by you or generated automatically when something goes
+            wrong) may include the game state, your browser/user agent, device and connection details.
+            Diagnostics are linked to your account or anonymous player ID and used only to fix problems.
+          </li>
+          <li>
+            <strong className="text-gray-300">Anonymous player ID:</strong> If you play without an
+            account, a random identifier is stored on your device so your online games can be linked
+            to you.
           </li>
         </ul>
       </section>
@@ -193,8 +221,10 @@ export function PrivacyPage() {
       <section>
         <h2 className="text-lg font-semibold text-white mb-2">5. Data Retention</h2>
         <p>
-          Account information and game history are retained as long as your account exists. You may
-          request deletion of your account and associated data by contacting us.
+          Account information and game history are retained as long as your account exists. You can
+          delete your account at any time from inside the app (user menu &rarr; Delete Account), or
+          by emailing us. Deleting your account removes your email, username, and sign-in
+          credentials; past game records are kept but no longer linked to any identity.
         </p>
       </section>
 
@@ -226,9 +256,48 @@ export function PrivacyPage() {
       <section>
         <h2 className="text-lg font-semibold text-white mb-2">9. Contact</h2>
         <p>
-          For privacy-related questions or data deletion requests, please open an issue on our GitHub
-          repository or contact us at the email listed on the project page.
+          For privacy-related questions or data deletion requests, email us at <ContactEmail />.
         </p>
+      </section>
+    </LegalLayout>
+  );
+}
+
+export function SupportPage() {
+  return (
+    <LegalLayout title="Support">
+      <section>
+        <h2 className="text-lg font-semibold text-white mb-2">Contact us</h2>
+        <p>
+          Questions, bug reports, or feedback? Email <ContactEmail /> and we&rsquo;ll get back to you.
+          You can also send a bug report from inside the game (it includes the current position,
+          which helps us reproduce problems).
+        </p>
+      </section>
+
+      <section>
+        <h2 className="text-lg font-semibold text-white mb-2">Common questions</h2>
+        <ul className="list-disc list-inside mt-2 space-y-2 text-gray-400">
+          <li>
+            <strong className="text-gray-300">Do I need an account?</strong> No. You can play the AI
+            and online games without one. An account (email + password, or a one-time sign-in link)
+            keeps your rating and game history across devices.
+          </li>
+          <li>
+            <strong className="text-gray-300">Can I play offline?</strong> Yes &mdash; in the iOS
+            app, games against the AI run entirely on your device. Online multiplayer needs a
+            connection.
+          </li>
+          <li>
+            <strong className="text-gray-300">How do I delete my account?</strong> Sign in, open the
+            user menu, and choose Delete Account. See the <Link to="/privacy" className="text-blue-400 hover:text-blue-300">privacy policy</Link> for
+            what is removed.
+          </li>
+          <li>
+            <strong className="text-gray-300">How do I play?</strong> Open the rules from the game
+            screen, or read the <Link to="/about" className="text-blue-400 hover:text-blue-300">about page</Link>.
+          </li>
+        </ul>
       </section>
     </LegalLayout>
   );

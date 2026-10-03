@@ -10,7 +10,7 @@
  * - Desktop fallback: ONNX Runtime with WASM backend
  */
 
-import { OnnxEvaluator, PureTSEvaluator, GPUEvaluator, RandomEvaluator } from '../engine/evaluator';
+import { OnnxEvaluator, PureTSEvaluator, GPUEvaluator, RandomEvaluator, GL_CONTEXT_LOST } from '../engine/evaluator';
 import type { Evaluator } from '../engine/evaluator';
 import { createModelFromOnnx } from '../engine/inference';
 import { createGPUModelFromOnnx } from '../engine/webglForwardPass';
@@ -30,8 +30,13 @@ let activeBackend: string = 'wasm';
 let ortLoadFailed = false;
 
 
-/** Detect iOS/iPadOS (all browsers on iOS use WebKit) */
-const isIOS = /iPhone|iPad|iPod/i.test(navigator.userAgent) ||
+/**
+ * Detect iOS/iPadOS (all browsers on iOS use WebKit). The native app
+ * (capacitor: origin) always takes this path — its build ships without the
+ * ONNX Runtime WASM files (scripts/prune-native-dist.mjs).
+ */
+const isIOS = self.location.protocol === 'capacitor:' ||
+  /iPhone|iPad|iPod/i.test(navigator.userAgent) ||
   (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 
 /**
@@ -132,6 +137,14 @@ function deserializeState(s: SerializedEngineState): EngineState {
  * Download (or load from cache) the ONNX model file.
  */
 async function getModelBuffer(msg: LoadMessage): Promise<ArrayBuffer> {
+  // Models shipped in the native app bundle are a local read — no need to
+  // also copy them into IndexedDB.
+  if (msg.modelUrl.includes('/bundled-models/')) {
+    const response = await fetch(msg.modelUrl);
+    if (!response.ok) throw new Error(`Failed to read bundled model: ${response.status}`);
+    return response.arrayBuffer();
+  }
+
   let modelBuffer = await getCachedModel(msg.modelVersion);
 
   if (!modelBuffer) {
@@ -260,6 +273,13 @@ async function handleSearch(msg: SearchMessage): Promise<void> {
       success: false,
       error: 'No model loaded',
     });
+    return;
+  }
+
+  // iOS can reclaim the WebGL context while the app is backgrounded; a search
+  // on a lost context returns garbage, so tell the host to rebuild the worker.
+  if (evaluator instanceof GPUEvaluator && evaluator.isContextLost()) {
+    self.postMessage({ type: 'search_result', success: false, error: GL_CONTEXT_LOST });
     return;
   }
 

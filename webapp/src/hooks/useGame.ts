@@ -1,13 +1,19 @@
 import { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import type { GameState, Player } from '../types';
 import { decodeMove, squareToAlgebraic } from '../types';
-import * as api from '../api/engine';
-import { getOnnxModelInfoByName } from '../api/engine';
+import * as serverApi from '../api/engine';
+import * as localApi from '../api/localGames';
+import { isLocalGameId, flushSyncQueue } from '../api/localGames';
+import { isNativeApp } from '../api/base';
+import { resolveModelInfo } from '../engine/bundledModels';
 import { logger } from '../utils/logger';
 import { playMoveSound, playPassSound, playWinSound, playLoseSound } from '../utils/sounds';
-import { useAIWorker } from './useAIWorker';
+import { hapticMove, hapticGameOver } from '../utils/haptics';
+import { useAIWorker, SEARCH_CANCELLED } from './useAIWorker';
+import { App as CapacitorApp } from '@capacitor/app';
 import { useBoardInteraction } from './useBoardInteraction';
 import type { EngineState } from '../engine/state';
+import { newGame as newEngineGame, applyMove as applyEngineMove } from '../engine/state';
 
 interface UseGameOptions {
   vsAI?: boolean;
@@ -62,6 +68,29 @@ interface UseGameReturn {
 
 const END_TURN_MOVE = -1;
 
+/**
+ * Where new games are hosted. The native app plays AI and pass-and-play games
+ * entirely on-device (works offline, instant moves); the browser also falls
+ * back to on-device games when it's offline. Existing games keep whichever
+ * backend created them (identified by game id).
+ */
+function shouldCreateLocalGame(): boolean {
+  return isNativeApp || (typeof navigator !== 'undefined' && navigator.onLine === false);
+}
+
+/**
+ * Per-search wall-clock cap on native. Phones run ~30-110 sims/sec, so the top
+ * levels' 4096-8192 sims would take a minute or more per move; cap it so the
+ * AI stays responsive (and the phone stays cool). 0 = no cap.
+ */
+const NATIVE_SEARCH_BUDGET_MS = 10_000;
+/** Mid-pass-chain continuations of the same turn get less: the line was mostly searched already. */
+const NATIVE_CONTINUATION_BUDGET_MS = 4_000;
+
+function backendFor(gameId: string): typeof localApi | typeof serverApi {
+  return isLocalGameId(gameId) ? localApi : serverApi;
+}
+
 /** Convert API GameState to client-side EngineState for local AI search. */
 function apiStateToEngineState(gs: GameState): EngineState {
   return {
@@ -73,6 +102,22 @@ function apiStateToEngineState(gs: GameState): EngineState {
     lastKnightDst: gs.last_knight_dst ?? -1,
     ply: gs.ply,
   };
+}
+
+/** Rebuild display history (with correct player attribution) from a full move list. */
+function historyFromMoves(moves: number[]): { records: MoveRecord[]; lastMove: LastMove | null } {
+  const state = newEngineGame();
+  const records: MoveRecord[] = [];
+  let lastMove: LastMove | null = null;
+  for (const move of moves) {
+    const player = state.currentPlayer as Player;
+    applyEngineMove(state, move);
+    if (move === END_TURN_MOVE) continue;
+    const { src, dst } = decodeMove(move);
+    records.push({ move, algebraic: `${squareToAlgebraic(src)}-${squareToAlgebraic(dst)}`, player });
+    lastMove = { from: src, to: dst };
+  }
+  return { records, lastMove };
 }
 
 export function useGame(options: UseGameOptions = {}): UseGameReturn {
@@ -87,7 +132,11 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
   const [moveHistory, setMoveHistory] = useState<MoveRecord[]>([]);
   const [rawMoves, setRawMoves] = useState<number[]>([]);
   const [evaluation, setEvaluation] = useState<number | null>(null);
-  const [aiProgress, setAiProgress] = useState<{ simsDone: number; totalSims: number } | null>(null);
+  const [appActive, setAppActive] = useState(true);
+  // Position (game:ply) where the AI's last attempt failed. The trigger effect
+  // won't auto-retry there — otherwise a deterministic failure re-fires every
+  // time aiThinking drops back to false. Any new position clears it.
+  const [aiStalledAt, setAiStalledAt] = useState<string | null>(null);
   const [lastTurnAnimMoves, setLastTurnAnimMoves] = useState<LastMove[] | undefined>(undefined);
 
   // Generation counter: incremented on new game / resume so stale async ops bail out
@@ -123,12 +172,14 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
 
     if (wasPlaying && gameState.status === 'finished' && gameState.winner !== null) {
       if (vsAI) {
+        hapticGameOver(gameState.winner === humanPlayer);
         if (gameState.winner === humanPlayer) {
           playWinSound();
         } else {
           playLoseSound();
         }
       } else {
+        hapticGameOver(true);
         playWinSound();
       }
     }
@@ -137,6 +188,35 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
   // Ref for stable access to aiWorker functions (avoids dependency on aiWorker object)
   const aiWorkerRef = useRef(aiWorker);
   aiWorkerRef.current = aiWorker;
+
+  // Stop any in-flight AI work for the current game (new game, undo, resign…).
+  // Bumping the generation makes in-flight async steps bail out quietly.
+  const cancelAI = useCallback(() => {
+    gameGenRef.current++;
+    aiWorkerRef.current.cancelSearch();
+    setAiThinking(false); aiThinkingRef.current = false;
+    setAiStalledAt(null);
+  }, []);
+
+  // Native: stop searching while the app is in the background (iOS suspends
+  // it anyway and may reclaim the GPU context) and restart the AI's turn when
+  // the app comes back.
+  useEffect(() => {
+    if (!isNativeApp) return;
+    const sub = CapacitorApp.addListener('appStateChange', ({ isActive }) => {
+      if (!isActive && aiThinkingRef.current) cancelAI();
+      setAppActive(isActive);
+    });
+    return () => { sub.then((h) => h.remove()); };
+  }, [cancelAI]);
+
+  // Upload finished on-device games to the server whenever we're online.
+  useEffect(() => {
+    void flushSyncQueue();
+    const onOnline = () => { void flushSyncQueue(); };
+    window.addEventListener('online', onOnline);
+    return () => window.removeEventListener('online', onOnline);
+  }, []);
 
   // Load client-side AI model reactively when aiModel changes
   useEffect(() => {
@@ -153,12 +233,9 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
       return;
     }
 
-    const filename = modelKey === 'latest' ? null : modelKey.split('/').pop();
-    const fetchAndLoad = filename
-      ? () => getOnnxModelInfoByName(filename)
-      : () => api.getOnnxModelInfo();
+    const filename = modelKey === 'latest' ? null : (modelKey.split('/').pop() ?? null);
 
-    fetchAndLoad()
+    resolveModelInfo(filename)
       .then((modelInfo) => {
         if (loadedModelRef.current !== modelKey) return;
         aiWorkerRef.current.loadModel(modelInfo.url, modelInfo.version);
@@ -172,9 +249,27 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
         logger.error('[useGame] AI model unavailable:', err);
         loadedModelRef.current = null; // allow retry on reselect
         setModelUnavailable(modelKey);
-        setError(`The AI for this level is unavailable (model ${filename ?? 'latest'} missing on the server). Try a different level.`);
+        const offline = typeof navigator !== 'undefined' && navigator.onLine === false;
+        setError(offline
+          ? 'This AI level needs an internet connection to download the first time. Connect and try again, or pick another level.'
+          : `The AI for this level is unavailable (model ${filename ?? 'latest'} missing on the server). Try a different level.`);
       });
   }, [vsAI, aiModel]);
+
+  // Reload the authoritative position after a failure (best-effort).
+  const resyncFromBackend = useCallback(async (gameId: string, isStale: () => boolean) => {
+    try {
+      const state = await backendFor(gameId).getGameState(gameId);
+      if (isStale()) return;
+      setGameState(state);
+      if (state.moves) {
+        const { records, lastMove: last } = historyFromMoves(state.moves);
+        setRawMoves(state.moves);
+        setMoveHistory(records);
+        setLastMove(last);
+      }
+    } catch { /* offline — keep what we have */ }
+  }, []);
 
   // Handle AI move - compute the FULL turn, then apply all at once.
   // AI thinks silently; only the final board state is shown.
@@ -189,10 +284,12 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
     setAiThinking(true);
     try {
       let aiMoveCount = 0;
+      let rejectedRetries = 0;
       const MAX_AI_MOVES = 10;
       const aiTurnMoves: number[] = [];
       let aiValue: number | null = null;
 
+      const api = backendFor(gameId);
       let currentState = await api.getGameState(gameId);
       if (isStale()) return;
 
@@ -221,6 +318,8 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
             const engineState = apiStateToEngineState(currentState);
             const result = await aiWorkerRef.current.search(engineState, {
               numSimulations: aiSimulations,
+              maxTimeMs: !isNativeApp ? 0
+                : engineState.hasPassed ? NATIVE_CONTINUATION_BUDGET_MS : NATIVE_SEARCH_BUDGET_MS,
             });
             if (isStale()) return;
             aiMove = result.bestMove;
@@ -234,13 +333,15 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
                 backend: aiWorkerRef.current.backend,
               });
             }
-            setAiProgress(null);
             try {
               currentState = await api.makeMove(gameId, aiMove);
             } catch (moveErr: any) {
               // If server rejects the move (stale state), refetch and retry this iteration
-              if (moveErr?.status === 400) {
-                logger.warn('[useGame] AI move rejected, refetching state', { move: aiMove });
+              // Bounded: if client and server truly disagree, the AI would
+              // recompute the same rejected move forever ("thinks forever").
+              if (moveErr?.status === 400 && rejectedRetries < 2) {
+                rejectedRetries++;
+                logger.warn('[useGame] AI move rejected, refetching state', { move: aiMove, rejectedRetries });
                 currentState = await api.getGameState(gameId);
                 if (isStale()) return;
                 aiMoveCount--; // don't count this failed attempt
@@ -295,6 +396,7 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
       const nonEndTurns = aiTurnMoves.filter(m => m !== END_TURN_MOVE);
       const lastActual = nonEndTurns[nonEndTurns.length - 1];
       if (lastActual !== undefined) {
+        hapticMove();
         const { src, dst } = decodeMove(lastActual);
         setLastMove({ from: src, to: dst });
 
@@ -319,15 +421,22 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
       if (isStale()) return;
       const msg = err instanceof Error ? err.message : 'AI move failed';
       logger.error('[useGame] AI move failed:', err);
+      // Part of the AI's turn may already be applied on the backend; show
+      // the authoritative position rather than a stale one.
+      if (msg !== SEARCH_CANCELLED) await resyncFromBackend(gameId, isStale);
+      const transient = msg === SEARCH_CANCELLED || msg.includes('Worker not initialized');
+      if (!transient && !isStale()) {
+        const latest = await backendFor(gameId).getGameState(gameId).catch(() => null);
+        if (!isStale()) setAiStalledAt(`${gameId}:${latest?.ply ?? 'unknown'}`);
+      }
       // Don't show "Worker not initialized" to user — the worker is recycling
       // and the retry will handle it silently via the useEffect re-trigger.
-      if (!msg.includes('Worker not initialized')) {
+      if (!msg.includes('Worker not initialized') && msg !== SEARCH_CANCELLED) {
         setError(msg);
       }
     } finally {
       if (!isStale()) {
         setAiThinking(false); aiThinkingRef.current = false;
-        setAiProgress(null);
       }
     }
   }, [aiSimulations, aiModel, aiPlayer, aiWorker]);
@@ -343,14 +452,19 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
   // Covers: new game (AI goes first), resumed game (AI's turn), etc.
   useEffect(() => {
     if (!vsAI || !gameState || gameState.status !== 'playing') return;
-    if (aiThinking || isLoading) return;
+    if (aiThinking || isLoading || !appActive) return;
+    if (aiStalledAt === `${gameState.game_id}:${gameState.ply}` || aiStalledAt === `${gameState.game_id}:unknown`) return;
     if (gameState.current_player !== aiPlayer) return;
     // Don't retry if model failed to load and isn't recovering
     if (aiWorker.loadError && !aiWorker.isLoaded && !aiWorker.isLoading) return;
+    // Model location still being resolved (no load started yet): wait — this
+    // effect re-runs when isLoading/isLoaded change. Without this, a game that
+    // exists before the model load begins spins in a fail/retry loop.
+    if (!aiWorker.isLoaded && !aiWorker.isLoading) return;
     // Don't retry if the model info fetch failed (model missing server-side)
     if (modelUnavailable) return;
     handleAIMove(gameState.game_id);
-  }, [vsAI, gameState?.game_id, gameState?.current_player, gameState?.status, aiPlayer, aiThinking, isLoading, aiWorker.loadError, aiWorker.isLoaded, aiWorker.isLoading, modelUnavailable]);
+  }, [vsAI, gameState?.game_id, gameState?.current_player, gameState?.status, aiPlayer, aiThinking, isLoading, aiWorker.loadError, aiWorker.isLoaded, aiWorker.isLoading, modelUnavailable, appActive, aiStalledAt, gameState?.ply]);
 
   // Commit a complete turn: send all sub-moves to the server, update state.
   const commitTurn = useCallback(
@@ -373,8 +487,8 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
 
       (async () => {
         try {
-          logger.info('[useGame] Sending turn to server:', moves);
-          const currentState = await api.makeTurn(gameId, moves);
+          logger.info('[useGame] Submitting turn:', moves);
+          const currentState = await backendFor(gameId).makeTurn(gameId, moves);
           if (isStale()) return;
 
           setGameState(currentState);
@@ -398,6 +512,8 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
           }
           setMoveHistory((prev) => [...prev, ...newRecords]);
 
+          hapticMove();
+
           // Set lastMove for animation (human moves don't use multi-pass waypoints)
           setLastTurnAnimMoves(undefined);
           const lastActual = [...moves].reverse().find((m) => m !== END_TURN_MOVE);
@@ -414,6 +530,9 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
           if (isStale()) return;
           logger.error('[useGame] commitTurn failed:', err);
           setError(err instanceof Error ? err.message : 'Move failed');
+          // A rejected turn means our view of the position may be wrong —
+          // reload it from the backend so the board is playable again.
+          await resyncFromBackend(gameId, isStale);
         } finally {
           commitInProgressRef.current = false;
           if (!isStale()) {
@@ -442,8 +561,7 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
 
   // Start a new game
   const startNewGame = useCallback(async () => {
-    gameGenRef.current++;  // Invalidate any in-flight AI/commit operations
-    setAiThinking(false); aiThinkingRef.current = false;
+    cancelAI();  // Invalidate any in-flight AI/commit operations
     setIsLoading(true);
     setError(null);
     clearSelection();
@@ -455,6 +573,7 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
     setEvaluation(null);
 
     try {
+      const api = shouldCreateLocalGame() ? localApi : serverApi;
       const { game_id } = await api.createGame({
         player1_type: 'human',
         player2_type: vsAI ? 'ai' : 'human',
@@ -467,12 +586,11 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
     } finally {
       setIsLoading(false);
     }
-  }, [vsAI, aiSimulations, clearSelection, goToEnd]);
+  }, [vsAI, aiSimulations, clearSelection, goToEnd, cancelAI]);
 
   // Resume an existing game (e.g., after page refresh)
   const resumeGame = useCallback(async (gameId: string): Promise<boolean> => {
-    gameGenRef.current++;  // Invalidate any in-flight AI/commit operations
-    setAiThinking(false); aiThinkingRef.current = false;
+    cancelAI();  // Invalidate any in-flight AI/commit operations
     setIsLoading(true);
     setError(null);
     clearSelection();
@@ -484,7 +602,7 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
     setEvaluation(null);
 
     try {
-      const state = await api.getGameState(gameId);
+      const state = await backendFor(gameId).getGameState(gameId);
 
       // Only resume games that are still in progress
       if (state.status !== 'playing') {
@@ -493,33 +611,12 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
 
       setGameState(state);
 
-      // Restore move history from server
+      // Restore move history
       if (state.moves) {
         setRawMoves(state.moves);
-
-        // Derive lastMove from move history
-        for (let i = state.moves.length - 1; i >= 0; i--) {
-          if (state.moves[i] !== END_TURN_MOVE) {
-            const { src, dst } = decodeMove(state.moves[i]);
-            setLastMove({ from: src, to: dst });
-            break;
-          }
-        }
-
-        // Rebuild moveHistory records
-        const records: MoveRecord[] = [];
-        for (const move of state.moves) {
-          if (move !== END_TURN_MOVE) {
-            const { src, dst } = decodeMove(move);
-            // Approximate the player from the move sequence
-            records.push({
-              move,
-              algebraic: `${squareToAlgebraic(src)}-${squareToAlgebraic(dst)}`,
-              player: 0 as Player, // Approximate - not critical for display
-            });
-          }
-        }
+        const { records, lastMove: last } = historyFromMoves(state.moves);
         setMoveHistory(records);
+        setLastMove(last);
       }
 
       // AI triggering handled by the useEffect that watches current_player
@@ -530,52 +627,56 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
     } finally {
       setIsLoading(false);
     }
-  }, [clearSelection, goToEnd]);
+  }, [clearSelection, goToEnd, cancelAI]);
 
   // Undo last move
+  // Undo back to the start of the human's previous turn. A turn can be several
+  // sub-moves (pass chains + END_TURN), and in AI games the AI's reply must be
+  // rewound too — otherwise undo lands mid-turn and the AI just replays.
   const undoMove = useCallback(async () => {
     if (!gameState) return;
 
+    cancelAI();  // Cancel any in-flight AI search/commit
     goToEnd();
     setIsLoading(true);
     setError(null);
     clearSelection();
 
     try {
+      const api = backendFor(gameState.game_id);
       let state = await api.undoMove(gameState.game_id);
-      setMoveHistory(prev => prev.slice(0, -1));
-      setRawMoves(prev => prev.slice(0, -1));
-      if (vsAI && state.current_player === aiPlayer) {
+      for (let i = 0; i < 40 && (state.moves?.length ?? 0) > 0; i++) {
+        const midTurn = state.has_passed;
+        const aiToMove = vsAI && state.current_player === aiPlayer;
+        if (!midTurn && !aiToMove) break;
         state = await api.undoMove(gameState.game_id);
-        setMoveHistory(prev => prev.slice(0, -1));
-        setRawMoves(prev => prev.slice(0, -1));
       }
       setGameState(state);
-      const newHistory = moveHistory.slice(0, vsAI && state.current_player === humanPlayer ? -2 : -1);
-      if (newHistory.length === 0) {
-        setLastMove(null);
-      } else {
-        const lastRecord = newHistory[newHistory.length - 1];
-        const { src, dst } = decodeMove(lastRecord.move);
-        setLastMove({ from: src, to: dst });
-      }
+      const moves = state.moves ?? [];
+      const { records, lastMove: last } = historyFromMoves(moves);
+      setRawMoves(moves);
+      setMoveHistory(records);
+      setLastMove(last);
+      setLastTurnAnimMoves(undefined);
+      setEvaluation(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Undo failed');
     } finally {
       setIsLoading(false);
     }
-  }, [gameState, vsAI, aiPlayer, humanPlayer, moveHistory, goToEnd, clearSelection]);
+  }, [gameState, vsAI, aiPlayer, goToEnd, clearSelection, cancelAI]);
 
   // Resign from the game
   const resign = useCallback(async () => {
     if (!gameState || gameState.status !== 'playing') return;
 
+    cancelAI();
     setIsLoading(true);
     setError(null);
     goToEnd();
 
     try {
-      const newState = await api.resignGame(gameState.game_id, humanPlayer === -1 ? 0 : humanPlayer);
+      const newState = await backendFor(gameState.game_id).resignGame(gameState.game_id, humanPlayer === -1 ? 0 : humanPlayer);
       setGameState(newState);
       clearSelection();
       playLoseSound();
@@ -584,7 +685,7 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
     } finally {
       setIsLoading(false);
     }
-  }, [gameState, humanPlayer, goToEnd, clearSelection]);
+  }, [gameState, humanPlayer, goToEnd, clearSelection, cancelAI]);
 
   return {
     gameState: effectiveGameState,
@@ -601,7 +702,9 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
     moveHistory,
     rawMoves,
     evaluation,
-    aiProgress,
+    aiProgress: aiThinking && aiWorker.progress
+      ? { simsDone: aiWorker.progress.simsDone, totalSims: aiWorker.progress.totalSims }
+      : null,
     viewPly,
     isViewingHistory,
     startNewGame,

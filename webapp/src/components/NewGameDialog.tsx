@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useAuth } from '../contexts/AuthContext';
+import { useOnlineStatus } from '../hooks/useOnlineStatus';
 import * as onlineApi from '../api/online';
 import type { ModelInfo } from '../api/engine';
 import { getAutoMatchLevel, setAutoMatchLevel, getTierSettings, getLevelLabel, TIERS } from '../utils/autoMatch';
@@ -152,6 +153,7 @@ export default function NewGameDialog({
 
   // Online-specific state
   const [onlineTab, setOnlineTab] = useState<OnlineTab>('lobby');
+  const online = useOnlineStatus();
   const [onlineColorChoice, setOnlineColorChoice] = useState<ColorChoice>('random');
   const [onlineTimePreset, setOnlineTimePreset] = useState<string>('none');
   const [onlineTimeControl, setOnlineTimeControl] = useState<number | null>(null);
@@ -233,7 +235,7 @@ export default function NewGameDialog({
 
   // Auto-refresh lobby every 10 seconds when lobby tab is active and mode is online
   useEffect(() => {
-    if (isOpen && mode === 'online' && onlineTab === 'lobby') {
+    if (isOpen && online && mode === 'online' && onlineTab === 'lobby') {
       loadLobbyGames();
       refreshTimerRef.current = setInterval(loadLobbyGames, 10000);
     }
@@ -243,7 +245,7 @@ export default function NewGameDialog({
         refreshTimerRef.current = null;
       }
     };
-  }, [isOpen, mode, onlineTab, loadLobbyGames]);
+  }, [isOpen, online, mode, onlineTab, loadLobbyGames]);
 
   if (!isOpen) return null;
 
@@ -660,7 +662,12 @@ export default function NewGameDialog({
         )}
 
         {/* Online settings - inline lobby */}
-        {mode === 'online' && (
+        {mode === 'online' && !online && (
+          <div className="mb-4 rounded bg-gray-700/60 px-3 py-3 text-sm text-gray-300">
+            You're offline. Online play needs an internet connection — playing the AI and Local 2P work offline.
+          </div>
+        )}
+        {mode === 'online' && online && (
           <div className="mb-4">
             {onlineError && (
               <div className="mb-3 bg-red-600 text-white px-3 py-2 rounded text-sm">

@@ -144,7 +144,7 @@ export default function GameView({
               {/* Opponent name + clock above board */}
               {(topName || topClock) && (
                 <div className="flex items-center justify-between mb-1" style={{ paddingLeft: '3.846%' }}>
-                  {topName && <div className="text-xs text-gray-500">{topName}</div>}
+                  {topName && <div className="text-xs sm:text-sm text-gray-400">{topName}</div>}
                   {topClock && <div className="flex-shrink-0">{topClock}</div>}
                 </div>
               )}
@@ -165,7 +165,7 @@ export default function GameView({
               {/* Player name + clock below board */}
               {(bottomName || bottomClock) && (
                 <div className="flex items-center justify-between mt-1" style={{ paddingLeft: '3.846%' }}>
-                  {bottomName && <div className="text-xs text-gray-500">{bottomName}</div>}
+                  {bottomName && <div className="text-xs sm:text-sm text-gray-400">{bottomName}</div>}
                   {bottomClock && <div className="flex-shrink-0">{bottomClock}</div>}
                 </div>
               )}
@@ -220,22 +220,24 @@ export default function GameView({
               <button
                 onClick={goToStart}
                 disabled={rawMoves.length === 0}
-                className="px-2 py-1 text-sm bg-gray-700 hover:bg-gray-600 disabled:bg-gray-800 disabled:text-gray-600 rounded transition-colors"
+                className="min-w-[44px] min-h-[44px] px-2 text-sm bg-gray-700 hover:bg-gray-600 disabled:bg-gray-800 disabled:text-gray-600 rounded transition-colors"
                 title="Go to start (Home)"
+                aria-label="First move"
               >
                 {'\u{25C0}\u{25C0}'}
               </button>
               <button
                 onClick={goBack}
                 disabled={rawMoves.length === 0 && viewPly === null}
-                className="px-2 py-1 text-sm bg-gray-700 hover:bg-gray-600 disabled:bg-gray-800 disabled:text-gray-600 rounded transition-colors"
+                className="min-w-[44px] min-h-[44px] px-2 text-sm bg-gray-700 hover:bg-gray-600 disabled:bg-gray-800 disabled:text-gray-600 rounded transition-colors"
                 title="Back (Left arrow)"
+                aria-label="Previous move"
               >
                 {'\u{25C0}'}
               </button>
 
               {/* Scrollable move history */}
-              <div ref={mobileHistoryRef} className="flex-1 overflow-x-auto whitespace-nowrap bg-gray-800 rounded px-2 py-1 text-xs min-h-[28px] flex items-center gap-1 scrollbar-thin">
+              <div ref={mobileHistoryRef} className="flex-1 overflow-x-auto whitespace-nowrap bg-gray-800 rounded px-2 py-1 text-sm min-h-[44px] flex items-center gap-1 scrollbar-thin">
                 {formattedTurns.length === 0 && (
                   <span className="text-gray-600 italic">No moves</span>
                 )}
@@ -275,16 +277,18 @@ export default function GameView({
               <button
                 onClick={goForward}
                 disabled={viewPly === null}
-                className="px-2 py-1 text-sm bg-gray-700 hover:bg-gray-600 disabled:bg-gray-800 disabled:text-gray-600 rounded transition-colors"
+                className="min-w-[44px] min-h-[44px] px-2 text-sm bg-gray-700 hover:bg-gray-600 disabled:bg-gray-800 disabled:text-gray-600 rounded transition-colors"
                 title="Forward (Right arrow)"
+                aria-label="Next move"
               >
                 {'\u{25B6}'}
               </button>
               <button
                 onClick={goToEnd}
                 disabled={viewPly === null}
-                className="px-2 py-1 text-sm bg-gray-700 hover:bg-gray-600 disabled:bg-gray-800 disabled:text-gray-600 rounded transition-colors"
+                className="min-w-[44px] min-h-[44px] px-2 text-sm bg-gray-700 hover:bg-gray-600 disabled:bg-gray-800 disabled:text-gray-600 rounded transition-colors"
                 title="Go to end (End)"
+                aria-label="Latest move"
               >
                 {'\u{25B6}\u{25B6}'}
               </button>

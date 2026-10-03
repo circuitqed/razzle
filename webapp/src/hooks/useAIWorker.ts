@@ -13,6 +13,7 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import type { EngineState } from '../engine/state';
 import type { MCTSConfig } from '../engine/mcts';
+import { GL_CONTEXT_LOST } from '../engine/evaluator';
 
 interface AIWorkerState {
   isLoaded: boolean;
@@ -30,9 +31,18 @@ interface UseAIWorkerReturn extends AIWorkerState {
   loadRandomEvaluator: () => void;
   search: (state: EngineState, config?: Partial<MCTSConfig>) => Promise<{ bestMove: number; simsDone: number; value: number; searchMs?: number }>;
   abort: () => void;
+  /**
+   * Stop any in-flight search immediately. The pending search() rejects with
+   * SEARCH_CANCELLED and the worker is rebuilt (terminating is the only
+   * reliable stop: GPU/pure-TS searches block the worker thread, so an
+   * 'abort' message isn't processed until the search ends anyway).
+   */
+  cancelSearch: () => void;
   /** Resolves true when model finishes loading, false if load fails or wasn't started */
   waitForLoad: () => Promise<boolean>;
 }
+
+export const SEARCH_CANCELLED = 'Search cancelled';
 
 // Serialize EngineState for postMessage (BigInt -> string)
 function serializeState(s: EngineState) {
@@ -244,6 +254,32 @@ export function useAIWorker(): UseAIWorkerReturn {
     }, 300);
   }, [createWorker, sendLoadMessage]);
 
+  // Terminate the current worker right away and start a fresh one with the
+  // current model. Rejects any pending search; anyone awaiting the old load
+  // gets the new load's result instead.
+  const resetWorker = useCallback(() => {
+    if (workerRef.current) {
+      workerRef.current.terminate();
+      workerRef.current = null;
+    }
+    isLoadedRef.current = false;
+    searchResolverRef.current?.reject(new Error(SEARCH_CANCELLED));
+    searchResolverRef.current = null;
+    const staleLoad = loadResolverRef.current;
+    loadResolverRef.current = null;
+    loadPromiseRef.current = null;
+    if (mountedRef.current) {
+      setState((prev) => ({ ...prev, isSearching: false, progress: null }));
+    }
+
+    const worker = createWorker();
+    if (worker && modelInfoRef.current) {
+      sendLoadMessage(worker, modelInfoRef.current).then((ok) => staleLoad?.resolve(ok));
+    } else {
+      staleLoad?.resolve(false);
+    }
+  }, [createWorker, sendLoadMessage]);
+
   // Create initial worker on mount
   useEffect(() => {
     createWorker();
@@ -256,25 +292,33 @@ export function useAIWorker(): UseAIWorkerReturn {
   }, [createWorker]);
 
   // Public: load model (called on mount or model change)
-  const loadModel = useCallback((modelUrl: string, modelVersion: string) => {
-    modelInfoRef.current = { url: modelUrl, version: modelVersion, isRandom: false };
-    if (workerRef.current) {
-      sendLoadMessage(workerRef.current, modelInfoRef.current);
+  // Switching models gets a fresh worker: it frees the old model's WebGL
+  // context (iOS caps live contexts) and avoids interleaving two loads in one
+  // worker.
+  const switchModel = useCallback((info: { url: string; version: string; isRandom: boolean }) => {
+    const hadModel = modelInfoRef.current !== null;
+    modelInfoRef.current = info;
+    if (hadModel || !workerRef.current) {
+      resetWorker();
+    } else {
+      sendLoadMessage(workerRef.current, info);
     }
-  }, [sendLoadMessage]);
+  }, [resetWorker, sendLoadMessage]);
+
+  const loadModel = useCallback((modelUrl: string, modelVersion: string) => {
+    switchModel({ url: modelUrl, version: modelVersion, isRandom: false });
+  }, [switchModel]);
 
   const loadRandomEvaluator = useCallback(() => {
-    modelInfoRef.current = { url: '', version: 'random', isRandom: true };
-    if (workerRef.current) {
-      sendLoadMessage(workerRef.current, modelInfoRef.current);
-    }
-  }, [sendLoadMessage]);
+    switchModel({ url: '', version: 'random', isRandom: true });
+  }, [switchModel]);
 
   // Public: run MCTS search — waits for load if needed, recycles worker after
   const searchFn = useCallback(
     async (
       engineState: EngineState,
       config?: Partial<MCTSConfig>,
+      retried = false,
     ): Promise<{ bestMove: number; simsDone: number; value: number }> => {
       // Wait for worker to be loaded (may be loading after a recycle).
       // Poll until loadPromiseRef appears (set by sendLoadMessage after recycle).
@@ -295,16 +339,34 @@ export function useAIWorker(): UseAIWorkerReturn {
         setState((prev) => ({ ...prev, isSearching: true, progress: null }));
       }
 
-      const result = await new Promise<{ bestMove: number; simsDone: number; value: number }>(
-        (resolve, reject) => {
-          searchResolverRef.current = { resolve, reject };
-          workerRef.current!.postMessage({
-            type: 'search',
-            state: serializeState(engineState),
-            config,
-          });
-        },
-      );
+      // Only one search at a time: a new one supersedes (and cancels) any
+      // still running, so a stale result can never resolve the new request.
+      if (searchResolverRef.current) {
+        resetWorker();
+        return searchFn(engineState, config, retried);
+      }
+
+      let result: { bestMove: number; simsDone: number; value: number };
+      try {
+        result = await new Promise<{ bestMove: number; simsDone: number; value: number }>(
+          (resolve, reject) => {
+            searchResolverRef.current = { resolve, reject };
+            workerRef.current!.postMessage({
+              type: 'search',
+              state: serializeState(engineState),
+              config,
+            });
+          },
+        );
+      } catch (err) {
+        // GPU context reclaimed by iOS (typically after backgrounding):
+        // rebuild the worker and retry once.
+        if (!retried && err instanceof Error && err.message === GL_CONTEXT_LOST) {
+          resetWorker();
+          return searchFn(engineState, config, true);
+        }
+        throw err;
+      }
 
       // Recycle the worker to fully release WASM linear memory.
       // Both 'wasm' and 'webgpu' backends use ONNX Runtime WASM internally,
@@ -317,12 +379,16 @@ export function useAIWorker(): UseAIWorkerReturn {
 
       return result;
     },
-    [recycleWorker],
+    [recycleWorker, resetWorker],
   );
 
   const abort = useCallback(() => {
     workerRef.current?.postMessage({ type: 'abort' });
   }, []);
+
+  const cancelSearch = useCallback(() => {
+    if (searchResolverRef.current) resetWorker();
+  }, [resetWorker]);
 
   const waitForLoad = useCallback(async (): Promise<boolean> => {
     if (isLoadedRef.current) return true;
@@ -336,6 +402,7 @@ export function useAIWorker(): UseAIWorkerReturn {
     loadRandomEvaluator,
     search: searchFn,
     abort,
+    cancelSearch,
     waitForLoad,
   };
 }

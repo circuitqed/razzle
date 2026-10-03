@@ -863,6 +863,11 @@ export class GPUForwardPass {
     return results;
   }
 
+  /** True when iOS has reclaimed the GL context (e.g. after backgrounding) — outputs would be garbage. */
+  isContextLost(): boolean {
+    return this.gl.isContextLost();
+  }
+
   dispose(): void {
     const gl = this.gl;
     // Delete all textures, framebuffers, programs, VAO

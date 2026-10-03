@@ -88,7 +88,7 @@
   - [x] Service worker for offline caching (static assets, WASM files)
   - [x] "Add to Home Screen" — works on iOS Safari and Chrome
   - [x] ONNX model cached in IndexedDB after first download
-  - [ ] Verify full offline play works end-to-end
+  - [x] Offline vs-AI play: on-device game backend + models bundled in the iOS app (verified offline in Chromium; needs on-device check via `npm run test:ios`)
 
 ## Anti-Abuse
 
