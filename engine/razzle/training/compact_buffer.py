@@ -85,10 +85,10 @@ class CompactReplayBuffer:
 
     def _evict(self) -> None:
         cap = self.capacity
-        while self._size > cap and len(self._chunks) > 1:
+        while self._size > cap:
             first = self._chunks[0]
             n0 = len(first['value'])
-            if self._size - n0 >= cap:
+            if self._size - n0 >= cap and len(self._chunks) > 1:
                 self._chunks.pop(0)
                 self._size -= n0
             else:

@@ -15,6 +15,7 @@ Usage:
 """
 
 import argparse
+import math
 import json
 import os
 import signal
@@ -39,6 +40,7 @@ from razzle.core.symmetry import rotate_policy_180
 from razzle.training.trainer import Trainer as NetworkTrainer, TrainingConfig
 from razzle.training.api_client import TrainingAPIClient, TrainingGame
 from razzle.training.replay_buffer import ReplayBuffer
+from razzle.training.compact_buffer import CompactReplayBuffer
 from razzle.training.metrics import (
     compute_policy_metrics, compute_value_metrics,
     compute_value_calibration, compute_calibration_error, compute_pass_stats
@@ -338,6 +340,15 @@ class DistributedTrainer:
         run_name: str = '',            # Prefix for model versions (e.g. "v2" → "v2_iter_001")
         optimizer_type: str = 'adam',  # 'adam' or 'sgd'
         momentum: float = 0.9,        # SGD momentum (ignored for Adam)
+        # Compact replay buffer + step-based training (default). With
+        # legacy_buffer=True the old dense buffer / epochs-per-batch path is used.
+        legacy_buffer: bool = False,
+        reuse: float = 2.0,            # expected training samples per new position
+        window_min: int = 250_000,     # replay window (positions)
+        window_max: int = 3_000_000,
+        window_fraction: float = 0.25,
+        value_weight: float = 1.5,
+        value_weight_quartic: float = 0.0,
     ):
         self.api_url = api_url
         self.device = device
@@ -350,8 +361,10 @@ class DistributedTrainer:
         self.filters = filters
         self.blocks = blocks
         self.output_dir = Path(output_dir)
-        default_schedule = self.SGD_LR_SCHEDULE if optimizer_type == 'sgd' else self.ADAM_LR_SCHEDULE
-        self.lr_schedule = lr_schedule if lr_schedule is not None else default_schedule
+        # Constant LR unless a schedule is given. The old game-count schedules
+        # (ADAM/SGD_LR_SCHEDULE) decayed to ~1e-5 by 150k games and froze learning;
+        # lower the LR by hand when strength plateaus instead.
+        self.lr_schedule = lr_schedule if lr_schedule is not None else [(0, learning_rate)]
         self.current_lr = learning_rate
         self.replay_buffer_size = replay_buffer_size
         self.gamma = gamma
@@ -359,6 +372,10 @@ class DistributedTrainer:
         self.optimizer_type = optimizer_type
         self.momentum = momentum
         self.run_name = run_name
+        self.legacy_buffer = legacy_buffer
+        self.reuse = reuse
+        self.value_weight = value_weight
+        self.value_weight_quartic = value_weight_quartic
 
         # Create output directory
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -387,6 +404,9 @@ class DistributedTrainer:
             fraction=0.10,
             min_positions=5_000,
         )
+
+        self.compact_buffer = CompactReplayBuffer(
+            max_positions=window_max, min_positions=window_min, fraction=window_fraction)
 
         # Game archive for permanent storage of training data
         self.game_archive = GameArchive(archive_dir=str(self.output_dir / 'games_archive'))
@@ -452,6 +472,8 @@ class DistributedTrainer:
             device=self.device,
             optimizer=self.optimizer_type,
             momentum=self.momentum,
+            value_weight=self.value_weight,
+            value_weight_quartic=self.value_weight_quartic,
         )
         self.network_trainer = NetworkTrainer(self.network, config)
         print(f"[Trainer] Created trainer with {self.optimizer_type.upper()} optimizer (lr={self.learning_rate})")
@@ -482,7 +504,7 @@ class DistributedTrainer:
 
     def _get_replay_buffer_path(self) -> Path:
         """Path to replay buffer file."""
-        return self.output_dir / 'replay_buffer.npz'
+        return self.output_dir / ('replay_buffer.npz' if self.legacy_buffer else 'replay_window.npz')
 
     def _submit_iteration_metrics(self, metrics: dict, train_time: float, model_version: str = None):
         """Submit iteration metrics to API for dashboard tracking."""
@@ -537,7 +559,10 @@ class DistributedTrainer:
 
         # Save replay buffer separately (numpy format for efficiency)
         replay_path = self._get_replay_buffer_path()
-        if len(self.replay_buffer) > 0:
+        if not self.legacy_buffer and len(self.compact_buffer) > 0:
+            self.compact_buffer.save(replay_path)
+            print(f"[Trainer] Saved trainer state and compact replay window ({len(self.compact_buffer):,} positions)")
+        elif self.legacy_buffer and len(self.replay_buffer) > 0:
             np.savez_compressed(
                 replay_path,
                 states=np.array(list(self.replay_buffer.states)),
@@ -629,7 +654,14 @@ class DistributedTrainer:
         self._update_learning_rate()
 
         # Load replay buffer
-        if replay_path.exists():
+        if replay_path.exists() and not self.legacy_buffer:
+            try:
+                self.compact_buffer.load(replay_path)
+                print(f"[Trainer] Restored compact replay window ({len(self.compact_buffer):,} positions, "
+                      f"{self.compact_buffer.total_positions_seen:,} seen)")
+            except Exception as e:
+                print(f"[Trainer] Could not restore compact replay window: {e}")
+        elif replay_path.exists():
             try:
                 data = np.load(replay_path, allow_pickle=True)
                 states = data['states']
@@ -720,6 +752,9 @@ class DistributedTrainer:
             states, policies, values, legal_masks
         )
 
+        if not self.legacy_buffer:
+            return self._train_compact(games, states, policies, values, legal_masks, validation_metrics)
+
         # Add new positions to replay buffer
         self.replay_buffer.add(states, policies, values, legal_masks)
         print(f"[Trainer] Replay buffer: {len(self.replay_buffer)} / {self.replay_buffer.capacity} "
@@ -786,6 +821,48 @@ class DistributedTrainer:
             # Game stats
             'pass_decision_rate': pass_decision_rate,
             'avg_game_length': avg_game_length,
+        }
+
+    @staticmethod
+    def _policy_weights(policies: np.ndarray, legal_masks: np.ndarray) -> np.ndarray:
+        """0 for positions without a usable policy target, else 1.
+
+        No target: quick searches recorded without visit counts (all-zero row),
+        and random-opening moves recorded with uniform visits over all legal
+        moves (their 'target' just teaches the policy to be uniform).
+        """
+        nz = (policies > 0).sum(axis=1)
+        n_legal = (legal_masks > 0).sum(axis=1)
+        pmax = policies.max(axis=1)
+        uniform = (nz > 3) & (nz == n_legal) & np.isclose(pmax, 1.0 / np.maximum(nz, 1), rtol=1e-3)
+        return ((nz > 0) & ~uniform).astype(np.float32)
+
+    def _train_compact(self, games, states, policies, values, legal_masks, validation_metrics) -> dict:
+        """Add positions to the compact window and train reuse * new / batch steps on fresh samples."""
+        pweights = self._policy_weights(policies, legal_masks)
+        self.compact_buffer.add(states, policies, values, legal_masks, policy_weights=pweights)
+        new = len(states)
+        steps = max(1, int(math.ceil(new * self.reuse / self.batch_size)))
+        print(f"[Trainer] Window: {len(self.compact_buffer):,} / {self.compact_buffer.capacity:,} positions "
+              f"({self.compact_buffer.total_positions_seen:,} seen); {new} new "
+              f"({(pweights == 0).mean():.1%} value-only); training {steps} steps")
+        rng = np.random.default_rng()
+        metrics = self.network_trainer.train_steps(
+            lambda: self.compact_buffer.sample(self.batch_size, rng), steps)
+        avg_len = sum(len(g.moves) for g in games) / len(games) if games else 0
+        return {
+            'games': len(games),
+            'examples': new,
+            'final_loss': metrics['loss'],
+            'final_policy_loss': metrics['policy_loss'],
+            'final_value_loss': metrics['value_loss'],
+            'final_difficulty_loss': 0.0,
+            'final_illegal_penalty': metrics['illegal_penalty'],
+            'epochs': 0,
+            'steps': steps,
+            **validation_metrics,
+            'pass_decision_rate': None,
+            'avg_game_length': avg_len,
         }
 
     def _compute_extended_metrics(
@@ -1123,14 +1200,23 @@ def main():
                         help='Network filter count (overrides --network-size)')
     parser.add_argument('--blocks', type=int, default=None,
                         help='Network residual blocks (overrides --network-size)')
-    parser.add_argument('--network-size', type=str, default='medium', choices=['small', 'medium', 'large'],
+    parser.add_argument('--network-size', type=str, default='medium', choices=['small', 'medium', 'large', 'medium_v2'],
                         help='Network size preset: small (~236K), medium (~2.4M), large (~24M)')
     parser.add_argument('--output', type=Path, default=Path('output/trainer'),
                         help='Output directory')
-    parser.add_argument('--gamma', type=float, default=0.99,
-                        help='Value discount factor for TD(λ) (default: 0.99)')
-    parser.add_argument('--td-lambda', type=float, default=0.95,
-                        help='TD(λ) trace decay (default: 0.95, 1.0=pure MC)')
+    parser.add_argument('--gamma', type=float, default=1.0,
+                        help='Value discount factor for TD(λ) (default: 1.0 = undiscounted game outcome)')
+    parser.add_argument('--td-lambda', type=float, default=1.0,
+                        help='TD(λ) trace decay (default: 1.0 = pure game outcome, no bootstrapping)')
+    parser.add_argument('--legacy-buffer', action='store_true',
+                        help='Old dense replay buffer + epochs per batch (default: compact window + steps)')
+    parser.add_argument('--reuse', type=float, default=2.0,
+                        help='Training samples per new position (compact buffer; default 2)')
+    parser.add_argument('--window-min', type=int, default=250_000)
+    parser.add_argument('--window-max', type=int, default=3_000_000)
+    parser.add_argument('--window-fraction', type=float, default=0.25)
+    parser.add_argument('--value-weight', type=float, default=1.5)
+    parser.add_argument('--value-weight-quartic', type=float, default=0.0)
     parser.add_argument('--run-name', type=str, default='',
                         help='Name prefix for model versions (e.g. "v2" → "v2_iter_001")')
     parser.add_argument('--optimizer', type=str, default='adam', choices=['adam', 'sgd'],
@@ -1170,6 +1256,13 @@ def main():
         run_name=args.run_name,
         optimizer_type=args.optimizer,
         momentum=args.momentum,
+        legacy_buffer=args.legacy_buffer,
+        reuse=args.reuse,
+        window_min=args.window_min,
+        window_max=args.window_max,
+        window_fraction=args.window_fraction,
+        value_weight=args.value_weight,
+        value_weight_quartic=args.value_weight_quartic,
     )
 
     # Handle signals for graceful shutdown

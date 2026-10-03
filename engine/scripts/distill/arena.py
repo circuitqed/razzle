@@ -174,7 +174,8 @@ def random_openings(n: int, plies: int, rng: random.Random) -> list[list[int]]:
 
 
 class Model:
-    def __init__(self, path: str, device: torch.device):
+    def __init__(self, path: str, device: torch.device, value_scale: float = 1.0):
+        self.value_scale = value_scale   # diagnostic: stretch value outputs (clamped to [-1, 1])
         self.net = RazzleNet.load(path, device=str(device)).to(device).eval()
         self.device = device
         self.rot = torch.from_numpy(MOVE_ROTATION_MAP.astype(np.int64)).to(device)
@@ -191,7 +192,10 @@ class Model:
         if p1.any():
             p[p1] = p[p1][:, self.rot]      # back to absolute orientation for player 1
         self.evals += len(players)
-        return p.cpu().numpy(), v.float().squeeze(1).cpu().numpy()
+        v = v.float().squeeze(1)
+        if self.value_scale != 1.0:
+            v = (v * self.value_scale).clamp(-1.0, 1.0)
+        return p.cpu().numpy(), v.cpu().numpy()
 
 
 def main():
@@ -208,6 +212,8 @@ def main():
     ap.add_argument('--seed', type=int, default=0)
     ap.add_argument('--device', default='cuda')
     ap.add_argument('--json', default='', help='append a result line to this file')
+    ap.add_argument('--value-scale-a', type=float, default=1.0, help='diagnostic: multiply A value outputs')
+    ap.add_argument('--value-scale-b', type=float, default=1.0)
     args = ap.parse_args()
 
     dev = torch.device(args.device)
@@ -216,8 +222,9 @@ def main():
         torch.backends.cudnn.allow_tf32 = True
     sims_a = args.sims_a or args.sims
     sims_b = args.sims_b or args.sims
-    model_a = Model(args.a, dev)
-    model_b = model_a if args.b == args.a else Model(args.b, dev)
+    model_a = Model(args.a, dev, args.value_scale_a)
+    same = args.b == args.a and args.value_scale_a == args.value_scale_b
+    model_b = model_a if same else Model(args.b, dev, args.value_scale_b)
 
     rng = random.Random(args.seed)
     pairs = (args.games + 1) // 2
@@ -280,6 +287,7 @@ def main():
     se = math.sqrt(max(s * (1 - s), 1e-9) / n)
     elo = lambda p: -400 * math.log10(1 / min(max(p, 1e-3), 1 - 1e-3) - 1)
     res = dict(a=args.a, b=args.b, sims_a=sims_a, sims_b=sims_b, games=n,
+               value_scale_a=args.value_scale_a, value_scale_b=args.value_scale_b,
                score_a=round(s, 4), ci95=round(1.96 * se, 4),
                elo_a_minus_b=round(elo(s)), elo_ci95=[round(elo(s - 1.96 * se)), round(elo(s + 1.96 * se))],
                median_ply=int(np.median(plies)), secs=round(time.time() - t0),
