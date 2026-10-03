@@ -519,6 +519,7 @@ static void expand_node(MCTSTree *tree, int node_idx, const float *policy) {
     }
 
     int prev_child = -1;
+    int made = 0;
     for (i = 0; i < num_moves; i++) {
         int m = moves[i];
         int idx = (m == -1) ? END_TURN_ACTION : m;
@@ -550,9 +551,11 @@ static void expand_node(MCTSTree *tree, int node_idx, const float *policy) {
             node_at(tree, prev_child)->next_sibling = child_idx;
         }
         prev_child = child_idx;
+        made++;
     }
 
-    node_at(tree, node_idx)->num_children = (prev_child >= 0) ? num_moves : 0;
+    /* If the node pool ran out mid-expansion only `made` children exist. */
+    node_at(tree, node_idx)->num_children = made;
     node_at(tree, node_idx)->is_expanded = 1;
 }
 
@@ -793,6 +796,26 @@ void razzle_mcts_get_policy(MCTSTree *tree, float *policy_out, float temperature
             }
         }
     }
+}
+
+/* Tree reuse: make the root's child reached by `action` the new root, keeping
+ * its subtree (visits, values, expansions). Returns 1 on success, 0 if that
+ * child doesn't exist or isn't expanded (caller should start a fresh tree).
+ * Old nodes stay allocated in the pool; check tree->count against capacity. */
+int razzle_mcts_reroot(MCTSTree *tree, int action) {
+    MCTSNode *root = node_at(tree, tree->root);
+    int c = root->first_child;
+    while (c >= 0) {
+        MCTSNode *ch = node_at(tree, c);
+        if (ch->parent_action == action) {
+            if (!ch->is_expanded || ch->is_terminal || ch->first_child < 0) return 0;
+            tree->root = c;
+            ch->parent = -1;
+            return 1;
+        }
+        c = ch->next_sibling;
+    }
+    return 0;
 }
 
 int razzle_mcts_root_visits(MCTSTree *tree) {

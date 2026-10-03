@@ -88,3 +88,5 @@ int  razzle_mcts_check_immediate_win(MCTSTree *tree);
 int  razzle_mcts_get_root_children(MCTSTree *tree, int *actions_out,
                                     int *visits_out, float *values_out,
                                     float *priors_out);
+
+int  razzle_mcts_reroot(MCTSTree *tree, int action);  /* tree reuse */

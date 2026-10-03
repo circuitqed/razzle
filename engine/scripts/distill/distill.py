@@ -269,9 +269,10 @@ def main():
         student.load_state_dict(ck['student'])
         opt.load_state_dict(ck['opt'])
         step, best = ck['step'], ck.get('best', best)
-        torch.set_rng_state(ck['rng_cpu'])
+        # map_location moved these onto the device; RNG states must be CPU ByteTensors
+        torch.set_rng_state(ck['rng_cpu'].cpu())
         if cuda and ck.get('rng_cuda') is not None:
-            torch.cuda.set_rng_state(ck['rng_cuda'])
+            torch.cuda.set_rng_state(ck['rng_cuda'].cpu())
         print(f'resumed from step {step}', flush=True)
     else:
         torch.manual_seed(args.seed)
