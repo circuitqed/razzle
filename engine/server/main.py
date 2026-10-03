@@ -1179,7 +1179,12 @@ async def lifespan(app: FastAPI):
 
     # Daily SQLite backup
     def _run_backup():
-        """Back up the database, keeping last 7 backups."""
+        """Back up the database, keeping the last few.
+
+        The database is 5.6 GB, so 7 uncompressed copies is ~39 GB — enough on its
+        own to fill the host (it did). gzip takes a SQLite file down several-fold,
+        and the copy is made first so the backup is still a consistent snapshot.
+        """
         backup_dir = Path("/app/server/data/backups")
         backup_dir.mkdir(parents=True, exist_ok=True)
         db_path = persistence.DEFAULT_DB_PATH
@@ -1187,11 +1192,19 @@ async def lifespan(app: FastAPI):
             timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
             backup_path = backup_dir / f"games_{timestamp}.db"
             shutil.copy2(str(db_path), str(backup_path))
-            logging.info(f"Database backed up to {backup_path}")
+            # Compress in place: restore with `gunzip games_<ts>.db.gz`.
+            gz_path = backup_path.with_suffix(".db.gz")
+            with open(backup_path, "rb") as src, gzip.open(gz_path, "wb", compresslevel=6) as dst:
+                shutil.copyfileobj(src, dst, length=16 * 1024 * 1024)
+            backup_path.unlink()
+            logging.info(
+                f"Database backed up to {gz_path} "
+                f"({gz_path.stat().st_size / 1e9:.2f} GB from {db_path.stat().st_size / 1e9:.2f} GB)"
+            )
 
-            # Keep only last 7 backups
-            backups = sorted(backup_dir.glob("games_*.db"))
-            for old in backups[:-7]:
+            # Keep the last 4 (older uncompressed .db backups are swept too)
+            backups = sorted(backup_dir.glob("games_*.db*"))
+            for old in backups[:-4]:
                 old.unlink()
                 logging.info(f"Removed old backup {old}")
 
