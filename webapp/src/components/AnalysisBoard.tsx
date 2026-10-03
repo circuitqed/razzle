@@ -5,6 +5,7 @@ import * as gamesApi from '../api/games';
 import type { MoveAnalysis } from '../api/games';
 import { BoardState } from '../types';
 import { getInitialState } from '../utils/replay';
+import { useDialogA11y } from '../hooks/useDialogA11y';
 
 interface AnalysisBoardProps {
   isOpen: boolean;
@@ -12,6 +13,7 @@ interface AnalysisBoardProps {
 }
 
 export default function AnalysisBoard({ isOpen, onClose }: AnalysisBoardProps) {
+  const dialogRef = useDialogA11y(onClose);
   const initialState = getInitialState();
 
   const [board, setBoard] = useState<BoardState>(initialState.board);
@@ -159,7 +161,7 @@ export default function AnalysisBoard({ isOpen, onClose }: AnalysisBoardProps) {
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+    <div ref={dialogRef} role="dialog" aria-modal="true" className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
       <div className="bg-gray-900 rounded-lg p-4 max-w-4xl w-full mx-4 max-h-[95vh] overflow-y-auto">
         {/* Header */}
         <div className="flex justify-between items-center mb-4">

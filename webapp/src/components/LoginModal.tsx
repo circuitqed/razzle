@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useAuth } from '../contexts/AuthContext';
+import { useDialogA11y } from '../hooks/useDialogA11y';
 
 interface LoginModalProps {
   isOpen: boolean;
@@ -9,6 +10,7 @@ interface LoginModalProps {
 }
 
 export default function LoginModal({ isOpen, onClose, onSwitchToRegister, onForgotPassword }: LoginModalProps) {
+  const dialogRef = useDialogA11y(onClose);
   const { loginWithEmail, requestMagicLink, isAuthenticated } = useAuth();
   const [emailOrUsername, setEmailOrUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -69,7 +71,7 @@ export default function LoginModal({ isOpen, onClose, onSwitchToRegister, onForg
   };
 
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+    <div ref={dialogRef} role="dialog" aria-modal="true" className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
       <div className="bg-gray-800 rounded-lg p-6 max-w-sm w-full mx-4">
         <h2 className="text-xl font-bold text-white mb-4">Login</h2>
 

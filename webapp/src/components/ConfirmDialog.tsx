@@ -1,3 +1,5 @@
+import { useDialogA11y } from '../hooks/useDialogA11y';
+
 interface ConfirmDialogProps {
   isOpen: boolean;
   title: string;
@@ -17,10 +19,11 @@ export default function ConfirmDialog({
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
+  const dialogRef = useDialogA11y(onCancel);
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+    <div ref={dialogRef} role="dialog" aria-modal="true" className="fixed inset-0 z-50 flex items-center justify-center p-4">
       {/* Backdrop */}
       <div
         className="absolute inset-0 bg-black/50"

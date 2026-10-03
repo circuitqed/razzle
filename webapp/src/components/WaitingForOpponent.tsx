@@ -5,6 +5,7 @@
 
 import { useState, useEffect } from 'react';
 import { SHARE_ORIGIN } from '../api/base';
+import { useDialogA11y } from '../hooks/useDialogA11y';
 
 interface WaitingForOpponentProps {
   joinCode: string;
@@ -17,6 +18,7 @@ export default function WaitingForOpponent({
   hostColor,
   onCancel,
 }: WaitingForOpponentProps) {
+  const dialogRef = useDialogA11y();
   const [copied, setCopied] = useState(false);
   const [dots, setDots] = useState('');
 
@@ -65,7 +67,7 @@ export default function WaitingForOpponent({
   };
 
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50">
+    <div ref={dialogRef} role="dialog" aria-modal="true" className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50">
       <div className="bg-gray-800 rounded-lg p-8 max-w-md w-full mx-4 text-center">
         {/* Color indicator */}
         <div className="mb-4 flex items-center justify-center gap-2">

@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useAuth } from '../contexts/AuthContext';
+import { useDialogA11y } from '../hooks/useDialogA11y';
 
 interface UsernamePickerModalProps {
   isOpen: boolean;
@@ -9,6 +10,7 @@ interface UsernamePickerModalProps {
 }
 
 export default function UsernamePickerModal({ isOpen, onClose, tempToken, suggestedName }: UsernamePickerModalProps) {
+  const dialogRef = useDialogA11y(onClose);
   const { googleComplete } = useAuth();
   const [username, setUsername] = useState('');
   const [displayName, setDisplayName] = useState(suggestedName);
@@ -50,7 +52,7 @@ export default function UsernamePickerModal({ isOpen, onClose, tempToken, sugges
   };
 
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+    <div ref={dialogRef} role="dialog" aria-modal="true" className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
       <div className="bg-gray-800 rounded-lg p-6 max-w-sm w-full mx-4">
         <h2 className="text-xl font-bold text-white mb-2">Choose a Username</h2>
         <p className="text-sm text-gray-400 mb-4">Pick a unique username for your KnightBall account.</p>

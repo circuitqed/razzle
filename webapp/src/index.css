@@ -108,3 +108,8 @@ body.native-app [contenteditable="true"] {
     height: calc(var(--kb-board-desktop) * 1.137 - 44px);
   }
 }
+
+/* Dialogs take focus on open (so Tab/VoiceOver start inside); no ring on the container itself. */
+[role="dialog"]:focus {
+  outline: none;
+}

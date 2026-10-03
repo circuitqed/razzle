@@ -4,6 +4,7 @@ import { useTutorial } from '../hooks/useTutorial';
 import type { TutorialStep as HookStep } from '../hooks/useTutorial';
 import { TUTORIAL_STEPS } from '../data/tutorialSteps';
 import { mustPass as checkMustPass } from '../engine/moves';
+import { useDialogA11y } from '../hooks/useDialogA11y';
 
 interface TutorialProps {
   onComplete: () => void;
@@ -11,6 +12,7 @@ interface TutorialProps {
 }
 
 export default function Tutorial({ onComplete, onSkip }: TutorialProps) {
+  const dialogRef = useDialogA11y(onSkip);
   const hookSteps = useMemo<HookStep[]>(
     () =>
       TUTORIAL_STEPS.map((s) => ({
@@ -42,7 +44,7 @@ export default function Tutorial({ onComplete, onSkip }: TutorialProps) {
   const isLastStep = tut.currentStep === tut.totalSteps - 1;
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/80 flex flex-col items-center justify-center p-4">
+    <div ref={dialogRef} role="dialog" aria-modal="true" className="fixed inset-0 z-50 bg-black/80 flex flex-col items-center justify-center p-4">
       {/* Instruction panel — fixed height to prevent board shifting */}
       <div className="max-w-md w-full text-center mb-3 h-20 flex flex-col justify-center">
         <h2 className="text-lg sm:text-xl font-bold text-white mb-0.5">

@@ -4,6 +4,7 @@ import type { GameSummary } from '../api/games';
 import { useAuth } from '../contexts/AuthContext';
 import { getPlayers } from '../api/leaderboard';
 import type { PlayerProfile } from '../types';
+import { useDialogA11y } from '../hooks/useDialogA11y';
 
 interface GameBrowserProps {
   isOpen: boolean;
@@ -12,6 +13,7 @@ interface GameBrowserProps {
 }
 
 export default function GameBrowser({ isOpen, onClose, onSelectGame }: GameBrowserProps) {
+  const dialogRef = useDialogA11y(onClose);
   const { user } = useAuth();
   const [games, setGames] = useState<GameSummary[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -163,7 +165,7 @@ export default function GameBrowser({ isOpen, onClose, onSelectGame }: GameBrows
   };
 
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+    <div ref={dialogRef} role="dialog" aria-modal="true" className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
       <div className="bg-gray-800 rounded-lg p-6 max-w-4xl w-full mx-4 max-h-[90vh] flex flex-col">
         <div className="flex justify-between items-center mb-4">
           <h2 className="text-xl font-bold text-white">Game History</h2>

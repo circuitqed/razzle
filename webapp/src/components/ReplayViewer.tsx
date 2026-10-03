@@ -7,6 +7,7 @@ import type { GameFull } from '../api/games';
 import { decodeMove } from '../types';
 import { reconstructPositions, getLastMoveAtPosition, generatePGN, type ReplayState } from '../utils/replay';
 import { exportGameGif } from '../utils/exportGif';
+import { useDialogA11y } from '../hooks/useDialogA11y';
 
 const END_TURN_MOVE = -1;
 const REPLAY_ANIMATION_MS = 500; // slower per-segment for replay visibility
@@ -17,6 +18,7 @@ interface ReplayViewerProps {
 }
 
 export default function ReplayViewer({ gameId, onClose }: ReplayViewerProps) {
+  const dialogRef = useDialogA11y(onClose);
   const [gameData, setGameData] = useState<GameFull | null>(null);
   const [positions, setPositions] = useState<ReplayState[]>([]);
   const [currentPly, setCurrentPly] = useState(0);
@@ -235,7 +237,7 @@ export default function ReplayViewer({ gameId, onClose }: ReplayViewerProps) {
 
   if (isLoading) {
     return (
-      <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+      <div ref={dialogRef} role="dialog" aria-modal="true" className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
         <div className="bg-gray-800 rounded-lg p-8">
           <div className="text-white">Loading game...</div>
         </div>
@@ -245,7 +247,7 @@ export default function ReplayViewer({ gameId, onClose }: ReplayViewerProps) {
 
   if (error || !gameData || !currentState) {
     return (
-      <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+      <div ref={dialogRef} role="dialog" aria-modal="true" className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
         <div className="bg-gray-800 rounded-lg p-8">
           <div className="text-red-400 mb-4">{error || 'Failed to load game'}</div>
           <button
@@ -260,7 +262,7 @@ export default function ReplayViewer({ gameId, onClose }: ReplayViewerProps) {
   }
 
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+    <div ref={dialogRef} role="dialog" aria-modal="true" className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
       <div className="bg-gray-900 rounded-lg p-4 max-w-4xl w-full mx-4 max-h-[95vh] overflow-y-auto">
         {/* Header */}
         <div className="flex justify-between items-center mb-4">

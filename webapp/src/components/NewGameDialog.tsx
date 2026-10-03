@@ -4,6 +4,7 @@ import { useOnlineStatus } from '../hooks/useOnlineStatus';
 import * as onlineApi from '../api/online';
 import type { ModelInfo } from '../api/engine';
 import { getAutoMatchLevel, setAutoMatchLevel, getTierSettings, getLevelLabel, TIERS } from '../utils/autoMatch';
+import { useDialogA11y } from '../hooks/useDialogA11y';
 
 type GameMode = 'ai' | 'pvp' | 'online';
 type ColorChoice = 'blue' | 'red' | 'random';
@@ -136,6 +137,7 @@ export default function NewGameDialog({
   availableModels,
   currentSettings,
 }: NewGameDialogProps) {
+  const dialogRef = useDialogA11y(onClose);
   const { user } = useAuth();
 
   // Shared state
@@ -407,7 +409,7 @@ export default function NewGameDialog({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+    <div ref={dialogRef} role="dialog" aria-modal="true" className="fixed inset-0 z-50 flex items-center justify-center p-4">
       {/* Backdrop */}
       <div className="absolute inset-0 bg-black/50" onClick={onClose} />
 

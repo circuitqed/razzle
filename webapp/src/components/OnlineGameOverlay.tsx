@@ -4,6 +4,7 @@
  */
 
 import type { ConnectionStatus } from '../hooks/useOnlineGame';
+import { useDialogA11y } from '../hooks/useDialogA11y';
 
 interface OnlineGameOverlayProps {
   connectionStatus: ConnectionStatus;
@@ -14,11 +15,12 @@ export default function OnlineGameOverlay({
   connectionStatus,
   onReconnect,
 }: OnlineGameOverlayProps) {
+  const dialogRef = useDialogA11y();
   return (
     <>
       {/* Connection status overlay — only for YOUR connection issues */}
       {connectionStatus !== 'connected' && (
-        <div className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-40">
+        <div ref={dialogRef} role="dialog" aria-modal="true" className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-40">
           <div className="bg-gray-800 rounded-lg p-6 text-center max-w-sm">
             {connectionStatus === 'connecting' && (
               <>

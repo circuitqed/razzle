@@ -1,5 +1,6 @@
 import { useState, useCallback } from 'react';
 import { submitBugReport } from '../api/engine';
+import { useDialogA11y } from '../hooks/useDialogA11y';
 
 interface BugReportDialogProps {
   isOpen: boolean;
@@ -20,6 +21,7 @@ export default function BugReportDialog({
   aiModel,
   gameId,
 }: BugReportDialogProps) {
+  const dialogRef = useDialogA11y(onClose);
   const [description, setDescription] = useState('');
   const [status, setStatus] = useState<'idle' | 'submitting' | 'success' | 'error'>('idle');
   const [errorMsg, setErrorMsg] = useState('');
@@ -55,7 +57,7 @@ export default function BugReportDialog({
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+    <div ref={dialogRef} role="dialog" aria-modal="true" className="fixed inset-0 z-50 flex items-center justify-center p-4">
       {/* Backdrop */}
       <div className="absolute inset-0 bg-black/50" onClick={handleClose} />
 

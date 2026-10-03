@@ -1,4 +1,5 @@
 import { Link } from 'react-router-dom';
+import { useDialogA11y } from '../hooks/useDialogA11y';
 
 interface RulesModalProps {
   isOpen: boolean;
@@ -7,10 +8,11 @@ interface RulesModalProps {
 }
 
 export default function RulesModal({ isOpen, onClose, onStartTutorial }: RulesModalProps) {
+  const dialogRef = useDialogA11y(onClose);
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+    <div ref={dialogRef} role="dialog" aria-modal="true" className="fixed inset-0 z-50 flex items-center justify-center p-4">
       {/* Backdrop */}
       <div className="absolute inset-0 bg-black/50" onClick={onClose} />
 
