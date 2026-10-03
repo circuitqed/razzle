@@ -6,11 +6,13 @@ interface MoveHistoryProps {
   moves: number[];
   /** Current viewing ply (null = live position) */
   viewPly?: number | null;
+  /** Height class for the panel (default fixed 400px). */
+  heightClass?: string;
 }
 
-export default function MoveHistory({ moves, viewPly }: MoveHistoryProps) {
+export default function MoveHistory({ moves, viewPly, heightClass }: MoveHistoryProps) {
   // Fixed height to match board (8 rows × 50px = 400px)
-  const FIXED_HEIGHT = 'h-[400px]';
+  const FIXED_HEIGHT = heightClass ?? 'h-[400px]';
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const formattedTurns = useMemo(() => {

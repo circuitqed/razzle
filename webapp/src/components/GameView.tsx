@@ -138,9 +138,9 @@ export default function GameView({
           </div>
 
           {/* Board + eval meter + move history (desktop) row */}
-          <div className="flex gap-2 items-start">
+          <div className="flex gap-2 items-start justify-center w-full sm:w-auto">
             {/* Board column: names + board share same width */}
-            <div className="inline-block w-full max-w-[400px] sm:max-w-none sm:w-auto">
+            <div className="kb-board-col flex-1 sm:flex-none min-w-0">
               {/* Opponent name + clock above board */}
               {(topName || topClock) && (
                 <div className="flex items-center justify-between mb-1" style={{ paddingLeft: '3.846%' }}>
@@ -161,6 +161,7 @@ export default function GameView({
                 lastMove={lastMove}
                 lastTurnMoves={lastTurnMoves}
                 animate={!isViewingHistory}
+                fluid
               />
               {/* Player name + clock below board */}
               {(bottomName || bottomClock) && (
@@ -176,7 +177,7 @@ export default function GameView({
             )}
             {/* Desktop: move history panel + navigation buttons */}
             <div className="hidden sm:flex sm:flex-col sm:gap-2">
-              <MoveHistory moves={rawMoves} viewPly={viewPly} />
+              <MoveHistory moves={rawMoves} viewPly={viewPly} heightClass="kb-history-h" />
               <div className="flex items-center gap-2 justify-center">
                 <button
                   onClick={goToStart}
@@ -215,7 +216,7 @@ export default function GameView({
           </div>
 
           {/* Mobile: compact move history bar + navigation */}
-          <div className="mt-2 w-full max-w-[400px] sm:hidden">
+          <div className="mt-2 w-full max-w-[560px] sm:hidden">
             <div className="flex items-center gap-1 justify-center">
               <button
                 onClick={goToStart}
@@ -296,7 +297,7 @@ export default function GameView({
           </div>
 
           {/* Action buttons */}
-          <div className="mt-3 flex flex-wrap justify-center gap-2">
+          <div className="mt-3 flex flex-wrap justify-center gap-1.5 sm:gap-2">
             {/* Complete Pass / Cancel Pass (during pass chain) */}
             {isPassing && !isViewingHistory && gameState.status === 'playing' && (
               <>

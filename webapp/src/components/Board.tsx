@@ -28,6 +28,8 @@ interface BoardProps {
   lastMove?: LastMove | null; // Last move for highlighting
   lastTurnMoves?: LastMove[]; // All moves in last opponent turn (for multi-pass animation)
   animate?: boolean; // Whether to animate piece movement (default true)
+  /** Fill the parent's width instead of the fixed 400px default (the parent sizes it). */
+  fluid?: boolean;
   animationDuration?: number; // ms per segment (default ANIMATION_DURATION)
   suggestedMoves?: number[]; // Moves to highlight green; other legal moves shown gray
 }
@@ -77,6 +79,7 @@ export default function Board({
   lastMove = null,
   lastTurnMoves,
   animate = true,
+  fluid = false,
   animationDuration = ANIMATION_DURATION,
   suggestedMoves,
 }: BoardProps) {
@@ -529,13 +532,13 @@ export default function Board({
   }
 
   return (
-    <div className="inline-block w-full max-w-[400px] sm:max-w-none sm:w-auto">
+    <div className={fluid ? 'block w-full' : 'inline-block w-full max-w-[400px] sm:max-w-none sm:w-auto'}>
       <svg
         ref={svgRef}
         width="100%"
         height="auto"
         viewBox={`${-LABEL_PAD_LEFT} 0 ${BOARD_WIDTH + LABEL_PAD_LEFT} ${BOARD_HEIGHT + LABEL_PAD_BOTTOM}`}
-        className="w-full sm:w-[400px]"
+        className={fluid ? 'w-full' : 'w-full sm:w-[400px]'}
         preserveAspectRatio="xMidYMid meet"
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}

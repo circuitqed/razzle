@@ -83,3 +83,28 @@ body.native-app [contenteditable="true"] {
   -webkit-user-select: text;
   user-select: text;
 }
+
+/* Main game board sizing (GameView). Phones: as wide as the screen allows but
+   short enough that board + controls fit without scrolling (0.879 = board
+   aspect, 290px ≈ header/status/names/history/buttons). Desktop: grows with
+   window height between 400 and 600px. The desktop move list matches it. */
+:root {
+  --kb-board-desktop: clamp(400px, calc((100dvh - 330px) * 0.879), 600px);
+}
+.kb-board-col {
+  width: 100%;
+  max-width: min(100%, 560px, max(240px, calc((100dvh - 290px - env(safe-area-inset-top) - env(safe-area-inset-bottom)) * 0.879)));
+}
+.kb-history-h {
+  height: 400px;
+}
+@media (min-width: 640px) {
+  .kb-board-col {
+    width: var(--kb-board-desktop);
+    max-width: none;
+  }
+  .kb-history-h {
+    /* board height (width × 414/364) minus the nav buttons under the list */
+    height: calc(var(--kb-board-desktop) * 1.137 - 44px);
+  }
+}
