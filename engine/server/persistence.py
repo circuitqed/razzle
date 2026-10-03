@@ -4,10 +4,13 @@ SQLite persistence for game and user storage.
 Provides durable storage for games and user accounts.
 """
 
+import gzip
 import hashlib
 import json
 import secrets
 import sqlite3
+import threading
+import zlib
 from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import datetime, timedelta
@@ -24,6 +27,68 @@ if _DATA_DIR.is_dir():
     DEFAULT_DB_PATH = _DATA_DIR / "games.db"
 else:
     DEFAULT_DB_PATH = Path(__file__).parent / "games.db"
+
+# Self-play training games live in their own database next to games.db
+# (training.db), stored zlib-compressed, plus an append-only daily JSONL.gz
+# archive (training_archive/). They're the valuable, hard-to-regenerate
+# resource, but they shouldn't bloat games.db or its daily backups. Archive
+# files are immutable once their day is over, so they can be offloaded (e.g.
+# rclone to Google Drive) and deleted locally. Paths derive from
+# DEFAULT_DB_PATH at call time so tests that patch it stay isolated.
+_archive_lock = threading.Lock()
+
+
+def training_db_path() -> Path:
+    return DEFAULT_DB_PATH.parent / "training.db"
+
+
+def training_archive_dir() -> Path:
+    return DEFAULT_DB_PATH.parent / "training_archive"
+
+
+def _ensure_selfplay_schema(conn) -> None:
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS selfplay_games (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            worker_id TEXT NOT NULL,
+            model_version TEXT,
+            run_name TEXT,
+            result REAL NOT NULL,
+            num_moves INTEGER NOT NULL,
+            status TEXT DEFAULT 'pending',
+            created_at TEXT NOT NULL,
+            data BLOB NOT NULL
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_selfplay_status ON selfplay_games(status, id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_selfplay_run ON selfplay_games(run_name)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_selfplay_worker ON selfplay_games(worker_id)")
+
+
+def _run_name(model_version: Optional[str]) -> str:
+    if model_version and "_iter_" in model_version:
+        return model_version.split("_iter_")[0]
+    return ""
+
+
+def _pack_game(moves: list, visit_counts: list) -> bytes:
+    return zlib.compress(json.dumps({"moves": moves, "visit_counts": visit_counts}).encode(), 6)
+
+
+def _unpack_game(blob: bytes) -> tuple[list, list]:
+    d = json.loads(zlib.decompress(blob))
+    return d["moves"], d["visit_counts"]
+
+
+def _archive_game(record: dict) -> None:
+    """Append one game to today's archive file (multi-member gzip; readable by gzip.open/zcat)."""
+    d = training_archive_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    path = d / f"selfplay_{datetime.utcnow().strftime('%Y%m%d')}.jsonl.gz"
+    line = (json.dumps(record) + "\n").encode()
+    with _archive_lock, gzip.open(path, "ab") as f:
+        f.write(line)
+
 
 # Password hashing configuration
 HASH_ITERATIONS = 100000
@@ -1517,16 +1582,25 @@ def save_training_game(
     Returns the game ID.
     """
     if db_path is None:
-        db_path = DEFAULT_DB_PATH
+        db_path = training_db_path()
     now = datetime.utcnow().isoformat() + 'Z'
 
     with get_connection(db_path) as conn:
+        _ensure_selfplay_schema(conn)
         cursor = conn.execute("""
-            INSERT INTO training_games (worker_id, moves, result, visit_counts, model_version, status, created_at)
-            VALUES (?, ?, ?, ?, ?, 'pending', ?)
-        """, (worker_id, json.dumps(moves), result, json.dumps(visit_counts), model_version, now))
+            INSERT INTO selfplay_games (worker_id, model_version, run_name, result, num_moves, status, created_at, data)
+            VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)
+        """, (worker_id, model_version, _run_name(model_version), result, len(moves), now,
+              _pack_game(moves, visit_counts)))
         conn.commit()
-        return cursor.lastrowid
+        game_id = cursor.lastrowid
+
+    try:
+        _archive_game({"id": game_id, "worker_id": worker_id, "model": model_version, "created_at": now,
+                       "moves": moves, "result": result, "visit_counts": visit_counts})
+    except Exception as e:   # never lose the DB write over an archive hiccup
+        print(f"[persistence] training archive append failed: {e}")
+    return game_id
 
 
 def get_pending_training_games(
@@ -1545,43 +1619,41 @@ def get_pending_training_games(
         Tuple of (list of games, total pending count)
     """
     if db_path is None:
-        db_path = DEFAULT_DB_PATH
+        db_path = training_db_path()
 
     with get_connection(db_path) as conn:
-        # Get total pending count
-        count_row = conn.execute(
-            "SELECT COUNT(*) as count FROM training_games WHERE status = 'pending'"
-        ).fetchone()
-        total_pending = count_row["count"]
+        _ensure_selfplay_schema(conn)
+        total_pending = conn.execute(
+            "SELECT COUNT(*) as count FROM selfplay_games WHERE status = 'pending'"
+        ).fetchone()["count"]
 
-        # Fetch games
         rows = conn.execute("""
-            SELECT id, worker_id, moves, result, visit_counts, model_version, created_at
-            FROM training_games
+            SELECT id, worker_id, data, result, model_version, created_at
+            FROM selfplay_games
             WHERE status = 'pending'
-            ORDER BY created_at ASC
+            ORDER BY id ASC
             LIMIT ?
         """, (limit,)).fetchall()
 
         games = []
         game_ids = []
         for row in rows:
+            moves, visit_counts = _unpack_game(row["data"])
             games.append({
                 "id": row["id"],
                 "worker_id": row["worker_id"],
-                "moves": json.loads(row["moves"]),
+                "moves": moves,
                 "result": row["result"],
-                "visit_counts": json.loads(row["visit_counts"]),
+                "visit_counts": visit_counts,
                 "model_version": row["model_version"],
                 "created_at": row["created_at"],
             })
             game_ids.append(row["id"])
 
-        # Mark as used if requested
         if mark_used and game_ids:
             placeholders = ",".join("?" * len(game_ids))
             conn.execute(
-                f"UPDATE training_games SET status = 'used' WHERE id IN ({placeholders})",
+                f"UPDATE selfplay_games SET status = 'used' WHERE id IN ({placeholders})",
                 game_ids
             )
             conn.commit()
@@ -1605,28 +1677,27 @@ def get_all_training_games(
         Tuple of (list of games, total count)
     """
     if db_path is None:
-        db_path = DEFAULT_DB_PATH
+        db_path = training_db_path()
 
     with get_connection(db_path) as conn:
-        # Get total count
-        total = conn.execute("SELECT COUNT(*) FROM training_games").fetchone()[0]
-
-        # Fetch games
+        _ensure_selfplay_schema(conn)
+        total = conn.execute("SELECT COUNT(*) FROM selfplay_games").fetchone()[0]
         rows = conn.execute("""
-            SELECT id, worker_id, moves, result, visit_counts, model_version, created_at
-            FROM training_games
-            ORDER BY created_at DESC
+            SELECT id, worker_id, data, result, model_version, created_at
+            FROM selfplay_games
+            ORDER BY id DESC
             LIMIT ? OFFSET ?
         """, (limit, offset)).fetchall()
 
         games = []
         for row in rows:
+            moves, visit_counts = _unpack_game(row["data"])
             games.append({
                 "id": row["id"],
                 "worker_id": row["worker_id"],
-                "moves": json.loads(row["moves"]),
+                "moves": moves,
                 "result": row["result"],
-                "visit_counts": json.loads(row["visit_counts"]),
+                "visit_counts": visit_counts,
                 "model_version": row["model_version"],
                 "created_at": row["created_at"],
             })
@@ -1637,25 +1708,20 @@ def get_all_training_games(
 def get_training_games_stats(db_path: Path = None) -> dict:
     """Get statistics about training games."""
     if db_path is None:
-        db_path = DEFAULT_DB_PATH
+        db_path = training_db_path()
 
     with get_connection(db_path) as conn:
-        # Count by status
+        _ensure_selfplay_schema(conn)
         rows = conn.execute("""
-            SELECT status, COUNT(*) as count FROM training_games GROUP BY status
+            SELECT status, COUNT(*) as count FROM selfplay_games GROUP BY status
         """).fetchall()
         status_counts = {row["status"]: row["count"] for row in rows}
 
-        # Count by worker
         rows = conn.execute("""
-            SELECT worker_id, COUNT(*) as count FROM training_games GROUP BY worker_id
+            SELECT worker_id, COUNT(*) as count, MAX(created_at) as last_seen
+            FROM selfplay_games GROUP BY worker_id
         """).fetchall()
         worker_counts = {row["worker_id"]: row["count"] for row in rows}
-
-        # Get last activity per worker
-        rows = conn.execute("""
-            SELECT worker_id, MAX(created_at) as last_seen FROM training_games GROUP BY worker_id
-        """).fetchall()
         worker_last_seen = {row["worker_id"]: row["last_seen"] for row in rows}
 
         return {
@@ -1794,22 +1860,29 @@ def list_training_models(limit: int = 50, db_path: Path = None) -> list[dict]:
 
 
 def clear_training_data(db_path: Path = None) -> dict:
-    """Clear all training games and models. Returns counts of deleted items."""
+    """Reset training state between runs.
+
+    Retires the pending self-play queue (status -> 'archived'; games are kept),
+    and removes model/metric/trainer-state records. Model .pt files and
+    self-play games stay on disk: earlier resets that deleted them lost
+    irreplaceable models and games.
+    """
     if db_path is None:
         db_path = DEFAULT_DB_PATH
 
+    with get_connection(db_path.parent / "training.db") as tconn:
+        _ensure_selfplay_schema(tconn)
+        games_count = tconn.execute(
+            "UPDATE selfplay_games SET status = 'archived' WHERE status = 'pending'").rowcount
+        tconn.commit()
+
     with get_connection(db_path) as conn:
         # Get counts before deletion
-        games_count = conn.execute("SELECT COUNT(*) FROM training_games").fetchone()[0]
         models_count = conn.execute("SELECT COUNT(*) FROM training_models").fetchone()[0]
         metrics_count = conn.execute("SELECT COUNT(*) FROM training_metrics").fetchone()[0]
 
-        # Delete all training games
-        conn.execute("DELETE FROM training_games")
-
-        # Get file paths before deleting models
-        model_rows = conn.execute("SELECT file_path FROM training_models").fetchall()
-        model_files = [row["file_path"] for row in model_rows]
+        # Self-play games are never deleted here (they're the valuable part):
+        # a reset only retires the pending queue, below.
 
         # Delete all training models from DB
         conn.execute("DELETE FROM training_models")
@@ -1825,16 +1898,8 @@ def clear_training_data(db_path: Path = None) -> dict:
 
         conn.commit()
 
-        # Delete model files from disk
+        # Model files are kept on disk (only DB records are removed).
         deleted_files = 0
-        for file_path in model_files:
-            try:
-                path = Path(file_path)
-                if path.exists():
-                    path.unlink()
-                    deleted_files += 1
-            except Exception:
-                pass  # Ignore file deletion errors
 
         # Delete trainer state files from disk
         for file_path in state_files:
@@ -1847,12 +1912,53 @@ def clear_training_data(db_path: Path = None) -> dict:
                 pass
 
         return {
-            "games_deleted": games_count,
+            "games_deleted": games_count,   # pending games retired to 'archived' (not deleted)
             "models_deleted": models_count,
             "metrics_deleted": metrics_count,
             "trainer_states_deleted": trainer_state_count,
             "files_deleted": deleted_files,
         }
+
+
+def migrate_legacy_training_games(src_db: Path = None, dst_db: Path = None,
+                                  batch: int = 5000, log=print) -> dict:
+    """Copy rows from the legacy training_games table (games.db, JSON text) into
+    selfplay_games (training.db, compressed). Keeps ids and status; skips ids
+    already copied, so it is safe to re-run. Does NOT delete the legacy rows.
+    """
+    src_db = src_db or DEFAULT_DB_PATH
+    dst_db = dst_db or training_db_path()
+    copied = skipped = 0
+    with get_connection(src_db) as src, get_connection(dst_db) as dst:
+        _ensure_selfplay_schema(dst)
+        has_legacy = src.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='training_games'").fetchone()
+        if not has_legacy:
+            return {"copied": 0, "skipped": 0}
+        last = 0
+        while True:
+            rows = src.execute("""
+                SELECT id, worker_id, moves, result, visit_counts, model_version, status, created_at
+                FROM training_games WHERE id > ? ORDER BY id LIMIT ?
+            """, (last, batch)).fetchall()
+            if not rows:
+                break
+            for r in rows:
+                moves, vcs = json.loads(r["moves"]), json.loads(r["visit_counts"])
+                cur = dst.execute("""
+                    INSERT OR IGNORE INTO selfplay_games
+                        (id, worker_id, model_version, run_name, result, num_moves, status, created_at, data)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (r["id"], r["worker_id"], r["model_version"], _run_name(r["model_version"]),
+                      r["result"], len(moves), r["status"] or "used", r["created_at"], _pack_game(moves, vcs)))
+                if cur.rowcount:
+                    copied += 1
+                else:
+                    skipped += 1
+            dst.commit()
+            last = rows[-1]["id"]
+            log(f"migrated through id {last} ({copied} copied, {skipped} already present)")
+    return {"copied": copied, "skipped": skipped}
 
 
 # --- Trainer State Management ---
