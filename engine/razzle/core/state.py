@@ -213,7 +213,7 @@ class GameState:
         (_, self.pieces, self.balls, self.current_player, self.touched_mask,
          self.has_passed, self.last_knight_dst, self.ply) = entry
 
-    def to_tensor(self) -> np.ndarray:
+    def to_tensor(self, num_planes: int = 7) -> np.ndarray:
         """
         Convert state to neural network input tensor.
 
@@ -232,8 +232,15 @@ class GameState:
           - Plane 4: Touched mask (pieces that can't receive passes)
           - Plane 5: Always 1 (reserved for compatibility, player perspective is normalized)
           - Plane 6: Has passed indicator (all 1s if has_passed=True, all 0s otherwise)
+
+        With num_planes=9 (v2 networks), two more planes expose the forced-pass
+        rule, which depends on history the board alone doesn't show:
+          - Plane 7: Opponent's last knight move destination (one-hot; empty if none)
+          - Plane 8: Forced pass (all 1s if the side to move must pass now)
         """
-        planes = np.zeros((7, ROWS, COLS), dtype=np.float32)
+        if num_planes not in (7, 9):
+            raise ValueError(f"num_planes must be 7 or 9, got {num_planes}")
+        planes = np.zeros((num_planes, ROWS, COLS), dtype=np.float32)
 
         p = self.current_player
         opp = 1 - p
@@ -264,15 +271,34 @@ class GameState:
         if self.has_passed:
             planes[6, :, :] = 1.0
 
+        if num_planes == 9:
+            if self.last_knight_dst >= 0:
+                planes[7, self.last_knight_dst // COLS, self.last_knight_dst % COLS] = 1.0
+            if self.is_forced_pass():
+                planes[8, :, :] = 1.0
+
         # Rotate 180° for player 1 so both players see "advance toward far rank"
         if p == 1:
             planes = rotate_tensor_180(planes)
 
         return planes
 
+    def is_forced_pass(self) -> bool:
+        """True if the side to move must pass now (same rule as move generation)."""
+        from .moves import MoveGenerator
+        if self.has_passed or not MoveGenerator.must_pass(self):
+            return False
+        return next(iter(MoveGenerator.get_pass_moves(self)), None) is not None
+
     def __hash__(self) -> int:
-        """Hash for transposition table."""
-        return hash((tuple(self.pieces), tuple(self.balls), self.current_player, self.touched_mask, self.has_passed))
+        """Hash for transposition/eval caches.
+
+        Includes last_knight_dst: it decides the forced-pass rule (so the legal
+        moves) and is an input plane of v2 networks, so positions that differ
+        only in it must not share a cached evaluation.
+        """
+        return hash((tuple(self.pieces), tuple(self.balls), self.current_player, self.touched_mask,
+                     self.has_passed, self.last_knight_dst))
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, GameState):
@@ -282,7 +308,8 @@ class GameState:
             self.balls == other.balls and
             self.current_player == other.current_player and
             self.touched_mask == other.touched_mask and
-            self.has_passed == other.has_passed
+            self.has_passed == other.has_passed and
+            self.last_knight_dst == other.last_knight_dst
         )
 
     def __repr__(self) -> str:

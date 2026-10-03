@@ -29,6 +29,7 @@ int      razzle_state_get_winner(const RazzleState *s);
 float    razzle_state_get_result(const RazzleState *s, int player);
 int      razzle_state_get_legal_moves(const RazzleState *s, int *moves_out);
 void     razzle_state_to_tensor(const RazzleState *s, float *out);
+void     razzle_state_extra_planes(const RazzleState *s, float *out);  /* v2 planes 7-8 */
 int      razzle_state_equals(const RazzleState *a, const RazzleState *b);
 
 /* ============================================================

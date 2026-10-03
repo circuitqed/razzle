@@ -37,6 +37,9 @@ class TrainingConfig:
     optimizer: str = 'adam'  # 'adam' or 'sgd'
     momentum: float = 0.9  # SGD momentum (ignored for Adam)
     device: str = 'cuda' if torch.cuda.is_available() else 'cpu'
+    # Randomly mirror half of each batch left-right. The game is symmetric under
+    # a horizontal flip, so this doubles the effective data for free.
+    mirror_augment: bool = True
 
 
 class RazzleDataset(Dataset):
@@ -81,6 +84,8 @@ class Trainer:
         self.config = config or TrainingConfig()
 
         self.network = self.network.to(self.config.device)
+        from ..core.symmetry import MOVE_FLIP_MAP
+        self._flip_index = torch.from_numpy(MOVE_FLIP_MAP.astype(np.int64)).to(self.config.device)
 
         if self.config.optimizer == 'sgd':
             self.optimizer = torch.optim.SGD(
@@ -95,6 +100,17 @@ class Trainer:
                 lr=self.config.learning_rate,
                 weight_decay=self.config.weight_decay,
             )
+
+    def _mirror_half(self, states, policies, legal_masks):
+        """Flip a random half of the batch left-right (boards, policy targets, legal masks)."""
+        m = torch.rand(states.size(0), device=states.device) < 0.5
+        if not m.any():
+            return states, policies, legal_masks
+        states, policies, legal_masks = states.clone(), policies.clone(), legal_masks.clone()
+        states[m] = states[m].flip(-1)
+        policies[m] = policies[m][:, self._flip_index]
+        legal_masks[m] = legal_masks[m][:, self._flip_index]
+        return states, policies, legal_masks
 
     def train_epoch(
         self,
@@ -125,6 +141,9 @@ class Trainer:
             target_policies = target_policies.to(self.config.device)
             target_values = target_values.to(self.config.device)
             legal_masks = legal_masks.to(self.config.device)
+
+            if self.config.mirror_augment:
+                states, target_policies, legal_masks = self._mirror_half(states, target_policies, legal_masks)
 
             # Forward pass
             log_policies, values, difficulties = self.network(states)
@@ -195,6 +214,61 @@ class Trainer:
         if has_difficulties:
             metrics['difficulty_loss'] = total_difficulty_loss / num_batches
 
+        return metrics
+
+    def train_steps(self, sample_batch, steps: int, verbose: bool = True) -> dict:
+        """
+        Train for a fixed number of steps on batches drawn by sample_batch().
+
+        sample_batch() returns numpy arrays (states, policies, values, legal_masks,
+        policy_weights). Each position's policy loss is scaled by its weight
+        (0 = no usable policy target, e.g. random-opening or quick-search moves),
+        so those positions train the value head only. Used with
+        CompactReplayBuffer: fresh samples every step instead of epochs over
+        the newest games.
+        """
+        self.network.train()
+        dev = self.config.device
+        sums = dict(loss=0.0, policy_loss=0.0, value_loss=0.0, illegal_penalty=0.0)
+        for step in range(steps):
+            st, po, va, le, pw = sample_batch()
+            st = torch.from_numpy(st).to(dev)
+            po = torch.from_numpy(po).to(dev)
+            va = torch.from_numpy(va).to(dev)
+            le = torch.from_numpy(le).to(dev)
+            pw = torch.from_numpy(pw).to(dev)
+            if self.config.mirror_augment:
+                st, po, le = self._mirror_half(st, po, le)
+
+            log_policies, values, _ = self.network(st)
+            values = values.squeeze(-1)
+            per_pos = -torch.sum(po * le * log_policies * le, dim=1)
+            policy_loss = (per_pos * pw).sum() / pw.sum().clamp_min(1.0)
+            illegal_penalty = self.config.illegal_penalty_weight * torch.sum(
+                torch.exp(log_policies) * (1.0 - le), dim=1).mean()
+            diff = values - va
+            value_loss = torch.mean(diff ** 2)
+            loss = (self.config.policy_weight * policy_loss
+                    + self.config.value_weight * value_loss
+                    + self.config.value_weight_quartic * torch.mean(diff ** 4)
+                    + illegal_penalty)
+
+            self.optimizer.zero_grad()
+            loss.backward()
+            if self.config.max_grad_norm > 0:
+                torch.nn.utils.clip_grad_norm_(self.network.parameters(), self.config.max_grad_norm)
+            self.optimizer.step()
+
+            sums['loss'] += loss.item()
+            sums['policy_loss'] += policy_loss.item()
+            sums['value_loss'] += value_loss.item()
+            sums['illegal_penalty'] += illegal_penalty.item()
+        metrics = {k: v / max(1, steps) for k, v in sums.items()}
+        metrics['steps'] = steps
+        metrics['lr'] = self.optimizer.param_groups[0]['lr']
+        if verbose:
+            print(f"Trained {steps} steps: loss={metrics['loss']:.4f} policy={metrics['policy_loss']:.4f} "
+                  f"value={metrics['value_loss']:.4f} illegal={metrics['illegal_penalty']:.4f} lr={metrics['lr']:.6f}")
         return metrics
 
     def train(

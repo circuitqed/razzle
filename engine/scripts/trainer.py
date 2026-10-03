@@ -164,6 +164,9 @@ def games_to_training_data(
     def move_to_index(m: int) -> int:
         return END_TURN_ACTION if m == -1 else m
 
+    # Input planes the network expects (7 for v1 models, 9 for v2)
+    num_planes = getattr(network.config, 'num_input_planes', 7) if network is not None else 7
+
     for game in games:
         # Replay the game to get states and track actual player
         state = GameState.new_game()
@@ -174,7 +177,7 @@ def games_to_training_data(
 
         for move, visit_counts in zip(game.moves, game.visit_counts):
             # Record state and player BEFORE applying move
-            states.append(state.to_tensor())
+            states.append(state.to_tensor(num_planes))
             players.append(state.current_player)
 
             # Generate legal move mask for this state

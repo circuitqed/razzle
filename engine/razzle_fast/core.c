@@ -145,7 +145,9 @@ void razzle_state_init(RazzleState *s) {
     s->pieces[1] = P2_START_PIECES;
     s->balls[0]  = P1_START_BALL;
     s->balls[1]  = P2_START_BALL;
-    s->touched_mask = 0;
+    /* Current rules: every piece starts ineligible to receive a pass
+       (matches GameState.new_game() in razzle/core/state.py). */
+    s->touched_mask = P1_START_PIECES | P2_START_PIECES;
     s->current_player = 0;
     s->has_passed = 0;
     s->last_knight_dst = -1;
@@ -412,6 +414,29 @@ void razzle_state_to_tensor(const RazzleState *s, float *out) {
                         tmp_buf[ch * ROWS * COLS + (ROWS - 1 - r2) * COLS + (COLS - 1 - c2)];
                 }
             }
+        }
+    }
+}
+
+/* v2 network input planes 7 and 8 (2 x ROWS x COLS floats), in the same
+ * side-to-move orientation as razzle_state_to_tensor:
+ *   plane 7: opponent's last knight destination (one-hot; empty if none)
+ *   plane 8: forced pass (all ones if the side to move must pass now)
+ * Matches GameState.to_tensor(9) in razzle/core/state.py. */
+void razzle_state_extra_planes(const RazzleState *s, float *out) {
+    init_tables();
+    memset(out, 0, 2 * ROWS * COLS * sizeof(float));
+    int rotate = s->current_player == 1;
+    if (s->last_knight_dst >= 0) {
+        int r = sq_row(s->last_knight_dst), c = sq_col(s->last_knight_dst);
+        if (rotate) { r = ROWS - 1 - r; c = COLS - 1 - c; }
+        out[r * COLS + c] = 1.0f;
+    }
+    if (!s->has_passed && must_pass(s)) {
+        int moves[64];
+        if (gen_pass_moves(s, moves) > 0) {
+            int i;
+            for (i = 0; i < ROWS * COLS; i++) out[ROWS * COLS + i] = 1.0f;
         }
     }
 }

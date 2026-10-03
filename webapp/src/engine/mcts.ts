@@ -407,10 +407,14 @@ async function simulateBatch(
     if (evaluator.evaluateBatch) {
       results = await evaluator.evaluateBatch(leaves.map(l => l.state));
     } else {
-      // Sequential evaluation — ONNX Runtime may not handle concurrent session.run()
+      // Sequential evaluation — ONNX Runtime may not handle concurrent session.run().
+      // Copy each policy: evaluators may reuse one output buffer across calls
+      // (PureTSEvaluator does), and every leaf would otherwise be expanded with
+      // the last leaf's priors.
       results = [];
       for (const leaf of leaves) {
-        results.push(await evaluator.evaluate(leaf.state));
+        const r = await evaluator.evaluate(leaf.state);
+        results.push({ policy: Float32Array.from(r.policy), value: r.value });
       }
     }
 

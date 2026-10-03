@@ -14,6 +14,7 @@ Output:
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -26,6 +27,39 @@ from ..core.bitboard import ROWS, COLS, NUM_SQUARES
 # Index 3136 is reserved for END_TURN (-1 in game logic)
 END_TURN_ACTION = NUM_SQUARES * NUM_SQUARES  # 3136
 NUM_ACTIONS = END_TURN_ACTION + 1  # 3137 total actions
+
+# Spatial policy head geometry: 8 knight-jump planes, then 8 line directions ×
+# 7 distances (passes travel in straight lines up to 7 squares on an 8x7 board).
+_KNIGHT_OFFSETS = [(-2, -1), (-2, 1), (-1, -2), (-1, 2), (1, -2), (1, 2), (2, -1), (2, 1)]
+_LINE_DIRS = [(1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)]
+_MAX_DIST = 7
+SPATIAL_POLICY_PLANES = len(_KNIGHT_OFFSETS) + len(_LINE_DIRS) * _MAX_DIST  # 64
+
+
+def spatial_action_index() -> np.ndarray:
+    """For each of the 3137 actions, its index into [plane-major logits (64*56), END, PAD].
+
+    Actions that no move can produce (neither a knight jump nor a straight
+    line) point at PAD, which holds a large negative logit.
+    """
+    end_slot = SPATIAL_POLICY_PLANES * NUM_SQUARES
+    pad_slot = end_slot + 1
+    idx = np.full(NUM_ACTIONS, pad_slot, dtype=np.int64)
+    idx[END_TURN_ACTION] = end_slot
+    for src in range(NUM_SQUARES):
+        sr, sc = divmod(src, COLS)
+        for k, (dr, dc) in enumerate(_KNIGHT_OFFSETS):
+            r, c = sr + dr, sc + dc
+            if 0 <= r < ROWS and 0 <= c < COLS:
+                idx[src * NUM_SQUARES + r * COLS + c] = k * NUM_SQUARES + src
+        for d, (dr, dc) in enumerate(_LINE_DIRS):
+            for dist in range(1, _MAX_DIST + 1):
+                r, c = sr + dr * dist, sc + dc * dist
+                if not (0 <= r < ROWS and 0 <= c < COLS):
+                    break
+                plane = len(_KNIGHT_OFFSETS) + d * _MAX_DIST + (dist - 1)
+                idx[src * NUM_SQUARES + r * COLS + c] = plane * NUM_SQUARES + src
+    return idx
 
 
 @dataclass
@@ -48,6 +82,10 @@ class NetworkConfig:
     value_filters: int = 1      # AZ uses 1
     value_hidden: int = 256     # AZ uses 256
     policy_hidden: int = 0      # 0 = direct FC (AZ default), >0 = bottleneck hidden layer
+    # 'fc': flatten → FC to all 3137 actions (original).
+    # 'spatial': per-square move planes (8 knight jumps + 8 directions × 7
+    # distances for passes) gathered into the same 3137-action layout.
+    policy_head: str = 'fc'
 
 
 # Presets matching AlphaZero architecture at different scales
@@ -66,6 +104,11 @@ PRESETS = {
         num_filters=256, num_blocks=20,
         policy_filters=2, value_filters=1,
         value_hidden=256, policy_hidden=0,
+    ),
+    # v2: medium tower, forced-pass input planes, spatial policy head.
+    'medium_v2': NetworkConfig(
+        num_input_planes=9, num_filters=96, num_blocks=12,
+        value_filters=4, value_hidden=256, policy_head='spatial',
     ),
 }
 
@@ -110,14 +153,24 @@ class RazzleNet(nn.Module):
         ])
 
         # Policy head
-        self.policy_conv = nn.Conv2d(c.num_filters, c.policy_filters, 1, bias=False)
-        self.policy_bn = nn.BatchNorm2d(c.policy_filters)
-        policy_flat = c.policy_filters * ROWS * COLS
-        if c.policy_hidden > 0:
-            self.policy_fc1 = nn.Linear(policy_flat, c.policy_hidden)
-            self.policy_fc2 = nn.Linear(c.policy_hidden, NUM_ACTIONS)
+        self.policy_head_type = getattr(c, 'policy_head', 'fc')
+        if self.policy_head_type == 'spatial':
+            self.policy_conv = nn.Conv2d(c.num_filters, c.num_filters, 3, padding=1, bias=False)
+            self.policy_bn = nn.BatchNorm2d(c.num_filters)
+            self.policy_out = nn.Conv2d(c.num_filters, SPATIAL_POLICY_PLANES, 1)
+            self.policy_end = nn.Linear(c.num_filters, 1)   # END_TURN from pooled features
+            self.register_buffer('policy_index', torch.from_numpy(spatial_action_index()), persistent=False)
+        elif self.policy_head_type == 'fc':
+            self.policy_conv = nn.Conv2d(c.num_filters, c.policy_filters, 1, bias=False)
+            self.policy_bn = nn.BatchNorm2d(c.policy_filters)
+            policy_flat = c.policy_filters * ROWS * COLS
+            if c.policy_hidden > 0:
+                self.policy_fc1 = nn.Linear(policy_flat, c.policy_hidden)
+                self.policy_fc2 = nn.Linear(c.policy_hidden, NUM_ACTIONS)
+            else:
+                self.policy_fc = nn.Linear(policy_flat, NUM_ACTIONS)
         else:
-            self.policy_fc = nn.Linear(policy_flat, NUM_ACTIONS)
+            raise ValueError(f"unknown policy_head {self.policy_head_type!r}")
 
         # Value head
         self.value_conv = nn.Conv2d(c.num_filters, c.value_filters, 1, bias=False)
@@ -160,13 +213,20 @@ class RazzleNet(nn.Module):
         tower = x  # Save tower output for all heads
 
         # Policy head
-        p = F.relu(self.policy_bn(self.policy_conv(tower)))
-        p = p.view(p.size(0), -1)
-        if hasattr(self, 'policy_fc1'):
-            p = F.relu(self.policy_fc1(p))
-            p = self.policy_fc2(p)
+        if self.policy_head_type == 'spatial':
+            h = F.relu(self.policy_bn(self.policy_conv(tower)))
+            planes = self.policy_out(h).flatten(1)                     # (B, 64*56), plane-major
+            end = self.policy_end(h.mean(dim=(2, 3)))                  # (B, 1)
+            pad = torch.full_like(end, -1e4)                           # impossible actions
+            p = torch.cat([planes, end, pad], dim=1)[:, self.policy_index]
         else:
-            p = self.policy_fc(p)
+            p = F.relu(self.policy_bn(self.policy_conv(tower)))
+            p = p.view(p.size(0), -1)
+            if hasattr(self, 'policy_fc1'):
+                p = F.relu(self.policy_fc1(p))
+                p = self.policy_fc2(p)
+            else:
+                p = self.policy_fc(p)
         p = F.log_softmax(p, dim=1)
 
         # Value head
@@ -215,9 +275,11 @@ class RazzleNet(nn.Module):
         checkpoint = torch.load(path, map_location=device, weights_only=False)
         config = checkpoint['config']
 
-        # Backward compat: old configs don't have policy_hidden
+        # Backward compat: old configs don't have policy_hidden / policy_head
         if not hasattr(config, 'policy_hidden'):
             config.policy_hidden = 0
+        if not hasattr(config, 'policy_head'):
+            config.policy_head = 'fc'
 
         model = cls(config)
         state_dict = checkpoint['state_dict']
@@ -252,6 +314,8 @@ class RazzleNet(nn.Module):
         # Backward compat: old configs don't have policy_hidden
         if not hasattr(saved_config, 'policy_hidden'):
             saved_config.policy_hidden = 0
+        if not hasattr(saved_config, 'policy_head'):
+            saved_config.policy_head = 'fc'
 
         # Check if architecture matches
         needs_upgrade = (
@@ -260,7 +324,9 @@ class RazzleNet(nn.Module):
             saved_config.policy_filters != target_config.policy_filters or
             saved_config.value_filters != target_config.value_filters or
             saved_config.value_hidden != target_config.value_hidden or
-            saved_config.policy_hidden != target_config.policy_hidden
+            saved_config.policy_hidden != target_config.policy_hidden or
+            getattr(saved_config, 'policy_head', 'fc') != getattr(target_config, 'policy_head', 'fc') or
+            saved_config.num_input_planes != target_config.num_input_planes
         )
 
         if not needs_upgrade:

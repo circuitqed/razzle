@@ -42,6 +42,8 @@ class BatchedEvaluator:
     ):
         self.network = network.to(device)
         self.network.eval()
+        # Input planes the network expects (7 for v1 models, 9 for v2)
+        self.num_planes = getattr(network.config, 'num_input_planes', 7)
         self.batch_size = batch_size
         self.device = device
 
@@ -93,7 +95,7 @@ class BatchedEvaluator:
         if cached is not None:
             return cached[0], cached[1]
 
-        tensor = torch.from_numpy(state.to_tensor()).unsqueeze(0).to(self.device)
+        tensor = torch.from_numpy(state.to_tensor(self.num_planes)).unsqueeze(0).to(self.device)
 
         with torch.no_grad():
             log_policy, value, difficulty = self.network(tensor)
@@ -125,7 +127,7 @@ class BatchedEvaluator:
         if cached is not None:
             return cached
 
-        tensor = torch.from_numpy(state.to_tensor()).unsqueeze(0).to(self.device)
+        tensor = torch.from_numpy(state.to_tensor(self.num_planes)).unsqueeze(0).to(self.device)
 
         with torch.no_grad():
             log_policy, value, difficulty = self.network(tensor)
@@ -168,7 +170,7 @@ class BatchedEvaluator:
 
         # Evaluate cache misses
         if miss_states:
-            tensors = np.stack([s.to_tensor() for s in miss_states])
+            tensors = np.stack([s.to_tensor(self.num_planes) for s in miss_states])
             batch = torch.from_numpy(tensors).to(self.device)
 
             with torch.no_grad():
@@ -216,7 +218,7 @@ class BatchedEvaluator:
 
         # Evaluate cache misses
         if miss_states:
-            tensors = np.stack([s.to_tensor() for s in miss_states])
+            tensors = np.stack([s.to_tensor(self.num_planes) for s in miss_states])
             batch = torch.from_numpy(tensors).to(self.device)
 
             with torch.no_grad():
