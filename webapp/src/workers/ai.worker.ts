@@ -14,7 +14,7 @@ import { OnnxEvaluator, PureTSEvaluator, GPUEvaluator, RandomEvaluator, GL_CONTE
 import type { Evaluator } from '../engine/evaluator';
 import { createModelFromOnnx } from '../engine/inference';
 import { createGPUModelFromOnnx } from '../engine/webglForwardPass';
-import { search, type MCTSConfig, DEFAULT_CONFIG } from '../engine/mcts';
+import { search, type MCTSConfig, type MCTSNode, DEFAULT_CONFIG } from '../engine/mcts';
 import type { EngineState } from '../engine/state';
 import { getCachedModel, cacheModel } from '../engine/modelCache';
 
@@ -245,6 +245,7 @@ async function loadOnnxRuntime(msg: LoadMessage): Promise<void> {
 }
 
 async function handleLoad(msg: LoadMessage): Promise<void> {
+  continuationRoot = null; // never carry a tree across models
   try {
     if (msg.useRandom) {
       evaluator = new RandomEvaluator();
@@ -265,6 +266,14 @@ async function handleLoad(msg: LoadMessage): Promise<void> {
     self.postMessage({ type: 'loaded', success: false, error: message });
   }
 }
+
+/**
+ * Subtree to continue from on the next search. After the AI picks a pass, the
+ * same player moves again, and the chosen child's subtree already holds most
+ * of the search for that position — reusing it makes each extra pass of a
+ * chain much cheaper. search() only uses it if the position matches exactly.
+ */
+let continuationRoot: MCTSNode | null = null;
 
 async function handleSearch(msg: SearchMessage): Promise<void> {
   if (!evaluator) {
@@ -290,6 +299,8 @@ async function handleSearch(msg: SearchMessage): Promise<void> {
     const config = { ...DEFAULT_CONFIG, ...msg.config };
     const searchStart = performance.now();
 
+    const reuse = continuationRoot ?? undefined;
+    continuationRoot = null;
     const result = await search(state, evaluator, config, abortFlag, (progress) => {
       self.postMessage({
         type: 'search_progress',
@@ -298,11 +309,15 @@ async function handleSearch(msg: SearchMessage): Promise<void> {
         bestMove: progress.bestMove,
         value: progress.value,
       });
-    });
+    }, reuse);
 
     // Extract scalars before dropping the tree reference.
     const { bestMove, simsDone, value } = result;
     const searchMs = performance.now() - searchStart;
+    const chosen = bestMove !== -1 ? result.rootNode.children.get(bestMove) : undefined;
+    if (chosen && chosen.isExpanded && chosen.state.currentPlayer === state.currentPlayer) {
+      continuationRoot = chosen; // same player moves again (pass chain)
+    }
     result.rootNode.children.clear();
 
     self.postMessage({

@@ -180,6 +180,10 @@ export interface SearchProgress {
  *
  * @param abortSignal - If provided, checked each simulation; if true, search stops early.
  * @param onProgress - Called periodically with search progress.
+ * @param reuseRoot - Subtree from a previous search to continue from (e.g. the
+ *   chosen child mid-pass-chain, where the same player moves again). Used only
+ *   if its position equals `state`; its visits count toward the simulation
+ *   budget, so continuing a turn costs a fraction of a fresh search.
  */
 export async function search(
   state: EngineState,
@@ -187,15 +191,20 @@ export async function search(
   config: Partial<MCTSConfig> = {},
   abortSignal?: { aborted: boolean },
   onProgress?: (progress: SearchProgress) => void,
+  reuseRoot?: MCTSNode,
 ): Promise<SearchResult> {
   const cfg = { ...DEFAULT_CONFIG, ...config };
-  const root = createNode(copyState(state));
+  const reused = reuseRoot && reuseRoot.isExpanded && reuseRoot.children.size > 0
+    && statesEqual(reuseRoot.state, state) ? reuseRoot : null;
+  const root = reused ?? createNode(copyState(state));
 
-  // Evaluate and expand root
-  const { policy: rootPolicy, value: rootValue } = await evaluator.evaluate(
-    root.state,
-  );
-  expandNode(root, rootPolicy);
+  // Evaluate and expand root (a reused root is already expanded)
+  let rootValue = 0;
+  if (!reused) {
+    const evaluation = await evaluator.evaluate(root.state);
+    rootValue = evaluation.value;
+    expandNode(root, evaluation.policy);
+  }
 
   // Check for immediate winning move among children (e.g. winning pass)
   // This catches wins that the neural net might give low prior to
@@ -211,7 +220,7 @@ export async function search(
 
   // Pass quiescence for root
   let initialValue = rootValue;
-  if (cfg.passQuiescence && root.state.hasPassed) {
+  if (!reused && cfg.passQuiescence && root.state.hasPassed) {
     initialValue = await quiescenceSearch(root, evaluator, cfg, 0);
     root.visitCount = 1;
     root.valueSum = initialValue;
@@ -220,14 +229,19 @@ export async function search(
   let simsDone = 0;
   const progressInterval = 50;
   const batchSize = cfg.batchSize > 0 ? cfg.batchSize : autoBatchSize(cfg.numSimulations);
+  // A reused subtree already carries visits: top up to the target rather than
+  // starting over, but always search a little to refine the new position.
+  const simBudget = reused
+    ? Math.max(cfg.numSimulations - root.visitCount, Math.ceil(cfg.numSimulations / 4))
+    : cfg.numSimulations;
 
   const deadline = cfg.maxTimeMs > 0 ? performance.now() + cfg.maxTimeMs : Infinity;
 
-  while (simsDone < cfg.numSimulations) {
+  while (simsDone < simBudget) {
     if (abortSignal?.aborted) break;
     if (simsDone > 0 && performance.now() > deadline) break;
 
-    const currentBatch = Math.min(batchSize, cfg.numSimulations - simsDone);
+    const currentBatch = Math.min(batchSize, simBudget - simsDone);
 
     if (currentBatch <= 1) {
       // Single simulation (no batching overhead)
@@ -244,7 +258,7 @@ export async function search(
       const best = getBestMoveFromRoot(root);
       onProgress({
         simsDone,
-        totalSims: cfg.numSimulations,
+        totalSims: simBudget,
         bestMove: best.move,
         value: best.value,
       });
@@ -268,6 +282,15 @@ export async function search(
     simsDone,
     value: best.value,
   };
+}
+
+/** Exact position equality (used to validate a reused search subtree). */
+export function statesEqual(a: EngineState, b: EngineState): boolean {
+  return a.pieces[0] === b.pieces[0] && a.pieces[1] === b.pieces[1]
+    && a.balls[0] === b.balls[0] && a.balls[1] === b.balls[1]
+    && a.currentPlayer === b.currentPlayer && a.touchedMask === b.touchedMask
+    && a.hasPassed === b.hasPassed && a.lastKnightDst === b.lastKnightDst
+    && a.ply === b.ply;
 }
 
 function getBestMoveFromRoot(root: MCTSNode): { move: number; value: number } {
