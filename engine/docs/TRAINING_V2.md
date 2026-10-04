@@ -95,3 +95,39 @@ the API like any model, bundled in the iOS app). Displayed rating = 880 + calibr
 anchored so ~1500 ≈ an even game for a ~1500 chess player. Old levels 14–15 (4096/8192 sims)
 were capped to ~1000 sims by the native 10 s budget anyway; old level 10 (p250@256) was
 weaker than levels 8–9.
+
+## 8. Throughput profile and fixes (phoenix2, Oct 4 2026)
+
+Measured on the live run (RTX 3060 workers, RTX 3090 trainer, 800-sim full / 160-sim quick searches).
+
+**Self-play worker** (games/h per RTX 3060, 4.3-core host):
+
+| Setup | games/h |
+|---|---|
+| 1 process, fp32 (as launched) | 5,650 |
+| 2 processes | 7,975 |
+| 3 processes | 9,833 |
+| 3 processes, fp16 inference | **13,473** |
+
+One process saturates one CPU core (Python tree bookkeeping) while the GPU idles ~half the
+time; the other half is an fp32 forward pass (~30-50 ms per 768 positions). fp16 is 2.4x
+faster (max |dp| 0.004, mean |dv| 0.0007, top move agrees 99.96%). Defaults now:
+`selfplay_v2 --fp16`, `train_distributed --workers-per-instance 3`. Hosts need >= 4 CPU cores
+for 3 processes. Processes share the model dir: downloads are atomic (temp file + rename).
+
+**Trainer** (per 2,048-game iteration on the 3090): 120 s -> 29 s.
+
+| Phase | before | after |
+|---|---|---|
+| game -> position conversion | 23 s (1 core) | 6 s (16 procs, packed chunks) |
+| dense npz archive of every batch | 29 s | removed (games live on the server) |
+| validation (all ~160k positions) | ~30 s | 1.4 s (16k subsample) |
+| training | ~30 s, 2.6 steps/s | 21 s, 13 steps/s (vectorized sampler) |
+
+Policy top-1/top-3 in the dashboard were computed over value-only positions too (no target)
+and were meaningless before this fix; they now cover positions with a policy target only.
+
+One 3090 trainer now absorbs ~150k+ games/h, i.e. ~10-12 workers at the new worker speed.
+Remaining ideas: run the full leaf selection/backup for all games in one C call (the Python
+per-game loop is now the worker bottleneck); fp16/AMP training steps; a common base image
+that hosts have cached (faster, more reliable boots).
