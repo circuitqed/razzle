@@ -241,6 +241,9 @@ class DistributedOrchestrator:
         fast_sims: int = 0,
         full_prob: float = 0.25,
         trainer_extra: str = '',
+        min_price: float = 0.0,
+        trainer_gpu: str = '',
+        trainer_max_price: float = 0.4,
     ):
         self.num_workers = num_workers
         self.api_url = api_url
@@ -271,6 +274,9 @@ class DistributedOrchestrator:
         self.fast_sims = fast_sims
         self.full_prob = full_prob
         self.trainer_extra = trainer_extra
+        self.min_price = min_price
+        self.trainer_gpu = trainer_gpu
+        self.trainer_max_price = trainer_max_price
 
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -292,6 +298,10 @@ class DistributedOrchestrator:
             min_reliability=self.min_reliability,
             order_by='dph_total'
         )
+
+        # Very cheap hosts tend to be unreliable; enforce a price floor.
+        if self.min_price > 0:
+            offers = [o for o in offers if o.dph_total >= self.min_price]
 
         if not offers:
             print("No suitable offers found. Try:")
@@ -388,7 +398,7 @@ class DistributedOrchestrator:
         print(f"\nCreating {self.num_workers} worker instances" +
               (" + 1 trainer instance..." if self.with_trainer else "..."))
 
-        if len(offers) < total_needed:
+        if len(offers) < (self.num_workers if self.trainer_gpu else total_needed):
             print(f"Not enough offers: need {total_needed}, found {len(offers)}")
             return False
 
@@ -398,9 +408,23 @@ class DistributedOrchestrator:
             self.workers.append(worker)
             self._create_worker_instance(worker)
 
-        # Create trainer instance
+        # Create trainer instance (optionally on its own, stronger GPU type)
         if self.with_trainer:
-            self.trainer = WorkerInstance(worker_id=-1, offer=offers[self.num_workers], role="trainer")
+            trainer_offer = offers[self.num_workers] if len(offers) > self.num_workers else None
+            if self.trainer_gpu:
+                used = {w.offer.id for w in self.workers}
+                cands = [o for o in self.vast.search_offers(
+                            gpu_name=self.trainer_gpu, max_dph=self.trainer_max_price,
+                            min_reliability=self.min_reliability, order_by='dph_total')
+                         if o.id not in used]
+                trainer_offer = cands[0] if cands else trainer_offer
+                if not cands:
+                    print(f"No {self.trainer_gpu} offer under ${self.trainer_max_price}/hr; "
+                          f"trainer falls back to a worker-type GPU")
+            if trainer_offer is None:
+                print("No offer left for the trainer")
+                return False
+            self.trainer = WorkerInstance(worker_id=-1, offer=trainer_offer, role="trainer")
             self._create_trainer_instance(self.trainer)
 
         return any(w.status == "running" for w in self.workers)
@@ -729,6 +753,12 @@ def main():
     parser.add_argument('--concurrency', type=int, default=96, help='v2: concurrent games per GPU')
     parser.add_argument('--fast-sims', type=int, default=0, help='v2: quick-search sims (default sims/5)')
     parser.add_argument('--full-prob', type=float, default=0.25, help='v2: probability a turn gets a full search')
+    parser.add_argument('--min-price', type=float, default=0.0,
+                        help='Minimum $/hr for worker offers (cheapest hosts are often unreliable; '
+                             'e.g. 0.08 for RTX 3060)')
+    parser.add_argument('--trainer-gpu', type=str, default='',
+                        help='GPU type for the trainer (e.g. RTX_3090); default = same as workers')
+    parser.add_argument('--trainer-max-price', type=float, default=0.4)
     parser.add_argument('--trainer-extra', type=str, default='',
                         help='Extra args appended to the trainer command (e.g. "--reuse 2 --window-max 3000000")')
     parser.add_argument('--gamma', type=float, default=1.0,
@@ -792,6 +822,9 @@ def main():
         fast_sims=args.fast_sims,
         full_prob=args.full_prob,
         trainer_extra=args.trainer_extra,
+        min_price=args.min_price,
+        trainer_gpu=args.trainer_gpu,
+        trainer_max_price=args.trainer_max_price,
     )
 
     # Handle signals
