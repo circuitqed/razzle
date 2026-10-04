@@ -1,8 +1,7 @@
 import { useMemo } from 'react';
 import Board from './Board';
 import { useTutorial } from '../hooks/useTutorial';
-import type { TutorialStep as HookStep } from '../hooks/useTutorial';
-import { TUTORIAL_STEPS } from '../data/tutorialSteps';
+import { toHookSteps } from '../data/tutorialSteps';
 import { mustPass as checkMustPass } from '../engine/moves';
 import { useDialogA11y } from '../hooks/useDialogA11y';
 
@@ -13,29 +12,7 @@ interface TutorialProps {
 
 export default function Tutorial({ onComplete, onSkip }: TutorialProps) {
   const dialogRef = useDialogA11y(onSkip);
-  const hookSteps = useMemo<HookStep[]>(
-    () =>
-      TUTORIAL_STEPS.map((s) => ({
-        title: s.title,
-        instruction: s.instruction,
-        hint: s.hint,
-        state: s.boardState,
-        allowedMoves: s.allowedMoves,
-        requireEndTurn: s.requireEndTurn,
-        nextStepState: s.nextStepState,
-        chainMoves: s.chainMoves,
-        highlightSquares: s.highlightSquares,
-        preState: s.preState,
-        preMessage: s.preMessage,
-        completionMessage: s.completionMessage,
-        chainPreState: s.chainPreState,
-        chainPreMessage: s.chainPreMessage,
-        preMove: s.preMove,
-        chainPreMove: s.chainPreMove,
-        suggestedMoves: s.suggestedMoves,
-      })),
-    [],
-  );
+  const hookSteps = useMemo(() => toHookSteps(), []);
 
   const tut = useTutorial({ steps: hookSteps, onComplete, onSkip });
 
@@ -54,7 +31,11 @@ export default function Tutorial({ onComplete, onSkip }: TutorialProps) {
           {tut.showingPreState ? tut.preMessage : tut.stepInstruction}
         </p>
         {!tut.stepComplete && !tut.showingPreState && (
-          <p className="text-gray-500 text-xs mt-0.5 italic">{tut.stepHint}</p>
+          tut.wrongMoveMessage ? (
+            <p role="status" className="text-amber-300 text-xs mt-0.5">{tut.wrongMoveMessage}</p>
+          ) : (
+            <p className="text-gray-500 text-xs mt-0.5 italic">{tut.stepHint}</p>
+          )
         )}
       </div>
 

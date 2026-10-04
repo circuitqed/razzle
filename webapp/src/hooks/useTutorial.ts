@@ -8,7 +8,7 @@
  * the same select-then-execute pattern used in useBoardInteraction.
  */
 
-import { useState, useCallback, useMemo, useEffect } from 'react';
+import { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import type { GameState, Player } from '../types';
 import { encodeMove, TOTAL_SQUARES } from '../types';
 import type { EngineState } from '../engine/state';
@@ -38,10 +38,16 @@ export interface TutorialStep {
   allowedMoves: number[];
   /** If true the step requires the player to press "End Turn" after moves */
   requireEndTurn?: boolean;
-  /** State to load after the first move (for chain steps) */
-  nextStepState?: EngineState;
-  /** Continuation moves after nextStepState loads. Step completes after these. */
+  /**
+   * Continuation moves. If set, the first allowed move starts a chain: the
+   * board continues from the actual resulting position (after
+   * `opponentReply`, if any) and the step completes after one of these.
+   */
   chainMoves?: number[];
+  /** Opponent move auto-played (and animated) after the first chain move. */
+  opponentReply?: number;
+  /** Hint shown when the player tries a legal move the step doesn't allow. */
+  wrongMoveHint?: string;
   /** Squares to highlight as hints (e.g. valid sources / destinations) */
   highlightSquares?: number[];
   /** State to show before the interactive state (opponent about to move). */
@@ -50,10 +56,8 @@ export interface TutorialStep {
   preMove?: { from: number; to: number };
   /** Message shown after completing the step. */
   completionMessage?: string;
-  /** State shown briefly during chain transition (opponent moving). */
-  chainPreState?: EngineState;
+  /** Message shown while `opponentReply` is animating. */
   chainPreMessage?: string;
-  chainPreMove?: { from: number; to: number };
   suggestedMoves?: number[];
 }
 
@@ -73,6 +77,8 @@ export interface UseTutorialReturn {
   preMessage: string | null;
   preAnimMove: { from: number; to: number } | null;
   completionMessage: string | null;
+  /** Gentle hint after the player tried a legal but unintended move. */
+  wrongMoveMessage: string | null;
   suggestedMoves: number[] | undefined;
   selectedSquare: number | null;
   highlightSquares: number[];
@@ -100,6 +106,9 @@ const TUTORIAL_COMPLETE_KEY = 'knightball_tutorial_complete';
 const TUTORIAL_GAME_ID = '__tutorial__';
 
 const END_TURN_MOVE = -1;
+
+const DEFAULT_WRONG_MOVE_HINT =
+  'That move is legal, but it isn\'t the one this step is teaching. Follow the instructions above.';
 
 /**
  * Build a GameState object (as expected by the Board component) from an
@@ -166,6 +175,19 @@ export function useTutorial(options: UseTutorialOptions): UseTutorialReturn {
   const [chainDone, setChainDone] = useState(false);
   const [showingPreState, setShowingPreState] = useState(false);
   const [preAnimMove, setPreAnimMove] = useState<{ from: number; to: number } | null>(null);
+  const [wrongMoveMessage, setWrongMoveMessage] = useState<string | null>(null);
+
+  // Pending animation timers; cleared on step change / unmount so a stale
+  // timer can never overwrite the board of a later step.
+  const timersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
+  const clearTimers = useCallback(() => {
+    timersRef.current.forEach(clearTimeout);
+    timersRef.current = [];
+  }, []);
+  const later = useCallback((fn: () => void, ms: number) => {
+    timersRef.current.push(setTimeout(fn, ms));
+  }, []);
+  useEffect(() => clearTimers, [clearTimers]);
 
   // Handle preState: show the "before" state briefly, then animate the
   // opponent's move by switching to the "after" state with lastMove set.
@@ -176,16 +198,15 @@ export function useTutorial(options: UseTutorialOptions): UseTutorialReturn {
     setPreAnimMove(null);
     setLocalState(copyState(step.preState));
     // Brief pause, then animate the opponent's move
-    const timer = setTimeout(() => {
+    later(() => {
       setLocalState(copyState(step.state));
       if (step.preMove) setPreAnimMove(step.preMove);
       // Clear after animation completes (Board animation is 350ms)
-      setTimeout(() => {
+      later(() => {
         setShowingPreState(false);
         setPreAnimMove(null);
       }, 400);
     }, 200);
-    return () => clearTimeout(timer);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentStepIndex]);
 
@@ -239,24 +260,32 @@ export function useTutorial(options: UseTutorialOptions): UseTutorialReturn {
    */
   const afterMove = useCallback(
     (newState: EngineState, wasKnightMove: boolean) => {
-      // Chain step phase 1: first move loads continuation state
-      if (step.nextStepState && step.chainMoves && !inChain) {
-        if (step.chainPreState) {
-          // Show opponent moving with animation before chain continuation
+      // Chain step phase 1: the board continues from the position the
+      // player actually reached (never a canned state, which would desync
+      // the board from what they just did).
+      if (step.chainMoves && !inChain) {
+        const reply = step.opponentReply;
+        if (reply !== undefined && getLegalMoves(newState).includes(reply)) {
+          // Show the player's move, then animate the opponent's reply.
+          const afterReply = copyState(newState);
+          applyMove(afterReply, reply);
           setShowingPreState(true);
           setPreAnimMove(null);
-          setLocalState(copyState(step.chainPreState));
-          setTimeout(() => {
-            setLocalState(copyState(step.nextStepState!));
-            if (step.chainPreMove) setPreAnimMove(step.chainPreMove);
-            setTimeout(() => {
+          setLocalState(newState);
+          later(() => {
+            setLocalState(afterReply);
+            setPreAnimMove({
+              from: Math.floor(reply / TOTAL_SQUARES),
+              to: reply % TOTAL_SQUARES,
+            });
+            later(() => {
               setShowingPreState(false);
               setPreAnimMove(null);
               setInChain(true);
             }, 500);
           }, 600);
         } else {
-          setLocalState(copyState(step.nextStepState));
+          setLocalState(newState);
           setInChain(true);
         }
         return;
@@ -276,15 +305,11 @@ export function useTutorial(options: UseTutorialOptions): UseTutorialReturn {
         return;
       }
 
-      if (step.nextStepState && !step.chainMoves) {
-        setLocalState(copyState(step.nextStepState));
-      } else {
-        setLocalState(newState);
-      }
+      setLocalState(newState);
       setStepComplete(true);
       setSelectedSquare(null);
     },
-    [step.requireEndTurn, step.nextStepState, step.chainMoves, inChain, chainDone]
+    [step.requireEndTurn, step.chainMoves, step.opponentReply, inChain, later]
   );
 
   /** Execute an encoded move on the local state. */
@@ -293,6 +318,7 @@ export function useTutorial(options: UseTutorialOptions): UseTutorialReturn {
       const next = copyState(localState);
       const wasBall = isBallAt(localState, Math.floor(move / TOTAL_SQUARES));
       applyMove(next, move);
+      setWrongMoveMessage(null);
 
       if (wasBall) {
         playPassSound();
@@ -313,15 +339,28 @@ export function useTutorial(options: UseTutorialOptions): UseTutorialReturn {
 
   // -- Interaction handlers -------------------------------------------------
 
+  // Moves the engine would accept right now (the step only allows a subset).
+  const engineLegalMoves = useMemo(
+    () => (stepComplete ? [] : getLegalMoves(localState)),
+    [localState, stepComplete]
+  );
+
+  /** Legal in the game, but not what this step teaches: explain, don't play. */
+  const rejectMove = useCallback(() => {
+    setWrongMoveMessage(step.wrongMoveHint ?? DEFAULT_WRONG_MOVE_HINT);
+  }, [step.wrongMoveHint]);
+
   const handleSquareClick = useCallback(
     (square: number) => {
-      if (stepComplete) return;
+      if (stepComplete || showingPreState) return;
 
       // During a pass chain, lock interaction to valid pass receivers.
       if (isPassing && selectedSquare !== null) {
         const moveEncoded = encodeMove(selectedSquare, square);
         if (filteredLegalMoves.includes(moveEncoded)) {
           executeMove(moveEncoded);
+        } else if (engineLegalMoves.includes(moveEncoded)) {
+          rejectMove();
         }
         return;
       }
@@ -331,6 +370,10 @@ export function useTutorial(options: UseTutorialOptions): UseTutorialReturn {
         const moveEncoded = encodeMove(selectedSquare, square);
         if (filteredLegalMoves.includes(moveEncoded)) {
           executeMove(moveEncoded);
+          return;
+        }
+        if (engineLegalMoves.includes(moveEncoded)) {
+          rejectMove();
           return;
         }
       }
@@ -351,6 +394,16 @@ export function useTutorial(options: UseTutorialOptions): UseTutorialReturn {
           }
           return;
         }
+
+        // A piece that could move in a real game, but not in this step.
+        const hasEngineMove = engineLegalMoves.some(
+          (m) => m !== END_TURN_MOVE && Math.floor(m / TOTAL_SQUARES) === square
+        );
+        if (hasEngineMove) {
+          rejectMove();
+          setSelectedSquare(null);
+          return;
+        }
       }
 
       // Click on empty / opponent square -> deselect.
@@ -360,30 +413,36 @@ export function useTutorial(options: UseTutorialOptions): UseTutorialReturn {
     },
     [
       stepComplete,
+      showingPreState,
       selectedSquare,
       isPassing,
       filteredLegalMoves,
+      engineLegalMoves,
       localState,
       executeMove,
+      rejectMove,
     ]
   );
 
   const handleDragMove = useCallback(
     (from: number, to: number) => {
-      if (stepComplete) return;
+      if (stepComplete || showingPreState) return;
 
       const moveEncoded = encodeMove(from, to);
-      if (!filteredLegalMoves.includes(moveEncoded)) return;
+      if (!filteredLegalMoves.includes(moveEncoded)) {
+        if (engineLegalMoves.includes(moveEncoded)) rejectMove();
+        return;
+      }
 
       executeMove(moveEncoded);
     },
-    [stepComplete, filteredLegalMoves, executeMove]
+    [stepComplete, showingPreState, filteredLegalMoves, engineLegalMoves, executeMove, rejectMove]
   );
 
   // -- End turn -------------------------------------------------------------
 
   const endTurn = useCallback(() => {
-    if (!canEndTurn) return;
+    if (!canEndTurn || showingPreState) return;
 
     playEndTurnSound();
     const next = copyState(localState);
@@ -391,7 +450,7 @@ export function useTutorial(options: UseTutorialOptions): UseTutorialReturn {
     setLocalState(next);
     setStepComplete(true);
     setSelectedSquare(null);
-  }, [canEndTurn, localState, step.nextStepState]);
+  }, [canEndTurn, showingPreState, localState]);
 
   // -- Navigation -----------------------------------------------------------
 
@@ -408,13 +467,17 @@ export function useTutorial(options: UseTutorialOptions): UseTutorialReturn {
       return;
     }
 
+    clearTimers();
     setCurrentStepIndex(nextIndex);
     setLocalState(copyState(steps[nextIndex].state));
     setSelectedSquare(null);
     setStepComplete(false);
     setInChain(false);
     setChainDone(false);
-  }, [currentStepIndex, steps, onComplete]);
+    setShowingPreState(false);
+    setPreAnimMove(null);
+    setWrongMoveMessage(null);
+  }, [currentStepIndex, steps, onComplete, clearTimers]);
 
   const skipTutorial = useCallback(() => {
     try {
@@ -439,6 +502,7 @@ export function useTutorial(options: UseTutorialOptions): UseTutorialReturn {
     preMessage: showingPreState ? (step.chainPreMessage ?? step.preMessage ?? null) : null,
     preAnimMove,
     completionMessage: stepComplete ? (step.completionMessage ?? null) : null,
+    wrongMoveMessage: stepComplete ? null : wrongMoveMessage,
     suggestedMoves: step.suggestedMoves,
     selectedSquare,
     highlightSquares,

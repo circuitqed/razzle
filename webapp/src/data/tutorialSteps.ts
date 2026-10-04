@@ -1,4 +1,5 @@
 import type { EngineState } from '../engine/state';
+import type { TutorialStep as HookStep } from '../hooks/useTutorial';
 
 export interface TutorialStep {
   id: string;
@@ -11,8 +12,16 @@ export interface TutorialStep {
   highlightSquares?: number[];
   requireEndTurn?: boolean;
   autoAdvance?: boolean;
-  nextStepState?: EngineState;
+  /**
+   * Continuation moves. When set, the step's first (allowed) move starts a
+   * chain: the board continues from the ACTUAL resulting position (plus
+   * `opponentReply`, if any) and the learner must then play one of these.
+   */
   chainMoves?: number[];
+  /** Opponent knight move auto-played after the learner's first move. */
+  opponentReply?: number;
+  /** Shown when the learner tries a legal move this step doesn't teach. */
+  wrongMoveHint?: string;
   /** State to show briefly before the interactive state (opponent about to move). */
   preState?: EngineState;
   preMessage?: string;
@@ -20,11 +29,8 @@ export interface TutorialStep {
   preMove?: { from: number; to: number };
   /** Message shown after the user completes the step. */
   completionMessage?: string;
-  /** State shown briefly during chain transition (opponent moving). */
-  chainPreState?: EngineState;
+  /** Message shown while the opponent's reply is animating. */
   chainPreMessage?: string;
-  /** The opponent's move to animate during chain pre-transition. */
-  chainPreMove?: { from: number; to: number };
   /** Moves to visually emphasize (green). Other allowed moves shown as gray. */
   suggestedMoves?: number[];
 }
@@ -83,16 +89,6 @@ const step3State: EngineState = {
   ply: 6,
 };
 
-const step3After1stPass: EngineState = {
-  pieces: [bits(1, 5, 16, 30, 46), bits(42, 48, 50, 53, 54)],
-  balls: [b(30), b(52)],
-  currentPlayer: 0,
-  touchedMask: bits(16, 30),
-  hasPassed: true,
-  lastKnightDst: -1,
-  ply: 6,
-};
-
 // ─── Step 4: Score! ─────────────────────────────────────────────────
 // Ball at d7=45, teammate at d8=52. Pass scores.
 const step4State: EngineState = {
@@ -110,8 +106,11 @@ const step4State: EngineState = {
 // g7=48 (also NE but behind e5). Other pieces a3=14, g3=20 (off lines).
 // Opponent at d6=38 (blocks north from d4), a7=42, b8=50, d8=52, f8=54.
 //
-// User moves e5=32 to c4=23 (west of d4) or d3=17 (south of d4).
-// After move + opponent response, pass to the cleared piece.
+// User moves e5=32 to c4=23 (west of d4) or d3=17 (south of d4); the
+// opponent replies d6=38→f5=33 and the user passes to the cleared piece.
+// The other six knight moves from e5 are legal but are rejected with a hint:
+// the continuation is computed from the learner's actual move, so only
+// destinations on a passing line from d4 make sense here.
 const step5State: EngineState = {
   pieces: [bits(14, 20, 24, 32, 48), bits(38, 42, 50, 52, 54)],
   balls: [b(24), b(52)],
@@ -120,21 +119,6 @@ const step5State: EngineState = {
   hasPassed: false,
   lastKnightDst: -1,
   ply: 10,
-};
-
-// We use a dynamic approach: the hook applies the actual move, then
-// loads this template state (representing the opponent having responded).
-// The nextStepState is for e5→c4 case. For e5→d3, the chainMoves
-// also include mv(24,17) so either works.
-// After e5→c4=23, opponent moves d6=38→f5=33 (knight move).
-const step5AfterMove: EngineState = {
-  pieces: [bits(14, 20, 23, 24, 48), bits(33, 42, 50, 52, 54)],
-  balls: [b(24), b(52)],
-  currentPlayer: 0,
-  touchedMask: bits(24, 48),
-  hasPassed: false,
-  lastKnightDst: -1,
-  ply: 12,
 };
 
 // ─── Step 6: Forced Pass ────────────────────────────────────────────
@@ -166,18 +150,6 @@ const step6State: EngineState = {
 
 // ─── Export ─────────────────────────────────────────────────────────
 
-// Pre-state for eligible receivers: before opponent moves, show the state
-// right after the user's knight move (opponent about to respond)
-const step5PreOpponent: EngineState = {
-  pieces: [bits(14, 20, 23, 24, 48), bits(38, 42, 50, 52, 54)],  // d6=38 still here, about to move
-  balls: [b(24), b(52)],
-  currentPlayer: 1,
-  touchedMask: bits(24, 48),
-  hasPassed: false,
-  lastKnightDst: -1,
-  ply: 11,
-};
-
 export const TUTORIAL_STEPS: TutorialStep[] = [
   {
     id: 'move-knight',
@@ -195,6 +167,7 @@ export const TUTORIAL_STEPS: TutorialStep[] = [
     ],
     highlightSquares: [],
     autoAdvance: true,
+    wrongMoveHint: 'For this step, move a knight (a piece without the ball).',
   },
   {
     id: 'pass-ball',
@@ -205,6 +178,7 @@ export const TUTORIAL_STEPS: TutorialStep[] = [
     boardState: step2State,
     playerColor: 0,
     allowedMoves: [mv(3, 17), mv(3, 21)],
+    wrongMoveHint: 'For this step, pass the ball: tap the ball carrier at d1, then a teammate.',
     highlightSquares: [3],
     autoAdvance: true,
   },
@@ -218,9 +192,9 @@ export const TUTORIAL_STEPS: TutorialStep[] = [
     playerColor: 0,
     allowedMoves: [mv(16, 30)],
     highlightSquares: [16, 30, 46],
-    nextStepState: step3After1stPass,
     chainMoves: [mv(30, 46)],
     requireEndTurn: true,
+    wrongMoveHint: 'Follow the plan: pass north from c3 to c5 first, then diagonally to e7.',
   },
   {
     id: 'score',
@@ -231,6 +205,7 @@ export const TUTORIAL_STEPS: TutorialStep[] = [
     boardState: step4State,
     playerColor: 0,
     allowedMoves: [mv(45, 52)],
+    wrongMoveHint: 'Pass the ball to your piece on row 8 to score.',
     highlightSquares: [49, 50, 51, 52, 53, 54, 55],
     autoAdvance: true,
   },
@@ -242,17 +217,13 @@ export const TUTORIAL_STEPS: TutorialStep[] = [
     completionMessage: 'Well done! You cleared the piece and passed to it.',
     boardState: step5State,
     playerColor: 0,
-    allowedMoves: [
-      mv(32, 17), mv(32, 19), mv(32, 23), mv(32, 27),  // all legal knight moves from e5
-      mv(32, 37), mv(32, 41), mv(32, 45), mv(32, 47),
-    ],
+    // Only c4 and d3 land next to the ball carrier on a passing line from d4.
+    allowedMoves: [mv(32, 23), mv(32, 17)],
     highlightSquares: [32],
-    suggestedMoves: [mv(32, 23), mv(32, 17)], // c4 and d3 land on pass lines from d4
-    nextStepState: step5AfterMove,
-    chainPreState: step5PreOpponent,
+    opponentReply: mv(38, 33), // d6→f5 (knight move, not next to our ball)
     chainPreMessage: 'The opponent is making their move...',
-    chainPreMove: { from: 38, to: 33 }, // d6→f5 (knight move)
     chainMoves: [mv(24, 23), mv(24, 17)],
+    wrongMoveHint: 'That\'s a legal move, but your ball carrier at d4 couldn\'t pass to it there. Move the knight at e5 to c4 or d3, right next to the ball.',
   },
   {
     id: 'forced-pass',
@@ -266,7 +237,30 @@ export const TUTORIAL_STEPS: TutorialStep[] = [
     preMove: { from: 45, to: 32 }, // d7→e5
     playerColor: 0,
     allowedMoves: [mv(24, 22)],
+    wrongMoveHint: 'You\'re forced to pass: tap the glowing ball at d4 and pass it to b4.',
     highlightSquares: [24, 32],
     autoAdvance: true,
   },
 ];
+
+/** Convert the data definitions into the shape `useTutorial` consumes. */
+export function toHookSteps(steps: TutorialStep[] = TUTORIAL_STEPS): HookStep[] {
+  return steps.map((s) => ({
+    title: s.title,
+    instruction: s.instruction,
+    hint: s.hint,
+    state: s.boardState,
+    allowedMoves: s.allowedMoves,
+    requireEndTurn: s.requireEndTurn,
+    chainMoves: s.chainMoves,
+    opponentReply: s.opponentReply,
+    wrongMoveHint: s.wrongMoveHint,
+    highlightSquares: s.highlightSquares,
+    preState: s.preState,
+    preMessage: s.preMessage,
+    preMove: s.preMove,
+    completionMessage: s.completionMessage,
+    chainPreMessage: s.chainPreMessage,
+    suggestedMoves: s.suggestedMoves,
+  }));
+}
