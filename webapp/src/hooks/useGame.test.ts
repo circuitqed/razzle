@@ -53,6 +53,9 @@ describe('useGame hook', () => {
         player1_type: 'human',
         player2_type: 'ai',
         ai_simulations: 256,
+        human_color: 0,
+        ai_level: undefined,
+        ai_model: undefined,
       })
       expect(api.getGameState).toHaveBeenCalledWith('test-game-123')
       expect(result.current.gameState).toEqual(mockInitialGameState)

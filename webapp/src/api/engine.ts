@@ -34,6 +34,10 @@ export async function createGame(options?: {
   ai_simulations?: number;
   time_control?: number;
   increment?: number;
+  /** AI-game metadata for account history (optional). */
+  human_color?: 0 | 1;
+  ai_level?: number;
+  ai_model?: string;
 }): Promise<{ game_id: string }> {
   return request('/games', {
     method: 'POST',

@@ -11,6 +11,8 @@
 
 const STORAGE_KEY = 'knightball_ai_level';
 const LOSS_STREAK_KEY = 'knightball_ai_loss_streak';
+/** ISO time the level last changed on this device (for cross-device sync). */
+export const LEVEL_UPDATED_AT_KEY = 'knightball_ai_level_updated_at';
 
 /** Consecutive losses at a level required before dropping down. */
 export const LOSS_STREAK_TO_DEMOTE = 2;
@@ -63,6 +65,7 @@ export function setAutoMatchLevel(level: number): void {
   try {
     localStorage.setItem(STORAGE_KEY, String(clamped));
     localStorage.setItem(LOSS_STREAK_KEY, '0');
+    localStorage.setItem(LEVEL_UPDATED_AT_KEY, new Date().toISOString());
   } catch { /* ignore */ }
 }
 

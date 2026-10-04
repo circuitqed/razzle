@@ -20,6 +20,7 @@ interface UseGameOptions {
   aiSimulations?: number;
   aiModel?: string;  // Model path or 'random_weights'
   playerColor?: number;  // 0 = blue, 1 = red (only for AI games)
+  aiLevel?: number;  // Ladder level of the AI opponent, if known (recorded in account history)
 }
 
 interface MoveRecord {
@@ -121,7 +122,7 @@ function historyFromMoves(moves: number[]): { records: MoveRecord[]; lastMove: L
 }
 
 export function useGame(options: UseGameOptions = {}): UseGameReturn {
-  const { vsAI = true, aiSimulations = 256, aiModel, playerColor = 0 } = options;
+  const { vsAI = true, aiSimulations = 256, aiModel, playerColor = 0, aiLevel } = options;
 
   const [gameState, setGameState] = useState<GameState | null>(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -578,6 +579,11 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
         player1_type: 'human',
         player2_type: vsAI ? 'ai' : 'human',
         ai_simulations: aiSimulations,
+        ...(vsAI ? {
+          human_color: (playerColor === 1 ? 1 : 0) as 0 | 1,
+          ai_level: aiLevel,
+          ai_model: aiModel && aiModel !== 'random_weights' ? aiModel : undefined,
+        } : {}),
       });
       const state = await api.getGameState(game_id);
       setGameState(state);
@@ -586,7 +592,7 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
     } finally {
       setIsLoading(false);
     }
-  }, [vsAI, aiSimulations, clearSelection, goToEnd, cancelAI]);
+  }, [vsAI, aiSimulations, aiModel, aiLevel, playerColor, clearSelection, goToEnd, cancelAI]);
 
   // Resume an existing game (e.g., after page refresh)
   const resumeGame = useCallback(async (gameId: string): Promise<boolean> => {

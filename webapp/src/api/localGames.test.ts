@@ -190,6 +190,25 @@ describe('server sync', () => {
     expect(JSON.parse(localStorage.getItem('knightball_local_sync_queue')!)).toEqual([]);
   });
 
+  it('sends AI metadata (seat, level, model) so the game lands in account history', async () => {
+    const { game_id } = await local.createGame({
+      player2_type: 'ai', ai_simulations: 16, human_color: 1, ai_level: 3, ai_model: 'pegasus_iter_050.pt',
+    });
+    await local.makeMove(game_id, (await local.getGameState(game_id)).legal_moves[0]);
+    await local.resignGame(game_id, 1);
+    await local.flushSyncQueue();
+    expect(server.createGame).toHaveBeenCalledWith(expect.objectContaining({
+      player2_type: 'ai', ai_simulations: 16, human_color: 1, ai_level: 3, ai_model: 'pegasus_iter_050.pt',
+    }));
+  });
+
+  it('keeps the game queued when rate-limited (429)', async () => {
+    server.createGame.mockRejectedValue(new EngineAPIError(429, 'UNKNOWN', 'Too many games'));
+    await playRandomGame(9);
+    await local.flushSyncQueue();
+    expect(JSON.parse(localStorage.getItem('knightball_local_sync_queue')!)).toHaveLength(1);
+  });
+
   it('does not queue games with no moves', async () => {
     const { game_id } = await local.createGame();
     await local.resignGame(game_id, 0);

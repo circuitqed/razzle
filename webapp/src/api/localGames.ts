@@ -33,6 +33,10 @@ interface StoredGame {
   resignedBy: 0 | 1 | null;
   player2Type: 'human' | 'ai';
   aiSimulations?: number;
+  /** AI-game metadata for account history (optional: absent in older stored games). */
+  humanColor?: 0 | 1;
+  aiLevel?: number;
+  aiModel?: string;
   updatedAt: number;
 }
 
@@ -126,6 +130,9 @@ function finish(game: StoredGame, state: EngineState): GameState {
 export async function createGame(options?: {
   player2_type?: 'human' | 'ai';
   ai_simulations?: number;
+  human_color?: 0 | 1;
+  ai_level?: number;
+  ai_model?: string;
 }): Promise<{ game_id: string }> {
   const id = `${LOCAL_GAME_PREFIX}${crypto.randomUUID()}`;
   putStored({
@@ -134,6 +141,9 @@ export async function createGame(options?: {
     resignedBy: null,
     player2Type: options?.player2_type ?? 'ai',
     aiSimulations: options?.ai_simulations,
+    humanColor: options?.human_color,
+    aiLevel: options?.ai_level,
+    aiModel: options?.ai_model,
     updatedAt: Date.now(),
   });
   return { game_id: id };
@@ -209,6 +219,9 @@ interface SyncEntry {
   resignedBy: 0 | 1 | null;
   player2Type: 'human' | 'ai';
   aiSimulations?: number;
+  humanColor?: 0 | 1;
+  aiLevel?: number;
+  aiModel?: string;
 }
 
 function loadQueue(): SyncEntry[] {
@@ -236,6 +249,9 @@ function enqueueSync(game: StoredGame): void {
     resignedBy: game.resignedBy,
     player2Type: game.player2Type,
     aiSimulations: game.aiSimulations,
+    humanColor: game.humanColor,
+    aiLevel: game.aiLevel,
+    aiModel: game.aiModel,
   });
   saveQueue(queue);
   void flushSyncQueue();
@@ -283,6 +299,11 @@ async function doFlush(): Promise<void> {
         player1_type: 'human',
         player2_type: entry.player2Type,
         ai_simulations: entry.aiSimulations,
+        // Sent with the user's credentials, so a signed-in player's on-device
+        // games land in their account history with the right seat and level.
+        human_color: entry.humanColor,
+        ai_level: entry.aiLevel,
+        ai_model: entry.aiModel,
       });
       for (const turn of splitIntoTurns(entry.moves)) {
         await serverApi.makeTurn(game_id, turn);
@@ -292,7 +313,8 @@ async function doFlush(): Promise<void> {
       }
     } catch (err) {
       const status = err instanceof EngineAPIError ? err.status : 0;
-      if (status < 400 || status >= 500) return; // offline / server down — retry later
+      // offline / server down / rate-limited (POST /games is limited per IP) — retry later
+      if (status < 400 || status >= 500 || status === 429) return;
     }
     queue = loadQueue().filter(e => e.id !== entry.id);
     saveQueue(queue);

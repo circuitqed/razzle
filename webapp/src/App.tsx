@@ -16,6 +16,7 @@ import ResetPasswordPage from './components/ResetPasswordPage';
 import MagicCallbackPage from './components/MagicCallbackPage';
 import UserMenu from './components/UserMenu';
 import GameBrowser from './components/GameBrowser';
+import MyGames from './components/MyGames';
 import ReplayViewer from './components/ReplayViewer';
 import OpeningExplorer from './components/OpeningExplorer';
 import WaitingForOpponent from './components/WaitingForOpponent';
@@ -28,6 +29,8 @@ import { BOT_PRESETS } from './components/NewGameDialog';
 import { useGame } from './hooks/useGame';
 import { setSoundEnabled, isSoundEnabled } from './utils/sounds';
 import { adjustAfterGame, getAutoMatchLevel, getLevelLabel, getTierSettings } from './utils/autoMatch';
+import { levelForSettings, recordLevelBeaten, syncAIProgress } from './utils/aiLevelSync';
+import { flushSyncQueue } from './api/localGames';
 import { listModels, type ModelInfo } from './api/engine';
 import * as onlineApi from './api/online';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
@@ -121,6 +124,7 @@ function AppContent() {
 
   // Game browser and replay
   const [showGameBrowser, setShowGameBrowser] = useState(false);
+  const [showMyGames, setShowMyGames] = useState(false);
   const [replayGameId, setReplayGameId] = useState<string | null>(null);
 
   // Analysis board
@@ -184,7 +188,18 @@ function AppContent() {
     aiSimulations: settings.simulations,
     aiModel: settings.model,
     playerColor,
+    aiLevel: settings.mode === 'ai'
+      ? levelForSettings(settings.model, settings.simulations, settings.difficulty)
+      : undefined,
   });
+
+  // Signed in: merge AI progress with the account (level follows the player
+  // across devices) and push any finished on-device games to their history.
+  useEffect(() => {
+    if (!user) return;
+    void syncAIProgress();
+    void flushSyncQueue();
+  }, [user?.user_id]);
 
   // Fetch available models from server
   const fetchModels = useCallback(async () => {
@@ -250,7 +265,9 @@ function AppContent() {
       levelAdjustedGamesRef.current.add(gameState.game_id);
       const won = gameState.winner === playerColor;
       const oldLevel = getAutoMatchLevel();
+      if (won) recordLevelBeaten(oldLevel);
       const newLevel = adjustAfterGame(won);
+      if (user) void syncAIProgress();
       if (newLevel !== oldLevel) {
         const label = getLevelLabel(newLevel);
         if (won) {
@@ -260,7 +277,7 @@ function AppContent() {
         }
       }
     }
-  }, [gameState?.status, gameState?.winner, settings.mode, settings.difficulty, playerColor]);
+  }, [gameState?.status, gameState?.winner, settings.mode, settings.difficulty, playerColor, user]);
 
   // Resign needs a second tap within a few seconds
   const [confirmResign, setConfirmResign] = useState(false);
@@ -291,7 +308,8 @@ function AppContent() {
     const color = newSettings.mode === 'ai' ? resolveColor(newSettings.colorChoice) : 0;
     setPlayerColor(color);
     setGameGeneration(g => g + 1); // Force new game even if settings unchanged
-  }, [resolveColor]);
+    if (user) void syncAIProgress(); // the dialog may have changed the level
+  }, [resolveColor, user]);
 
   // Re-start game when generation changes (after dialog)
   const initialMountRef = useRef(true);
@@ -457,6 +475,7 @@ function AppContent() {
         break;
       case 'escape':
         setShowGameBrowser(false);
+        setShowMyGames(false);
         setReplayGameId(null);
         setShowAnalysisBoard(false);
         setShowTrainingDashboard(false);
@@ -503,6 +522,7 @@ function AppContent() {
 
   const handleSelectGameForReplay = (gameId: string) => {
     setShowGameBrowser(false);
+    setShowMyGames(false);
     setReplayGameId(gameId);
   };
 
@@ -669,6 +689,7 @@ function AppContent() {
             onOpenLogin={() => setShowLoginModal(true)}
             onOpenRegister={() => setShowRegisterModal(true)}
             onOpenBrowser={() => setShowGameBrowser(true)}
+            onOpenMyGames={() => setShowMyGames(true)}
           />
         </div>
       </header>
@@ -912,6 +933,14 @@ function AppContent() {
         isOpen={showGameBrowser}
         onClose={() => setShowGameBrowser(false)}
         onSelectGame={handleSelectGameForReplay}
+      />
+
+      {/* Account history: summary + recent games */}
+      <MyGames
+        isOpen={showMyGames}
+        onClose={() => setShowMyGames(false)}
+        onSelectGame={handleSelectGameForReplay}
+        onBrowseAll={() => { setShowMyGames(false); setShowGameBrowser(true); }}
       />
 
       {/* Replay Viewer */}

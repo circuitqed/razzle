@@ -5,9 +5,11 @@ interface UserMenuProps {
   onOpenLogin: () => void;
   onOpenRegister: () => void;
   onOpenBrowser: () => void;
+  /** Account history (summary + recent games); falls back to the browser. */
+  onOpenMyGames?: () => void;
 }
 
-export default function UserMenu({ onOpenLogin, onOpenRegister, onOpenBrowser }: UserMenuProps) {
+export default function UserMenu({ onOpenLogin, onOpenRegister, onOpenBrowser, onOpenMyGames }: UserMenuProps) {
   const { user, isAuthenticated, logout, deleteAccount, isLoading } = useAuth();
   const [isOpen, setIsOpen] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
@@ -120,12 +122,24 @@ export default function UserMenu({ onOpenLogin, onOpenRegister, onOpenBrowser }:
           <button
             onClick={() => {
               setIsOpen(false);
-              onOpenBrowser();
+              (onOpenMyGames ?? onOpenBrowser)();
             }}
             className="w-full px-4 py-2 text-left text-sm text-gray-300 hover:bg-gray-700 transition-colors"
           >
             My Games
           </button>
+
+          {onOpenMyGames && (
+            <button
+              onClick={() => {
+                setIsOpen(false);
+                onOpenBrowser();
+              }}
+              className="w-full px-4 py-2 text-left text-sm text-gray-300 hover:bg-gray-700 transition-colors"
+            >
+              Browse All Games
+            </button>
+          )}
 
           <button
             onClick={handleLogout}
