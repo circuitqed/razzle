@@ -242,9 +242,21 @@ class ModelSource:
         if info is None or info.version == self.version:
             return False
         path = self.dir / f'{info.version}.pt'
-        if not path.exists():
-            self.client.download_model(info.version, path)
-        self.model = Model(str(path), self.device, half=self.args.fp16)
+        for attempt in range(6):
+            try:
+                if not path.exists():
+                    self.client.download_model(info.version, path)
+                model = Model(str(path), self.device, half=self.args.fp16)
+                break
+            except Exception as e:      # network error or a bad file: refetch and retry
+                print(f'[selfplay] loading {info.version} failed ({e}); retrying', flush=True)
+                path.unlink(missing_ok=True)
+                if self.model is not None and attempt >= 1:
+                    return False        # keep playing with the current model
+                time.sleep(5 * (attempt + 1))
+        else:
+            raise RuntimeError(f'could not load {info.version}')
+        self.model = model
         self.version = info.version
         print(f'[selfplay] loaded model {self.version}', flush=True)
         return True

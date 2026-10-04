@@ -47,6 +47,20 @@ class TrainingGame:
     created_at: str
 
 
+def _write_atomic(response, dest_path: Path) -> None:
+    """Stream a download to a private temp file, then rename into place, so other
+    processes sharing the directory never read a partially written file."""
+    tmp = dest_path.with_name(f".{dest_path.name}.{os.getpid()}.tmp")
+    try:
+        with open(tmp, "wb") as f:
+            for chunk in response.iter_content(chunk_size=1 << 16):
+                f.write(chunk)
+        os.replace(tmp, dest_path)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+
+
 class TrainingAPIClient:
     """Client for the training API."""
 
@@ -187,9 +201,7 @@ class TrainingAPIClient:
         dest_path = Path(dest_path)
         dest_path.parent.mkdir(parents=True, exist_ok=True)
 
-        with open(dest_path, "wb") as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                f.write(chunk)
+        _write_atomic(response, dest_path)
 
         return dest_path
 
@@ -464,9 +476,7 @@ class TrainingAPIClient:
         dest_path = Path(dest_path)
         dest_path.parent.mkdir(parents=True, exist_ok=True)
 
-        with open(dest_path, "wb") as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                f.write(chunk)
+        _write_atomic(response, dest_path)
 
         return dest_path
 
