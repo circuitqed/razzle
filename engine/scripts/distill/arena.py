@@ -150,7 +150,8 @@ class Search:
 
 
 class Game:
-    def __init__(self, opening: list[int], a_is_p0: bool):
+    def __init__(self, opening: list[int], a_is_p0: bool, pair: int = -1):
+        self.pair = pair
         self.cs = CRazzleState()
         _lib.razzle_state_init(ctypes.byref(self.cs))
         for m in opening:
@@ -367,6 +368,24 @@ def make_model(path: str, device, backend: str = 'torch', half: bool = False, cu
     return Model(path, device, half=half, cuda_graphs=cuda_graphs)
 
 
+def _color_stats(outcomes: dict) -> dict:
+    """How much colour decides games: first-player (P0) win rate, and for each opening
+    played twice with colours swapped, whether the same colour won both games
+    (colour-decided) or the same model won both (skill-decided)."""
+    games = [w for v in outcomes.values() for _, w in v]
+    decided = [w for w in games if w >= 0]
+    same_colour = same_model = 0
+    full = [v for v in outcomes.values() if len(v) == 2 and all(w >= 0 for _, w in v)]
+    for (a0, w0), (a1, w1) in full:
+        if w0 == w1:
+            same_colour += 1
+        else:
+            same_model += 1
+    return dict(p0_win_rate=round(sum(w == 0 for w in decided) / max(1, len(decided)), 4),
+                draws=len(games) - len(decided),
+                pairs_colour_decided=same_colour, pairs_skill_decided=same_model)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--a', required=True)
@@ -400,11 +419,11 @@ def main():
     rng = random.Random(args.seed)
     pairs = (args.games + 1) // 2
     queue = []
-    for op in random_openings(pairs, args.opening_moves, rng):
-        queue += [(op, True), (op, False)]
+    for k, op in enumerate(random_openings(pairs, args.opening_moves, rng)):
+        queue += [(op, True, k), (op, False, k)]
 
     active: list[Game] = []
-    scores, plies = [], []
+    scores, plies, outcomes = [], [], {}   # outcomes[pair] = [(a_is_p0, winner), ...]
     t0 = time.time()
     while queue or active:
         while queue and len(active) < args.concurrency:
@@ -416,6 +435,8 @@ def main():
             if g.over():
                 scores.append(g.score_for_a())
                 plies.append(int(g.cs.ply))
+                outcomes.setdefault(g.pair, []).append(
+                    (g.a_is_p0, int(_lib.razzle_state_get_winner(ctypes.byref(g.cs)))))
                 continue
             if g.search is None:
                 sims = sims_a if g.mover_is_a() else sims_b
@@ -464,6 +485,7 @@ def main():
                score_a=round(s, 4), ci95=round(1.96 * se, 4),
                elo_a_minus_b=round(elo(s)), elo_ci95=[round(elo(s - 1.96 * se)), round(elo(s + 1.96 * se))],
                median_ply=int(np.median(plies)), secs=round(time.time() - t0),
+               **_color_stats(outcomes),
                evals_a=model_a.evals, evals_b=model_b.evals if model_b is not model_a else None)
     print(json.dumps(res), flush=True)
     if args.json:
