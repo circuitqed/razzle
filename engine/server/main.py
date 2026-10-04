@@ -2984,10 +2984,12 @@ class ResetTrainingResponse(BaseModel):
 @app.post("/training/reset", response_model=ResetTrainingResponse)
 async def reset_training(_=Depends(require_training_key)):
     """
-    Reset all training data (games, models, metrics, trainer state).
+    Reset training run state before starting a new run.
 
-    WARNING: This permanently deletes all training progress!
-    Use this to start fresh training from scratch.
+    Retires pending self-play games (status 'archived'; games are kept in
+    training.db and the daily archive) and removes model / metric / trainer-
+    state records. Model .pt files and self-play games are NOT deleted.
+    ("games_deleted" in the response counts retired pending games.)
     """
     result = persistence.clear_training_data()
     return ResetTrainingResponse(**result)
