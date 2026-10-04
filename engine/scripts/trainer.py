@@ -462,10 +462,24 @@ class DistributedTrainer:
         try:
             model_info = self.api_client.get_latest_model()
             if model_info:
-                # Download and load
+                # Download and load. Never fall back to a fresh network when the run
+                # has a model: a random net trained on the restored optimizer state
+                # and uploaded would replace the run's model for every worker.
                 model_path = self.models_dir / f"{model_info.version}.pt"
-                print(f"[Trainer] Downloading model: {model_info.version}")
-                self.api_client.download_model(model_info.version, model_path)
+                for attempt in range(5):
+                    try:
+                        print(f"[Trainer] Downloading model: {model_info.version}")
+                        self.api_client.download_model(model_info.version, model_path)
+                        break
+                    except Exception as e:
+                        print(f"[Trainer] Download failed ({e}); retry {attempt + 1}/5")
+                        time.sleep(10 * (attempt + 1))
+                else:
+                    if not model_path.exists():
+                        print(f"[Trainer] Cannot get {model_info.version} (check TRAINING_API_KEY); "
+                              f"refusing to start from a new network")
+                        return False
+                    print(f"[Trainer] Using local copy {model_path}")
 
                 if target_config is not None:
                     # Use load_with_upgrade to handle architecture changes
@@ -486,15 +500,9 @@ class DistributedTrainer:
                 self.iteration = 0
                 print(f"[Trainer] No model found, created new network")
         except Exception as e:
-            # API error (e.g., 500) - fall back to creating new network
-            print(f"[Trainer] API error checking for model: {e}")
-            print(f"[Trainer] Falling back to new network")
-            try:
-                self.network = self._create_new_network()
-                self.iteration = 0
-            except Exception as e2:
-                print(f"[Trainer] Error creating network: {e2}")
-                return False
+            # Can't tell whether the run has a model - don't guess with a new network
+            print(f"[Trainer] Error loading the latest model: {e}")
+            return False
 
         # Create trainer once (preserves optimizer state across iterations)
         config = TrainingConfig(
