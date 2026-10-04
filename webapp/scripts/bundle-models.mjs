@@ -11,7 +11,8 @@
  *
  * To change the bundled set: keep in sync with the models in
  * src/utils/autoMatch.ts, ordered weakest → strongest (the last one is the
- * default when no level is selected).
+ * default when no level is selected). distill_* are the distilled students
+ * (engine/scripts/distill/), served by the API like any other model.
  */
 
 import { createHash } from 'node:crypto';
@@ -21,10 +22,10 @@ import { fileURLToPath } from 'node:url';
 
 const MODELS = [
   { version: 'pegasus_iter_050', sha256: '564ea2f2ab70d95d49691c67baf18000b9fd68512a9a1aac1d30be494484fe5a' },
-  { version: 'pegasus_iter_100', sha256: 'b7a527eff5b2d4a07eb8edb6140cf0e7de24d517c89a4ee31a216ad726838f76' },
-  { version: 'pegasus_iter_150', sha256: '569ee2cbba80ceb32b368fa3579668eea7ee6731c688040cc319744df1c1e7c5' },
-  { version: 'pegasus_iter_200', sha256: '259c9bbee223fe546f280d79193941a20f59d1fcc9c4c2862926a11e35ad8735' },
-  { version: 'pegasus_iter_250', sha256: 'a5ca4d532fd6ce2950d3d5b00f4196c6f08ee868b7c066138365a27d6149fbba' },
+  { version: 'distill_s32x4', sha256: '265b8fb515e7f27b091c74079c757db9432e5898b2d690fa01cf188fc1d5839d' },
+  { version: 'distill_s48x6', sha256: 'ebd5b2bcb29d9b48692b20e7739afa49bb9da1a2cb6dc4daa716a515626b9652' },
+  { version: 'distill_s64x8', sha256: '50dfa5d2adcfd0b8f57a10d3e087f5889af51956b4f9a3c159b9f4a4283e651f' },
+  { version: 'distill_s96x12', sha256: '10586464ebe90e14119fb5b521c977d2f42b4340dcb4c4dccb4b14048423a309' },
 ];
 
 const DOWNLOAD_BASE = 'https://knightball.org/api/models/onnx';

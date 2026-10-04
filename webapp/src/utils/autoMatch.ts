@@ -5,8 +5,8 @@
  * a demotion requires LOSS_STREAK_TO_DEMOTE consecutive losses (hysteresis —
  * without it, a player at their skill boundary ping-pongs between two levels
  * every other game, which feels bad). Each level maps to a specific model
- * iteration + simulation count, providing a smooth difficulty curve from
- * random-ish play up to near-maximum strength.
+ * (model, simulation count) pair calibrated in arena games, providing a smooth
+ * difficulty curve from random-ish play up to near-maximum strength.
  */
 
 const STORAGE_KEY = 'knightball_ai_level';
@@ -21,27 +21,39 @@ export interface TierSettings {
   model: string;
   sims: number;
   label: string;
+  /** Approximate displayed rating (see below). */
+  rating: number;
 }
 
-// Pegasus training run models with varying sim counts for difficulty.
-// Early iterations are weaker (Elo ~660-900), later ones stronger (~1100-1220).
-// Sim count further modulates strength within each model tier.
+// Calibrated ladder (Oct 2026). Each (model, sims) pair was placed on one Elo
+// scale with ~20k arena games (engine/scripts/distill/calibration.py); steps
+// are ~45-55 points at the bottom (new players) and ~70-90 higher up.
+// Ratings are shown on a human-friendly scale anchored so that ~1500 is an
+// even game for a ~1500 chess player (displayed = 880 + calibrated Elo).
+// Levels marked "interp." are interpolated in log(sims) between measured
+// neighbours. Models: pegasus_iter_050 (weak, for beginners) and the distilled
+// students distill_s{filters}x{blocks} (fast enough for phones).
 export const TIERS: TierSettings[] = [
-  { model: 'pegasus_iter_050.pt', sims: 1,    label: 'Level 1 — Beginner' },
-  { model: 'pegasus_iter_050.pt', sims: 8,    label: 'Level 2 — Beginner' },
-  { model: 'pegasus_iter_050.pt', sims: 16,   label: 'Level 3 — Beginner' },
-  { model: 'pegasus_iter_050.pt', sims: 64,   label: 'Level 4 — Easy' },
-  { model: 'pegasus_iter_100.pt', sims: 64,   label: 'Level 5 — Easy' },
-  { model: 'pegasus_iter_100.pt', sims: 128,  label: 'Level 6 — Intermediate' },
-  { model: 'pegasus_iter_150.pt', sims: 128,  label: 'Level 7 — Intermediate' },
-  { model: 'pegasus_iter_150.pt', sims: 256,  label: 'Level 8 — Medium' },
-  { model: 'pegasus_iter_200.pt', sims: 256,  label: 'Level 9 — Medium' },
-  { model: 'pegasus_iter_250.pt', sims: 256,  label: 'Level 10 — Hard' },
-  { model: 'pegasus_iter_250.pt', sims: 512,  label: 'Level 11 — Hard' },
-  { model: 'pegasus_iter_250.pt', sims: 1024, label: 'Level 12 — Expert' },
-  { model: 'pegasus_iter_250.pt', sims: 2048, label: 'Level 13 — Expert' },
-  { model: 'pegasus_iter_250.pt', sims: 4096, label: 'Level 14 — Master' },
-  { model: 'pegasus_iter_250.pt', sims: 8192, label: 'Level 15 — Master' },
+  { model: 'pegasus_iter_050.pt', sims: 1,    rating: 880,  label: 'Level 1 — Beginner' },
+  { model: 'pegasus_iter_050.pt', sims: 4,    rating: 945,  label: 'Level 2 — Beginner' },
+  { model: 'pegasus_iter_050.pt', sims: 12,   rating: 990,  label: 'Level 3 — Beginner' },
+  { model: 'pegasus_iter_050.pt', sims: 24,   rating: 1030, label: 'Level 4 — Beginner' },
+  { model: 'pegasus_iter_050.pt', sims: 32,   rating: 1085, label: 'Level 5 — Easy' },
+  { model: 'distill_s32x4.pt',    sims: 2,    rating: 1140, label: 'Level 6 — Easy' },
+  { model: 'distill_s32x4.pt',    sims: 16,   rating: 1235, label: 'Level 7 — Easy' },
+  { model: 'distill_s32x4.pt',    sims: 32,   rating: 1315, label: 'Level 8 — Intermediate' },
+  { model: 'distill_s48x6.pt',    sims: 16,   rating: 1365, label: 'Level 9 — Intermediate' },
+  { model: 'distill_s48x6.pt',    sims: 32,   rating: 1440, label: 'Level 10 — Intermediate' },
+  { model: 'distill_s48x6.pt',    sims: 45,   rating: 1510, label: 'Level 11 — Medium' },      // interp.
+  { model: 'distill_s48x6.pt',    sims: 64,   rating: 1580, label: 'Level 12 — Medium' },
+  { model: 'distill_s48x6.pt',    sims: 90,   rating: 1650, label: 'Level 13 — Advanced' },    // interp.
+  { model: 'distill_s48x6.pt',    sims: 128,  rating: 1725, label: 'Level 14 — Advanced' },
+  { model: 'distill_s48x6.pt',    sims: 180,  rating: 1790, label: 'Level 15 — Advanced' },    // interp.
+  { model: 'distill_s48x6.pt',    sims: 256,  rating: 1860, label: 'Level 16 — Expert' },
+  { model: 'distill_s96x12.pt',   sims: 256,  rating: 1920, label: 'Level 17 — Expert' },
+  { model: 'distill_s64x8.pt',    sims: 512,  rating: 2005, label: 'Level 18 — Expert' },
+  { model: 'distill_s96x12.pt',   sims: 720,  rating: 2100, label: 'Level 19 — Master' },      // interp.
+  { model: 'distill_s96x12.pt',   sims: 1024, rating: 2160, label: 'Level 20 — Master' },
 ];
 
 export const MAX_LEVEL = TIERS.length;

@@ -5,6 +5,7 @@ import {
   setAutoMatchLevel,
   LOSS_STREAK_TO_DEMOTE,
   MAX_LEVEL,
+  TIERS,
 } from './autoMatch';
 
 describe('autoMatch level hysteresis', () => {
@@ -57,5 +58,21 @@ describe('autoMatch level hysteresis', () => {
     expect(getAutoMatchLevel()).toBe(1);
     setAutoMatchLevel(MAX_LEVEL);
     expect(adjustAfterGame(true)).toBe(MAX_LEVEL);
+  });
+});
+
+describe('calibrated ladder', () => {
+  it('has strictly increasing ratings and labels matching the level number', () => {
+    TIERS.forEach((t, i) => {
+      expect(t.label.startsWith(`Level ${i + 1} — `)).toBe(true);
+      if (i > 0) expect(t.rating).toBeGreaterThan(TIERS[i - 1].rating);
+    });
+  });
+
+  it('only uses models that the native app bundles (offline play)', async () => {
+    const { readFileSync } = await import('fs');
+    const src = readFileSync('scripts/bundle-models.mjs', 'utf8')  // vitest runs from webapp/;
+    const bundled = new Set([...src.matchAll(/version: '([^']+)'/g)].map(m => m[1]));
+    for (const t of TIERS) expect(bundled.has(t.model.replace(/\.pt$/, ''))).toBe(true);
   });
 });

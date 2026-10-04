@@ -76,3 +76,14 @@ distillation above came entirely from stored games.
 3. `python scripts/train_distributed.py --worker v2 --branch app-store-ready --network-size medium_v2
    --run-name <run> --simulations 800 --concurrency 96 --threshold 512 --trainer-extra "--reuse 2"`.
 4. Gate checkpoints with `distill/arena.py` against the starting network.
+
+## 7. App difficulty ladder (Oct 2026)
+
+20 levels in `webapp/src/utils/autoMatch.ts`, calibrated with ~25k arena games
+(`scripts/distill/calibration.py`; results in Sherlock `$SCRATCH/kb/arena_results.jsonl`).
+Levels 1–5 use `pegasus_iter_050` at 1–32 sims (gentle beginner steps); 6–20 use the
+distilled students `distill_s32x4/s48x6/s64x8/s96x12` (`engine/output/models/`, served via
+the API like any model, bundled in the iOS app). Displayed rating = 880 + calibrated Elo,
+anchored so ~1500 ≈ an even game for a ~1500 chess player. Old levels 14–15 (4096/8192 sims)
+were capped to ~1000 sims by the native 10 s budget anyway; old level 10 (p250@256) was
+weaker than levels 8–9.

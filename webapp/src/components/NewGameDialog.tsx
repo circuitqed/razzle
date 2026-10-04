@@ -69,11 +69,11 @@ const SIMULATION_OPTIONS = [
 // can't drift when checkpoints are re-tiered. Preset level N = TIERS[N-1].
 const tier = (level: number) => ({ model: TIERS[level - 1].model, sims: TIERS[level - 1].sims });
 export const BOT_PRESETS = [
-  { id: 'beginner', name: 'Beginner', ...tier(2), elo: 700 },
-  { id: 'easy', name: 'Easy', ...tier(4), elo: 950 },
-  { id: 'medium', name: 'Medium', ...tier(8), elo: 1070 },
-  { id: 'hard', name: 'Hard', ...tier(12), elo: 1219 },
-  { id: 'expert', name: 'Expert', ...tier(14), elo: 1300 },
+  { id: 'beginner', name: 'Beginner', ...tier(2), elo: TIERS[1].rating },
+  { id: 'easy', name: 'Easy', ...tier(6), elo: TIERS[5].rating },
+  { id: 'medium', name: 'Medium', ...tier(10), elo: TIERS[9].rating },
+  { id: 'hard', name: 'Hard', ...tier(14), elo: TIERS[13].rating },
+  { id: 'expert', name: 'Expert', ...tier(18), elo: TIERS[17].rating },
 ] as const;
 
 export type BotDifficulty = 'auto' | typeof BOT_PRESETS[number]['id'] | 'custom';
