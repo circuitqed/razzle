@@ -56,6 +56,7 @@ def main():
                     help='also keep an exponential moving average of the weights (e.g. 0.999 per step); '
                          'checkpoints then save the averaged weights')
     ap.add_argument('--max-games', type=int, default=0)
+    ap.add_argument('--workers', type=int, default=8, help='processes converting games (trainer code)')
     ap.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
     args = ap.parse_args()
 
@@ -90,11 +91,17 @@ def main():
     save_at = {round(len(chunks) * (k + 1) / args.checkpoints) - 1 for k in range(args.checkpoints)}
     t0 = time.time()
     log = open(out / 'log.jsonl', 'w')
+    import multiprocessing as mp
+    pool = mp.get_context('spawn').Pool(args.workers) if args.workers > 1 else None
     for it, chunk in enumerate(chunks):
-        states, policies, values, legal, _ = T.games_to_training_data(chunk, network=None, num_planes=planes)
-        pw = T.DistributedTrainer._policy_weights(policies, legal)
-        buf.add(states, policies, values, legal, policy_weights=pw)
-        steps = max(1, int(np.ceil(len(states) * args.reuse / args.batch_size)))
+        k = max(1, args.workers)
+        jobs = [(chunk[i::k], planes, 1, i) for i in range(k)]      # same conversion as the trainer
+        results = pool.map(T._convert_games_compact, jobs) if pool else [T._convert_games_compact(jobs[0])]
+        n_new = 0
+        for r in results:
+            buf.add_chunk(r[0])
+            n_new += r[2]
+        steps = max(1, int(np.ceil(n_new * args.reuse / args.batch_size)))
         if ema is None:
             m = trainer.train_steps(lambda: buf.sample(args.batch_size, rng), steps, verbose=False)
         else:   # one step at a time so the average updates after every step
@@ -103,7 +110,7 @@ def main():
                 ms.append(trainer.train_steps(lambda: buf.sample(args.batch_size, rng), 1, verbose=False))
                 ema_update()
             m = {k: float(np.mean([x[k] for x in ms])) for k in ('loss', 'policy_loss', 'value_loss')}
-        m.update(iteration=it + 1, games=len(chunk), positions=len(states), window=len(buf))
+        m.update(iteration=it + 1, games=len(chunk), positions=n_new, window=len(buf))
         log.write(json.dumps(m) + '\n')
         log.flush()
         print(f"iter {it + 1}/{len(chunks)}: steps {steps} loss {m['loss']:.4f} pol {m['policy_loss']:.4f} "
