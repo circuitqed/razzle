@@ -54,6 +54,7 @@ class GPUOffer:
     inet_up: float  # Mbps
     reliability: float
     dlperf: float  # Deep learning performance score
+    machine_id: int = 0  # physical host (offer ids change over time; machine ids don't)
 
     @classmethod
     def from_json(cls, data: dict) -> GPUOffer:
@@ -68,7 +69,8 @@ class GPUOffer:
             inet_down=data.get('inet_down', 0),
             inet_up=data.get('inet_up', 0),
             reliability=data.get('reliability2', 0),
-            dlperf=data.get('dlperf', 0)
+            dlperf=data.get('dlperf', 0),
+            machine_id=data.get('machine_id', 0) or 0,
         )
 
 

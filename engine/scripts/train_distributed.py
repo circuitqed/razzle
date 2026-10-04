@@ -203,6 +203,8 @@ def _build_trainer_onstart(
 
 # Permanently blacklisted offers/machines that consistently fail
 BLACKLISTED_OFFER_IDS: set[int] = {61866, 30784976, 30784982}  # machine 54400
+# Offer ids are re-issued over time, so also blacklist the physical machines.
+BLACKLISTED_MACHINE_IDS: set[int] = {54400}
 
 
 class DistributedOrchestrator:
@@ -289,6 +291,7 @@ class DistributedOrchestrator:
         self.trainer: Optional[WorkerInstance] = None
         self.shutdown_requested = False
         self.failed_offer_ids: set[int] = set(BLACKLISTED_OFFER_IDS)  # Offers that produced broken instances
+        self.failed_machine_ids: set[int] = set(BLACKLISTED_MACHINE_IDS)
 
     def find_offers(self) -> list[GPUOffer]:
         """Find suitable GPU offers."""
@@ -304,6 +307,9 @@ class DistributedOrchestrator:
         # Very cheap hosts tend to be unreliable; enforce a price floor.
         if self.min_price > 0:
             offers = [o for o in offers if o.dph_total >= self.min_price]
+        # Known-bad offers / machines (applies to the initial pick, not just replacements)
+        offers = [o for o in offers
+                  if o.id not in self.failed_offer_ids and o.machine_id not in self.failed_machine_ids]
 
         if not offers:
             print("No suitable offers found. Try:")
@@ -439,6 +445,8 @@ class DistributedOrchestrator:
         # Blacklist the offer that produced the failed instance
         if failed_worker.offer:
             self.failed_offer_ids.add(failed_worker.offer.id)
+            if failed_worker.offer.machine_id:
+                self.failed_machine_ids.add(failed_worker.offer.machine_id)
 
         # Destroy the old instance
         if failed_worker.instance_id:
@@ -456,7 +464,7 @@ class DistributedOrchestrator:
 
         new_offer = None
         for offer in offers:
-            if offer.id not in skip_ids:
+            if offer.id not in skip_ids and offer.machine_id not in self.failed_machine_ids:
                 new_offer = offer
                 break
 
