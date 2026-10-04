@@ -260,6 +260,39 @@ class Model:
         return p.cpu().numpy(), v.cpu().numpy()
 
 
+def build_trt_engine(path: str, engine_path: str, max_batch: int = 2048) -> None:
+    """ONNX-export a checkpoint and build a TensorRT fp16 engine (dynamic batch 1..max_batch)."""
+    import os
+    import tensorrt as trt
+    net = RazzleNet.load(path, device='cpu').eval()
+    planes = net.config.num_input_planes
+    log = trt.Logger(trt.Logger.ERROR)
+    onnx_path = f'{path}.{os.getpid()}.onnx'
+    torch.onnx.export(net, torch.zeros(1, planes, 8, 7), onnx_path, opset_version=17,
+                      input_names=['x'], output_names=['logp', 'v', 'd'],
+                      dynamic_axes={k: {0: 'b'} for k in ('x', 'logp', 'v', 'd')})
+    builder = trt.Builder(log)
+    network = builder.create_network(0)
+    parser = trt.OnnxParser(network, log)
+    ok = parser.parse(open(onnx_path, 'rb').read())
+    os.remove(onnx_path)
+    if not ok:
+        raise RuntimeError(f'ONNX parse failed: {parser.get_error(0)}')
+    cfg = builder.create_builder_config()
+    cfg.set_flag(trt.BuilderFlag.FP16)
+    cfg.builder_optimization_level = 1     # 15 s build, same speed as level 3 here
+    prof = builder.create_optimization_profile()
+    prof.set_shape('x', (1, planes, 8, 7), (768, planes, 8, 7), (max_batch, planes, 8, 7))
+    cfg.add_optimization_profile(prof)
+    data = builder.build_serialized_network(network, cfg)
+    if data is None:
+        raise RuntimeError('TensorRT engine build failed')
+    tmp = f'{engine_path}.{os.getpid()}.tmp'
+    with open(tmp, 'wb') as f:
+        f.write(data)
+    os.replace(tmp, engine_path)
+
+
 class TRTModel:
     """Same interface as Model, running a TensorRT fp16 engine (~3x faster than PyTorch
     fp16 on an RTX 3060; vs fp32 top move agrees 99.9%, mean |dv| 0.0013).
@@ -278,39 +311,21 @@ class TRTModel:
         self.device = torch.device(device)
         self.value_scale = 1.0
         self.evals = 0
-        net = RazzleNet.load(path, device='cpu').eval()
-        self.planes = net.config.num_input_planes
+        self.planes = RazzleNet.load(path, device='cpu').config.num_input_planes
         self.rot = torch.from_numpy(MOVE_ROTATION_MAP.astype(np.int64)).to(self.device)
         log = trt.Logger(trt.Logger.ERROR)
         engine_path = f'{path}.fp16.engine'
         with open(f'{path}.lock', 'w') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             if not os.path.exists(engine_path):
-                onnx_path = f'{path}.{os.getpid()}.onnx'
-                torch.onnx.export(net, torch.zeros(1, self.planes, 8, 7), onnx_path, opset_version=17,
-                                  input_names=['x'], output_names=['logp', 'v', 'd'],
-                                  dynamic_axes={k: {0: 'b'} for k in ('x', 'logp', 'v', 'd')})
-                builder = trt.Builder(log)
-                network = builder.create_network(0)
-                parser = trt.OnnxParser(network, log)
-                ok = parser.parse(open(onnx_path, 'rb').read())
-                os.remove(onnx_path)
-                if not ok:
-                    raise RuntimeError(f'ONNX parse failed: {parser.get_error(0)}')
-                cfg = builder.create_builder_config()
-                cfg.set_flag(trt.BuilderFlag.FP16)
-                cfg.builder_optimization_level = 1     # 15 s build, same speed as level 3 here
-                prof = builder.create_optimization_profile()
-                prof.set_shape('x', (1, self.planes, 8, 7), (768, self.planes, 8, 7),
-                               (self.MAX_BATCH, self.planes, 8, 7))
-                cfg.add_optimization_profile(prof)
-                data = builder.build_serialized_network(network, cfg)
-                if data is None:
-                    raise RuntimeError('TensorRT engine build failed')
-                tmp = f'{engine_path}.{os.getpid()}.tmp'
-                with open(tmp, 'wb') as f:
-                    f.write(data)
-                os.replace(tmp, engine_path)
+                # Build in a child process: the builder's ~3 GB of host memory is never
+                # returned to the OS, and with processes taking turns to build, every
+                # self-play process would otherwise grow to ~5-6 GB.
+                import subprocess
+                subprocess.run([sys.executable, '-c',
+                                'import sys; sys.path.insert(0, sys.argv[1]); import arena; '
+                                'arena.build_trt_engine(sys.argv[2], sys.argv[3])',
+                                str(Path(__file__).resolve().parent), path, engine_path], check=True)
             with open(engine_path, 'rb') as f:
                 self.engine = trt.Runtime(log).deserialize_cuda_engine(f.read())
         self.ctx = self.engine.create_execution_context()
