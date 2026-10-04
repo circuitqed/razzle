@@ -40,6 +40,8 @@ class TrainingConfig:
     # Randomly mirror half of each batch left-right. The game is symmetric under
     # a horizontal flip, so this doubles the effective data for free.
     mirror_augment: bool = True
+    amp: bool = True              # bf16 autocast for train_steps on CUDA (when supported)
+    prefetch: bool = False        # sample the next batch in a background thread (CUDA); measured slower (GIL)
 
 
 class RazzleDataset(Dataset):
@@ -226,43 +228,84 @@ class Trainer:
         so those positions train the value head only. Used with
         CompactReplayBuffer: fresh samples every step instead of epochs over
         the newest games.
+
+        On CUDA: the next batch is sampled and copied (pinned, non-blocking) in a
+        background thread while the GPU trains on the current one; the forward pass
+        and loss run under bf16 autocast (config.amp); losses are summed on the GPU
+        and read once at the end.
         """
+        import queue
+        import threading
         self.network.train()
         dev = self.config.device
-        sums = dict(loss=0.0, policy_loss=0.0, value_loss=0.0, illegal_penalty=0.0)
-        for step in range(steps):
-            st, po, va, le, pw = sample_batch()
-            st = torch.from_numpy(st).to(dev)
-            po = torch.from_numpy(po).to(dev)
-            va = torch.from_numpy(va).to(dev)
-            le = torch.from_numpy(le).to(dev)
-            pw = torch.from_numpy(pw).to(dev)
-            if self.config.mirror_augment:
-                st, po, le = self._mirror_half(st, po, le)
+        cuda = str(dev).startswith('cuda')
+        amp = cuda and getattr(self.config, 'amp', True) and torch.cuda.is_bf16_supported()
+        names = ('loss', 'policy_loss', 'value_loss', 'illegal_penalty')
+        sums = torch.zeros(len(names), device=dev)
 
-            log_policies, values, _ = self.network(st)
-            values = values.squeeze(-1)
-            per_pos = -torch.sum(po * le * log_policies * le, dim=1)
-            policy_loss = (per_pos * pw).sum() / pw.sum().clamp_min(1.0)
-            illegal_penalty = self.config.illegal_penalty_weight * torch.sum(
-                torch.exp(log_policies) * (1.0 - le), dim=1).mean()
-            diff = values - va
-            value_loss = torch.mean(diff ** 2)
-            loss = (self.config.policy_weight * policy_loss
-                    + self.config.value_weight * value_loss
-                    + self.config.value_weight_quartic * torch.mean(diff ** 4)
-                    + illegal_penalty)
+        def to_device(batch):
+            out = []
+            for a in batch:
+                t = torch.from_numpy(a).to(dev)
+                out.append(t)
+            return out
 
-            self.optimizer.zero_grad()
-            loss.backward()
-            if self.config.max_grad_norm > 0:
-                torch.nn.utils.clip_grad_norm_(self.network.parameters(), self.config.max_grad_norm)
-            self.optimizer.step()
+        q: queue.Queue = queue.Queue(maxsize=2)
+        stop = threading.Event()
 
-            sums['loss'] += loss.item()
-            sums['policy_loss'] += policy_loss.item()
-            sums['value_loss'] += value_loss.item()
-            sums['illegal_penalty'] += illegal_penalty.item()
+        def producer():
+            try:
+                for _ in range(steps):
+                    if stop.is_set():
+                        return
+                    q.put(to_device(sample_batch()))
+            except BaseException as e:      # surface sampler errors in the training thread
+                q.put(e)
+
+        prefetch = cuda and steps > 1 and getattr(self.config, 'prefetch', True)
+        worker = threading.Thread(target=producer, daemon=True) if prefetch else None
+        if worker:
+            worker.start()
+        try:
+            for step in range(steps):
+                item = q.get() if worker else to_device(sample_batch())
+                if isinstance(item, BaseException):
+                    raise item
+                st, po, va, le, pw = item
+                if self.config.mirror_augment:
+                    st, po, le = self._mirror_half(st, po, le)
+
+                with torch.autocast('cuda', dtype=torch.bfloat16, enabled=amp):
+                    log_policies, values, _ = self.network(st)
+                log_policies = log_policies.float()
+                values = values.float().squeeze(-1)
+                per_pos = -torch.sum(po * le * log_policies * le, dim=1)
+                policy_loss = (per_pos * pw).sum() / pw.sum().clamp_min(1.0)
+                illegal_penalty = self.config.illegal_penalty_weight * torch.sum(
+                    torch.exp(log_policies) * (1.0 - le), dim=1).mean()
+                diff = values - va
+                value_loss = torch.mean(diff ** 2)
+                loss = (self.config.policy_weight * policy_loss
+                        + self.config.value_weight * value_loss
+                        + self.config.value_weight_quartic * torch.mean(diff ** 4)
+                        + illegal_penalty)
+
+                self.optimizer.zero_grad(set_to_none=True)
+                loss.backward()
+                if self.config.max_grad_norm > 0:
+                    torch.nn.utils.clip_grad_norm_(self.network.parameters(), self.config.max_grad_norm)
+                self.optimizer.step()
+                sums += torch.stack([loss.detach(), policy_loss.detach(), value_loss.detach(),
+                                     illegal_penalty.detach()])
+        finally:
+            stop.set()
+            if worker:
+                while worker.is_alive():        # unblock a producer waiting on a full queue
+                    try:
+                        q.get_nowait()
+                    except queue.Empty:
+                        worker.join(timeout=0.1)
+        sums = dict(zip(names, sums.tolist()))
         metrics = {k: v / max(1, steps) for k, v in sums.items()}
         metrics['steps'] = steps
         metrics['lr'] = self.optimizer.param_groups[0]['lr']
