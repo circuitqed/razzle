@@ -781,10 +781,14 @@ def delete_game(game_id: str, db_path: Path = None) -> bool:
 
 def cleanup_old_games(max_age_days: int = 7, empty_game_max_age_hours: int = 1, db_path: Path = None) -> int:
     """
-    Delete old games and abandoned empty games.
+    Delete abandoned games; never finished or account-linked ones.
 
-    - Games older than max_age_days are deleted
-    - Games with no moves older than empty_game_max_age_hours are deleted
+    - Unfinished games (no winner, not resigned) with no linked account, not
+      updated for max_age_days, are deleted.
+    - Games with no moves older than empty_game_max_age_hours are deleted.
+    - Finished games and games linked to a user are kept: they are players'
+      game history. (This used to delete every game older than 7 days on each
+      server start; the 2026-10-03 restart wiped 101 games, restored from backup.)
 
     Returns number of games deleted.
     """
@@ -795,9 +799,13 @@ def cleanup_old_games(max_age_days: int = 7, empty_game_max_age_hours: int = 1, 
     empty_cutoff = (datetime.utcnow() - timedelta(hours=empty_game_max_age_hours)).isoformat() + 'Z'
 
     with get_connection(db_path) as conn:
-        # Delete old games
+        # Delete old abandoned games (unfinished, anonymous)
         cursor1 = conn.execute(
-            "DELETE FROM games WHERE updated_at < ?", (old_cutoff,)
+            """DELETE FROM games
+               WHERE updated_at < ?
+                 AND winner IS NULL AND resigned_by IS NULL
+                 AND player1_user_id IS NULL AND player2_user_id IS NULL""",
+            (old_cutoff,)
         )
         old_deleted = cursor1.rowcount
 
