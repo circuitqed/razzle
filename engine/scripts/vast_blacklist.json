@@ -1,0 +1,10 @@
+{
+    "machines": {
+        "54400": {
+            "failures": 1,
+            "gpu": "RTX 3060",
+            "last_reason": "legacy blacklist (slow image pull)",
+            "last_seen": "2026-07-01T00:00:00Z"
+        }
+    }
+}

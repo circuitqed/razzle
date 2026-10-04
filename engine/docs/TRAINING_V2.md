@@ -77,6 +77,14 @@ distillation above came entirely from stored games.
    --run-name <run> --simulations 800 --concurrency 96 --threshold 512 --trainer-extra "--reuse 2"`.
 4. Gate checkpoints with `distill/arena.py` against the starting network.
 
+Reliability (vast.ai): the launcher polls instance status every tick. Instances not `running`
+within `--boot-timeout` (900 s; usually a stuck image pull) or that vanish are destroyed,
+replaced, and their machine is appended to `scripts/vast_blacklist.json` (loaded by every
+later run; commit it). A stalled trainer (games pending, no new model for 30–40 min) is
+replaced too. Hosts under `--min-inet-down` Mbps (100) are skipped; at equal price faster
+links win. Per-instance boot / first-game times go to `<output>/instance_timings.csv`.
+Always pass `--max-hours`; stop with SIGINT (SIGTERM leaves instances running).
+
 ## 7. App difficulty ladder (Oct 2026)
 
 20 levels in `webapp/src/utils/autoMatch.ts`, calibrated with ~25k arena games

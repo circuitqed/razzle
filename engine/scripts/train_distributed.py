@@ -54,12 +54,14 @@ Usage:
 
 import argparse
 import atexit
+import json
 import os
 import signal
 import sys
 import time
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -81,6 +83,9 @@ class WorkerInstance:
     role: str = "worker"  # worker or trainer
     last_activity: float = field(default_factory=time.time)
     games_submitted: int = 0
+    created_at: float = 0.0       # instance created (for boot timeout / timing log)
+    booted_at: float = 0.0        # first seen with actual_status == running
+    first_game_at: float = 0.0    # first seen submitting games
 
 
 def _branch_arg(branch: str) -> str:
@@ -245,6 +250,8 @@ class DistributedOrchestrator:
         trainer_extra: str = '',
         min_price: float = 0.0,
         max_hours: float = 0.0,
+        boot_timeout: float = 900.0,
+        min_inet_down: float = 100.0,
         trainer_gpu: str = '',
         trainer_max_price: float = 0.4,
     ):
@@ -292,6 +299,9 @@ class DistributedOrchestrator:
         self.shutdown_requested = False
         self.failed_offer_ids: set[int] = set(BLACKLISTED_OFFER_IDS)  # Offers that produced broken instances
         self.failed_machine_ids: set[int] = set(BLACKLISTED_MACHINE_IDS)
+        self.boot_timeout = boot_timeout
+        self.min_inet_down = min_inet_down
+        self._load_blacklist()
 
     def find_offers(self) -> list[GPUOffer]:
         """Find suitable GPU offers."""
@@ -310,6 +320,10 @@ class DistributedOrchestrator:
         # Known-bad offers / machines (applies to the initial pick, not just replacements)
         offers = [o for o in offers
                   if o.id not in self.failed_offer_ids and o.machine_id not in self.failed_machine_ids]
+        # Slow links make the ~6 GB image pull the usual boot failure: require a
+        # minimum download speed, and among similar prices prefer faster links.
+        offers = [o for o in offers if o.inet_down >= self.min_inet_down]
+        offers.sort(key=lambda o: (round(o.dph_total, 2), -o.inet_down))
 
         if not offers:
             print("No suitable offers found. Try:")
@@ -353,6 +367,7 @@ class DistributedOrchestrator:
                 label=f'razzle-worker-{worker.worker_id}',
             )
             worker.instance_id = instance_id
+            worker.created_at, worker.booted_at, worker.first_game_at = time.time(), 0.0, 0.0
             worker.status = "running"
             print(f"  Worker {worker.worker_id}: Instance {instance_id} "
                   f"({worker.offer.gpu_name} @ ${worker.offer.dph_total:.3f}/hr)")
@@ -390,6 +405,7 @@ class DistributedOrchestrator:
                 label='razzle-trainer',
             )
             trainer.instance_id = instance_id
+            trainer.created_at, trainer.booted_at, trainer.first_game_at = time.time(), 0.0, 0.0
             trainer.status = "running"
             print(f"  Trainer: Instance {instance_id} "
                   f"({trainer.offer.gpu_name} @ ${trainer.offer.dph_total:.3f}/hr)")
@@ -436,6 +452,79 @@ class DistributedOrchestrator:
             self._create_trainer_instance(self.trainer)
 
         return any(w.status == "running" for w in self.workers)
+
+    # --- reliability helpers ---------------------------------------------
+    BLACKLIST_PATH = Path(__file__).parent / 'vast_blacklist.json'
+
+    def _load_blacklist(self) -> None:
+        try:
+            data = json.loads(self.BLACKLIST_PATH.read_text())
+            self.failed_machine_ids |= {int(m) for m in data.get('machines', {})}
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            print(f"[Blacklist] could not read {self.BLACKLIST_PATH}: {e}")
+
+    def _blacklist_machine(self, offer: Optional[GPUOffer], reason: str) -> None:
+        """Remember a failing machine permanently (scripts/vast_blacklist.json)."""
+        if not offer or not offer.machine_id:
+            return
+        self.failed_machine_ids.add(offer.machine_id)
+        try:
+            data = json.loads(self.BLACKLIST_PATH.read_text()) if self.BLACKLIST_PATH.exists() else {}
+            machines = data.setdefault('machines', {})
+            entry = machines.setdefault(str(offer.machine_id), {'failures': 0, 'gpu': offer.gpu_name})
+            entry['failures'] += 1
+            entry['last_reason'] = reason
+            entry['last_seen'] = datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
+            self.BLACKLIST_PATH.write_text(json.dumps(data, indent=2, sort_keys=True) + '\n')
+            print(f"[Blacklist] machine {offer.machine_id} ({offer.gpu_name}): {reason}")
+        except Exception as e:
+            print(f"[Blacklist] could not update {self.BLACKLIST_PATH}: {e}")
+
+    def _log_timing(self, w: WorkerInstance, outcome: str = 'ok') -> None:
+        """Append one line per instance start to <output>/instance_timings.csv."""
+        path = self.output_dir / 'instance_timings.csv'
+        new = not path.exists()
+        rel = lambda t: f'{t - w.created_at:.0f}' if t and w.created_at else ''
+        with open(path, 'a') as f:
+            if new:
+                f.write('time,role,instance_id,machine_id,gpu,dph,boot_s,first_game_s,outcome\n')
+            o = w.offer
+            f.write(f"{datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')},{w.role},{w.instance_id},"
+                    f"{o.machine_id if o else ''},{o.gpu_name if o else ''},{o.dph_total if o else ''},"
+                    f"{rel(w.booted_at)},{rel(w.first_game_at)},{outcome}\n")
+
+    def _check_boots(self, offers: list[GPUOffer]) -> None:
+        """Replace instances that haven't reached 'running' within boot_timeout
+        (e.g. stuck pulling the image) or that disappeared, and blacklist them."""
+        try:
+            live = {i.id: i for i in self.vast.list_instances()}
+        except Exception as e:
+            print(f"[Boot] instance list failed: {e}")
+            return
+        now = time.time()
+        for w in list(self.workers) + ([self.trainer] if self.trainer else []):
+            if w.status != 'running' or not w.instance_id:
+                continue
+            inst = live.get(w.instance_id)
+            if inst and inst.actual_status == 'running':
+                if not w.booted_at:
+                    w.booted_at = now
+                    print(f"[Boot] {w.role} {w.instance_id} running after {now - w.created_at:.0f}s")
+                continue
+            age = now - w.created_at if w.created_at else 0
+            if inst is None and age > 120:
+                reason = 'instance disappeared'
+            elif not w.booted_at and age > self.boot_timeout:
+                reason = f'not running after {age:.0f}s (status {inst.actual_status if inst else "?"})'
+            else:
+                continue
+            print(f"[Boot] {w.role} {w.instance_id}: {reason} - replacing")
+            self._log_timing(w, outcome=reason.replace(',', ';'))
+            self._blacklist_machine(w.offer, reason)
+            w.status = 'failed'
+            self.replace_failed_instance(w, offers)
 
     def replace_failed_instance(self, failed_worker: WorkerInstance, offers: list[GPUOffer]) -> bool:
         """Replace a failed or unresponsive worker with a new instance."""
@@ -675,6 +764,8 @@ class DistributedOrchestrator:
             while not self.shutdown_requested:
                 time.sleep(check_interval)
 
+                self._check_boots(offers)
+
                 # Hard time cap: destroy everything so an unattended run can't overspend.
                 if self.max_hours > 0 and time.time() - run_started > self.max_hours * 3600:
                     print(f"\n[Monitor] --max-hours {self.max_hours} reached - destroying all instances...")
@@ -717,6 +808,9 @@ class DistributedOrchestrator:
                             for w in self.workers:
                                 if w.worker_id == instance_wid:
                                     w.last_activity = current_time
+                                    if not w.first_game_at:
+                                        w.first_game_at = current_time
+                                        self._log_timing(w)
                                     w.games_submitted = games
 
                     print(f"[Status] Games: {games_total} total, {games_pending} pending, "
@@ -809,6 +903,11 @@ def main():
     parser.add_argument('--min-price', type=float, default=0.0,
                         help='Minimum $/hr for worker offers (cheapest hosts are often unreliable; '
                              'e.g. 0.08 for RTX 3060)')
+    parser.add_argument('--min-inet-down', type=float, default=100,
+                        help='Minimum host download Mbps (slow links stall the image pull)')
+    parser.add_argument('--boot-timeout', type=float, default=900,
+                        help='Replace (and permanently blacklist) instances not running after this many '
+                             'seconds, e.g. stuck pulling the image (default 900)')
     parser.add_argument('--max-hours', type=float, default=0.0,
                         help='Destroy all instances and exit after this many hours (0 = no limit). '
                              'Note: only Ctrl-C/SIGINT or --max-hours destroy instances; SIGTERM leaves them running.')
@@ -880,6 +979,8 @@ def main():
         trainer_extra=args.trainer_extra,
         min_price=args.min_price,
         max_hours=args.max_hours,
+        boot_timeout=args.boot_timeout,
+        min_inet_down=args.min_inet_down,
         trainer_gpu=args.trainer_gpu,
         trainer_max_price=args.trainer_max_price,
     )
