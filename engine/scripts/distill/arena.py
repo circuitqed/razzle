@@ -381,9 +381,18 @@ def _color_stats(outcomes: dict) -> dict:
             same_colour += 1
         else:
             same_model += 1
+    def score(as_p0):   # model A's score in the games where it played first (as_p0) / second
+        r = [(0.5 if w < 0 else float((w == 0) == a0)) for v in outcomes.values() for a0, w in v if a0 == as_p0]
+        return round(sum(r) / max(1, len(r)), 4)
+    sa0, sa1 = score(True), score(False)
+    lo = lambda p: math.log10(min(max(p, 1e-3), 1 - 1e-3) / (1 - min(max(p, 1e-3), 1 - 1e-3)))
+    # Bradley-Terry with a first-move term: logit(A first) = d + f, logit(A second) = d - f
     return dict(p0_win_rate=round(sum(w == 0 for w in decided) / max(1, len(decided)), 4),
                 draws=len(games) - len(decided),
-                pairs_colour_decided=same_colour, pairs_skill_decided=same_model)
+                pairs_colour_decided=same_colour, pairs_skill_decided=same_model,
+                score_a_first=sa0, score_a_second=sa1,
+                elo_first_move=round(200 * (lo(sa0) - lo(sa1))),
+                elo_skill=round(200 * (lo(sa0) + lo(sa1))))
 
 
 def main():
