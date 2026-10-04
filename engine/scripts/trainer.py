@@ -130,6 +130,7 @@ def games_to_training_data(
     # TD(λ) parameters
     gamma: float = 1.0,           # Discount factor (1.0 = no discount)
     td_lambda: float = 1.0,       # TD blend (1.0 = pure MC)
+    num_planes: Optional[int] = None,  # input planes; default from network config (7 if no network)
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, Optional[np.ndarray]]:
     """
     Convert API games to training arrays.
@@ -167,7 +168,8 @@ def games_to_training_data(
         return END_TURN_ACTION if m == -1 else m
 
     # Input planes the network expects (7 for v1 models, 9 for v2)
-    num_planes = getattr(network.config, 'num_input_planes', 7) if network is not None else 7
+    if num_planes is None:
+        num_planes = getattr(network.config, 'num_input_planes', 7) if network is not None else 7
 
     for game in games:
         # Replay the game to get states and track actual player
@@ -349,6 +351,10 @@ class DistributedTrainer:
         window_fraction: float = 0.25,
         value_weight: float = 1.5,
         value_weight_quartic: float = 0.0,
+        max_batch: int = 2048,         # max games consumed per iteration
+        upload_games: int = 4096,      # upload a model every N games trained
+        state_every: int = 20,         # save trainer state every N iterations
+        upload_window: bool = False,   # also upload the replay window (can be hundreds of MB)
     ):
         self.api_url = api_url
         self.device = device
@@ -376,6 +382,11 @@ class DistributedTrainer:
         self.reuse = reuse
         self.value_weight = value_weight
         self.value_weight_quartic = value_weight_quartic
+        self.max_batch = max_batch
+        self.upload_games = upload_games
+        self.state_every = max(1, state_every)
+        self.upload_window = upload_window
+        self.games_since_upload = 0
 
         # Create output directory
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -585,7 +596,7 @@ class DistributedTrainer:
         except Exception as e:
             print(f"[Trainer] Failed to upload trainer_state to API: {e}")
 
-        if replay_path.exists():
+        if replay_path.exists() and (self.legacy_buffer or self.upload_window):
             try:
                 self.api_client.upload_trainer_state(
                     key="replay_buffer",
@@ -711,12 +722,16 @@ class DistributedTrainer:
         Returns training metrics.
         """
         print(f"[Trainer] Converting {len(games)} games to training data...")
+        # The compact path trains no difficulty head and (with gamma = lambda = 1)
+        # needs no bootstrap values, so skip the per-position network pass.
+        needs_net = self.legacy_buffer or self.gamma < 1.0 or self.td_lambda < 1.0
         states, policies, values, legal_masks, difficulties = games_to_training_data(
             games,
-            network=self.network,
+            network=self.network if needs_net else None,
             device=self.device,
             gamma=self.gamma,
             td_lambda=self.td_lambda,
+            num_planes=getattr(self.network.config, 'num_input_planes', 7),
         )
         new_examples = len(states)
         print(f"[Trainer] New training examples: {new_examples}")
@@ -1112,22 +1127,20 @@ class DistributedTrainer:
             while not self.shutdown_event.is_set():
                 # Check for pending games
                 try:
-                    games, total_pending = self.api_client.fetch_pending_games(
-                        limit=self.threshold * 2,  # Fetch more than threshold
-                        mark_used=False,  # Don't mark yet, just check count
-                    )
+                    # Cheap count check (limit=1 still returns the pending total)
+                    _, total_pending = self.api_client.fetch_pending_games(limit=1, mark_used=False)
 
-                    if len(games) >= self.threshold:
-                        print(f"\n[Trainer] Training on {len(games)} games (iteration {self.iteration + 1})")
-
+                    if total_pending >= self.threshold:
                         # Update learning rate based on schedule
                         self._update_learning_rate()
 
-                        # Now actually fetch and mark as used
+                        # Fetch (and mark used) up to max_batch games in one go
                         games, _ = self.api_client.fetch_pending_games(
-                            limit=len(games),
+                            limit=min(total_pending, self.max_batch),
                             mark_used=True,
                         )
+                        print(f"\n[Trainer] Training on {len(games)} games (iteration {self.iteration + 1}, "
+                              f"{total_pending} were pending)")
 
                         # Save games to log for analysis
                         self._save_games_to_log(games, self.iteration + 1)
@@ -1140,11 +1153,19 @@ class DistributedTrainer:
                         print(f"[Trainer] Training completed in {train_time:.1f}s")
                         self.total_games_trained += len(games)
 
-                        # Save and upload
-                        version = self.save_and_upload_model(metrics)
+                        # Upload a model every --upload-games games (not every iteration:
+                        # each upload is a ~9 MB file on the API server)
+                        self.games_since_upload += len(games)
+                        version = None
+                        if self.games_since_upload >= self.upload_games or self.iteration == 0:
+                            version = self.save_and_upload_model(metrics)
+                            self.games_since_upload = 0
+                        else:
+                            self.iteration += 1
 
-                        # Save trainer state for resumption
-                        self._save_trainer_state()
+                        # Save trainer state every --state-every iterations
+                        if self.iteration % self.state_every == 0:
+                            self._save_trainer_state()
 
                         # Submit metrics to API for dashboard
                         self._submit_iteration_metrics(metrics, train_time, model_version=version)
@@ -1155,8 +1176,7 @@ class DistributedTrainer:
                               f"examples={metrics['examples']}")
 
                     else:
-                        pending = len(games)
-                        print(f"[Trainer] Waiting for games: {pending}/{self.threshold} pending")
+                        print(f"[Trainer] Waiting for games: {total_pending}/{self.threshold} pending")
 
                 except Exception as e:
                     print(f"[Trainer] Error fetching games: {e}")
@@ -1170,6 +1190,11 @@ class DistributedTrainer:
             traceback.print_exc()
 
         finally:
+            if self.network_trainer is not None and self.iteration > 0:
+                try:
+                    self._save_trainer_state()       # don't lose up to state_every iterations
+                except Exception as e:
+                    print(f"[Trainer] Final state save failed: {e}")
             print(f"[Trainer] Stopped. Total games trained: {self.total_games_trained}")
 
     def shutdown(self):
@@ -1216,6 +1241,12 @@ def main():
     parser.add_argument('--window-max', type=int, default=3_000_000)
     parser.add_argument('--window-fraction', type=float, default=0.25)
     parser.add_argument('--value-weight', type=float, default=1.5)
+    parser.add_argument('--max-batch', type=int, default=2048, help='Max games consumed per iteration')
+    parser.add_argument('--upload-games', type=int, default=4096,
+                        help='Upload a model to the API every N games trained (each upload is a ~9 MB file)')
+    parser.add_argument('--state-every', type=int, default=20, help='Save trainer state every N iterations')
+    parser.add_argument('--upload-window', action='store_true',
+                        help='Also upload the compact replay window to the API (large)')
     parser.add_argument('--value-weight-quartic', type=float, default=0.0)
     parser.add_argument('--run-name', type=str, default='',
                         help='Name prefix for model versions (e.g. "v2" → "v2_iter_001")')
@@ -1263,6 +1294,10 @@ def main():
         window_fraction=args.window_fraction,
         value_weight=args.value_weight,
         value_weight_quartic=args.value_weight_quartic,
+        max_batch=args.max_batch,
+        upload_games=args.upload_games,
+        state_every=args.state_every,
+        upload_window=args.upload_window,
     )
 
     # Handle signals for graceful shutdown
