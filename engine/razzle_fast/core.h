@@ -72,6 +72,10 @@ void razzle_mcts_add_dirichlet_noise(MCTSTree *tree, float eps,
 int  razzle_mcts_select_leaves(MCTSTree *tree, int batch_size, int vloss,
                                 float c_puct, float *tensors_out);
 
+/* For the `count` leaves returned by the last select_leaves: side to move and the
+ * v2 extra planes (2*56 floats each). One call instead of per-leaf ctypes work. */
+void razzle_mcts_leaf_info(const MCTSTree *tree, int count, int32_t *players_out, float *extras_out);
+
 void razzle_mcts_expand_and_backup(MCTSTree *tree, int count,
                                     const float *policies,
                                     const float *values,

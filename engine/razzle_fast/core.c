@@ -691,6 +691,17 @@ int razzle_mcts_select_leaves(MCTSTree *tree, int batch_size, int vloss,
     return leaf_count;
 }
 
+void razzle_mcts_leaf_info(const MCTSTree *tree, int count, int32_t *players_out, float *extras_out) {
+    int i;
+    for (i = 0; i < count; i++) {
+        int b = tree->leaf_indices[i];
+        const MCTSNode *node = &tree->nodes[tree->path_buf[b * tree->max_depth + tree->path_lens[b] - 1]];
+        players_out[i] = node->state.current_player;
+        if (extras_out)
+            razzle_state_extra_planes(&node->state, extras_out + i * 2 * ROWS * COLS);
+    }
+}
+
 void razzle_mcts_expand_and_backup(MCTSTree *tree, int count,
                                     const float *policies,
                                     const float *values,

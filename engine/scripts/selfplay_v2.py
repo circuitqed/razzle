@@ -41,7 +41,7 @@ ENGINE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ENGINE))
 sys.path.insert(0, str(ENGINE / 'razzle_fast'))
 sys.path.insert(0, str(ENGINE / 'scripts' / 'distill'))
-from arena import Model, extra_planes, legal_moves, TENSOR, EXTRA  # noqa: E402
+from arena import Model, extra_planes, leaf_info, legal_moves, TENSOR, EXTRA  # noqa: E402
 from razzle.ai.network import RazzleNet  # noqa: E402
 from razzle_fast.wrapper import _lib, CRazzleState, CMCTSTree, _np_to_cfloat_ptr  # noqa: E402
 
@@ -130,14 +130,7 @@ class SelfPlayGame:
         self.pending = n
         if n == 0:
             return np.zeros((0, TENSOR), np.float32), [], np.zeros((0, EXTRA), np.float32)
-        tc = self.tree.contents
-        players = []
-        extras = np.zeros((n, EXTRA), dtype=np.float32)
-        for k in range(n):
-            b = tc.leaf_indices[k]
-            node = tc.nodes[tc.path_buf[b * tc.max_depth + tc.path_lens[b] - 1]]
-            players.append(node.state.current_player)
-            _lib.razzle_state_extra_planes(ctypes.byref(node.state), _np_to_cfloat_ptr(extras[k]))
+        players, extras = leaf_info(self.tree, n)
         return self.buf[: n * TENSOR].reshape(n, TENSOR), players, extras
 
     def _after_expansion(self):
@@ -241,7 +234,7 @@ class ModelSource:
     def refresh(self) -> bool:
         if self.args.model:
             if self.model is None:
-                self.model = Model(self.args.model, self.device)
+                self.model = Model(self.args.model, self.device, half=self.args.fp16)
                 self.version = Path(self.args.model).stem
                 return True
             return False
@@ -251,7 +244,7 @@ class ModelSource:
         path = self.dir / f'{info.version}.pt'
         if not path.exists():
             self.client.download_model(info.version, path)
-        self.model = Model(str(path), self.device)
+        self.model = Model(str(path), self.device, half=self.args.fp16)
         self.version = info.version
         print(f'[selfplay] loaded model {self.version}', flush=True)
         return True
@@ -278,6 +271,8 @@ def main():
     ap.add_argument('--refresh-every', type=int, default=200, help='check for a new model every N games')
     ap.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
     ap.add_argument('--seed', type=int, default=None)
+    ap.add_argument('--fp16', action=argparse.BooleanOptionalAction, default=True,
+                    help='half-precision inference on CUDA (default on; --no-fp16 for fp32)')
     args = ap.parse_args()
     if not args.api_url and not args.model:
         raise SystemExit('need --api-url or --model')

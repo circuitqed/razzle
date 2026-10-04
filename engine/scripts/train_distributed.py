@@ -92,6 +92,12 @@ def _branch_arg(branch: str) -> str:
     return f'--branch {branch} ' if branch else ''
 
 
+def _v2_process_id(run_id: str, worker_id: int, proc: int) -> str:
+    """Dashboard id of self-play process `proc` on v2 instance `worker_id`."""
+    base = f'{run_id}_{worker_id}' if run_id else str(worker_id)
+    return base if proc == 0 else f'{base}p{proc}'
+
+
 def _build_worker_onstart(
     worker_id: int,
     api_url: str,
@@ -132,19 +138,23 @@ def _build_worker_onstart(
         'python -u /workspace/razzle_fast/_build.py',
     ]
     if worker_kind == 'v2':
-        # One process per GPU running many concurrent games (batched forward passes).
-        full_id = f'{run_id}_{worker_id}' if run_id else str(worker_id)
-        lines.append(
-            f'mkdir -p /workspace/sp2 && '
-            f'nohup python -u /workspace/scripts/selfplay_v2.py '
-            f'--worker-id {full_id} --api-url {api_url} --model-dir /workspace/sp2/models '
-            f'--device cuda --concurrency {concurrency} '
-            f'--sims {simulations} --fast-sims {fast_sims or max(32, simulations // 5)} '
-            f'--full-prob {full_prob} '
-            f'--random-opening-moves {random_opening_moves} '
-            f'--random-opening-fraction {random_opening_fraction} '
-            f'</dev/null >/workspace/selfplay_v2.log 2>&1 &'
-        )
+        # workers_per_instance processes share the GPU, each running many concurrent
+        # games. One process saturates one CPU core but only ~half the GPU
+        # (2 procs on an RTX 3060: +41% games/h), so >1 is cheaper per game.
+        lines.append('mkdir -p /workspace/sp2')
+        for i in range(max(1, workers_per_instance)):
+            full_id = _v2_process_id(run_id, worker_id, i)
+            log = 'selfplay_v2.log' if i == 0 else f'selfplay_v2_p{i}.log'
+            lines.append(
+                f'nohup python -u /workspace/scripts/selfplay_v2.py '
+                f'--worker-id {full_id} --api-url {api_url} --model-dir /workspace/sp2/models '
+                f'--device cuda --concurrency {concurrency} '
+                f'--sims {simulations} --fast-sims {fast_sims or max(32, simulations // 5)} '
+                f'--full-prob {full_prob} '
+                f'--random-opening-moves {random_opening_moves} '
+                f'--random-opening-fraction {random_opening_fraction} '
+                f'</dev/null >/workspace/{log} 2>&1 &'
+            )
         return '\n'.join(lines)
 
     for i in range(workers_per_instance):
@@ -736,8 +746,8 @@ class DistributedOrchestrator:
         our_worker_map: dict[str, int] = {}
         for w in self.workers:
             if self.worker_kind == 'v2':
-                # v2 runs one process per instance, registered as "{run_id}_{worker_id}"
-                our_worker_map[f'{self.run_id}_{w.worker_id}'] = w.worker_id
+                for i in range(max(1, self.workers_per_instance)):
+                    our_worker_map[_v2_process_id(self.run_id, w.worker_id, i)] = w.worker_id
                 continue
             for i in range(self.workers_per_instance):
                 sub_id = w.worker_id * self.workers_per_instance + i
