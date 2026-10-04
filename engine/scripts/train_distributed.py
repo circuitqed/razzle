@@ -642,6 +642,10 @@ class DistributedOrchestrator:
         # Workers register as "{run_id}_{sub_id}" in the dashboard
         our_worker_map: dict[str, int] = {}
         for w in self.workers:
+            if self.worker_kind == 'v2':
+                # v2 runs one process per instance, registered as "{run_id}_{worker_id}"
+                our_worker_map[f'{self.run_id}_{w.worker_id}'] = w.worker_id
+                continue
             for i in range(self.workers_per_instance):
                 sub_id = w.worker_id * self.workers_per_instance + i
                 full_id = f'{self.run_id}_{sub_id}'
