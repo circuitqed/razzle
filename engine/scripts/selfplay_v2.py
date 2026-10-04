@@ -41,7 +41,7 @@ ENGINE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ENGINE))
 sys.path.insert(0, str(ENGINE / 'razzle_fast'))
 sys.path.insert(0, str(ENGINE / 'scripts' / 'distill'))
-from arena import Model, extra_planes, leaf_info, legal_moves, TENSOR, EXTRA  # noqa: E402
+from arena import Model, make_model, extra_planes, leaf_info, legal_moves, TENSOR, EXTRA  # noqa: E402
 from razzle.ai.network import RazzleNet  # noqa: E402
 from razzle_fast.wrapper import _lib, CRazzleState, CMCTSTree, _np_to_cfloat_ptr  # noqa: E402
 
@@ -230,11 +230,37 @@ class ModelSource:
             self.client = TrainingAPIClient(base_url=args.api_url)
         self.dir = Path(args.model_dir)
         self.dir.mkdir(parents=True, exist_ok=True)
+        self._pending = None
+        self._executor = None
+
+    def _make(self, path: str):
+        return make_model(path, self.device, backend=self.args.backend,
+                          half=self.args.fp16, cuda_graphs=self.args.cuda_graphs)
 
     def refresh(self) -> bool:
+        # TensorRT engines take ~15 s to build: after the first model, load new ones in a
+        # background thread and keep playing with the current model until it is ready.
+        if self.args.backend == 'trt' and self.model is not None and not self.args.model:
+            if self._pending is not None:
+                if not self._pending.done():
+                    return False
+                fut, self._pending = self._pending, None
+                try:
+                    return fut.result()
+                except Exception as e:
+                    print(f'[selfplay] background model load failed: {e}', flush=True)
+                    return False
+            if self._executor is None:
+                from concurrent.futures import ThreadPoolExecutor
+                self._executor = ThreadPoolExecutor(1)
+            self._pending = self._executor.submit(self._refresh_now)
+            return False
+        return self._refresh_now()
+
+    def _refresh_now(self) -> bool:
         if self.args.model:
             if self.model is None:
-                self.model = Model(self.args.model, self.device, half=self.args.fp16, cuda_graphs=self.args.cuda_graphs)
+                self.model = self._make(self.args.model)
                 self.version = Path(self.args.model).stem
                 return True
             return False
@@ -246,7 +272,7 @@ class ModelSource:
             try:
                 if not path.exists():
                     self.client.download_model(info.version, path)
-                model = Model(str(path), self.device, half=self.args.fp16, cuda_graphs=self.args.cuda_graphs)
+                model = self._make(str(path))
                 break
             except Exception as e:      # network error or a bad file: refetch and retry
                 print(f'[selfplay] loading {info.version} failed ({e}); retrying', flush=True)
@@ -285,6 +311,8 @@ def main():
     ap.add_argument('--seed', type=int, default=None)
     ap.add_argument('--fp16', action=argparse.BooleanOptionalAction, default=True,
                     help='half-precision inference on CUDA (default on; --no-fp16 for fp32)')
+    ap.add_argument('--backend', choices=['torch', 'trt'], default='torch',
+                    help='trt: TensorRT fp16 engine (~3x faster forward; needs tensorrt-cu12 + onnx)')
     ap.add_argument('--cuda-graphs', action=argparse.BooleanOptionalAction, default=False,
                     help='replay the forward pass as captured CUDA graphs (padded batch buckets)')
     args = ap.parse_args()

@@ -114,6 +114,7 @@ def _build_worker_onstart(
     concurrency: int = 96,
     fast_sims: int = 0,
     full_prob: float = 0.25,
+    backend: str = 'torch',
 ) -> str:
     """Build the onstart-cmd string for a worker instance.
 
@@ -142,6 +143,9 @@ def _build_worker_onstart(
         # games. One process saturates one CPU core but only ~half the GPU
         # (2 procs on an RTX 3060: +41% games/h), so >1 is cheaper per game.
         lines.append('mkdir -p /workspace/sp2')
+        if backend == 'trt':
+            # numpy<2 in the same command: newer onnx pulls numpy 2, which breaks torch 2.1
+            lines.append('pip install -q "tensorrt-cu12==10.3.0" onnx "numpy<2" >/workspace/pip_trt.log 2>&1')
         for i in range(max(1, workers_per_instance)):
             full_id = _v2_process_id(run_id, worker_id, i)
             log = 'selfplay_v2.log' if i == 0 else f'selfplay_v2_p{i}.log'
@@ -150,7 +154,7 @@ def _build_worker_onstart(
                 f'--worker-id {full_id} --api-url {api_url} --model-dir /workspace/sp2/models '
                 f'--device cuda --concurrency {concurrency} '
                 f'--sims {simulations} --fast-sims {fast_sims or max(32, simulations // 5)} '
-                f'--full-prob {full_prob} '
+                f'--full-prob {full_prob} --backend {backend} '
                 f'--random-opening-moves {random_opening_moves} '
                 f'--random-opening-fraction {random_opening_fraction} '
                 f'</dev/null >/workspace/{log} 2>&1 &'
@@ -257,6 +261,7 @@ class DistributedOrchestrator:
         concurrency: int = 96,
         fast_sims: int = 0,
         full_prob: float = 0.25,
+        worker_backend: str = 'torch',
         trainer_extra: str = '',
         min_price: float = 0.0,
         max_hours: float = 0.0,
@@ -293,6 +298,7 @@ class DistributedOrchestrator:
         self.concurrency = concurrency
         self.fast_sims = fast_sims
         self.full_prob = full_prob
+        self.worker_backend = worker_backend
         self.trainer_extra = trainer_extra
         self.min_price = min_price
         self.max_hours = max_hours
@@ -366,6 +372,7 @@ class DistributedOrchestrator:
             concurrency=self.concurrency,
             fast_sims=self.fast_sims,
             full_prob=self.full_prob,
+            backend=self.worker_backend,
         )
         try:
             worker.status = "creating"
@@ -910,6 +917,8 @@ def main():
     parser.add_argument('--concurrency', type=int, default=96, help='v2: concurrent games per GPU')
     parser.add_argument('--fast-sims', type=int, default=0, help='v2: quick-search sims (default sims/5)')
     parser.add_argument('--full-prob', type=float, default=0.25, help='v2: probability a turn gets a full search')
+    parser.add_argument('--worker-backend', choices=['torch', 'trt'], default='torch',
+                        help='v2: inference backend for self-play (trt = TensorRT fp16, installed at boot)')
     parser.add_argument('--min-price', type=float, default=0.0,
                         help='Minimum $/hr for worker offers (cheapest hosts are often unreliable; '
                              'e.g. 0.08 for RTX 3060)')
@@ -986,6 +995,7 @@ def main():
         concurrency=args.concurrency,
         fast_sims=args.fast_sims,
         full_prob=args.full_prob,
+        worker_backend=args.worker_backend,
         trainer_extra=args.trainer_extra,
         min_price=args.min_price,
         max_hours=args.max_hours,

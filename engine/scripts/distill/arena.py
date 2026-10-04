@@ -260,6 +260,98 @@ class Model:
         return p.cpu().numpy(), v.cpu().numpy()
 
 
+class TRTModel:
+    """Same interface as Model, running a TensorRT fp16 engine (~3x faster than PyTorch
+    fp16 on an RTX 3060; vs fp32 top move agrees 99.9%, mean |dv| 0.0013).
+
+    The engine is built from an ONNX export of the checkpoint (~15 s) and cached next to
+    it as <model>.fp16.engine; processes sharing the directory build it once (file lock).
+    Needs: pip install tensorrt-cu12 onnx "numpy<2".
+    """
+    MAX_BATCH = 2048
+
+    def __init__(self, path: str, device):
+        import fcntl
+        import os
+        import tensorrt as trt
+        self.trt = trt
+        self.device = torch.device(device)
+        self.value_scale = 1.0
+        self.evals = 0
+        net = RazzleNet.load(path, device='cpu').eval()
+        self.planes = net.config.num_input_planes
+        self.rot = torch.from_numpy(MOVE_ROTATION_MAP.astype(np.int64)).to(self.device)
+        log = trt.Logger(trt.Logger.ERROR)
+        engine_path = f'{path}.fp16.engine'
+        with open(f'{path}.lock', 'w') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            if not os.path.exists(engine_path):
+                onnx_path = f'{path}.{os.getpid()}.onnx'
+                torch.onnx.export(net, torch.zeros(1, self.planes, 8, 7), onnx_path, opset_version=17,
+                                  input_names=['x'], output_names=['logp', 'v', 'd'],
+                                  dynamic_axes={k: {0: 'b'} for k in ('x', 'logp', 'v', 'd')})
+                builder = trt.Builder(log)
+                network = builder.create_network(0)
+                parser = trt.OnnxParser(network, log)
+                ok = parser.parse(open(onnx_path, 'rb').read())
+                os.remove(onnx_path)
+                if not ok:
+                    raise RuntimeError(f'ONNX parse failed: {parser.get_error(0)}')
+                cfg = builder.create_builder_config()
+                cfg.set_flag(trt.BuilderFlag.FP16)
+                cfg.builder_optimization_level = 1     # 15 s build, same speed as level 3 here
+                prof = builder.create_optimization_profile()
+                prof.set_shape('x', (1, self.planes, 8, 7), (768, self.planes, 8, 7),
+                               (self.MAX_BATCH, self.planes, 8, 7))
+                cfg.add_optimization_profile(prof)
+                data = builder.build_serialized_network(network, cfg)
+                if data is None:
+                    raise RuntimeError('TensorRT engine build failed')
+                tmp = f'{engine_path}.{os.getpid()}.tmp'
+                with open(tmp, 'wb') as f:
+                    f.write(data)
+                os.replace(tmp, engine_path)
+            with open(engine_path, 'rb') as f:
+                self.engine = trt.Runtime(log).deserialize_cuda_engine(f.read())
+        self.ctx = self.engine.create_execution_context()
+        self.stream = torch.cuda.Stream(device=self.device)
+        n = self.MAX_BATCH
+        self.out = {'logp': torch.empty(n, NUM_ACTIONS, device=self.device),
+                    'v': torch.empty(n, 1, device=self.device), 'd': torch.empty(n, 1, device=self.device)}
+
+    @torch.no_grad()
+    def __call__(self, x: np.ndarray, players: list[int], extra: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        n = len(players)
+        if n > self.MAX_BATCH:
+            parts = [self(x[i:i + self.MAX_BATCH], players[i:i + self.MAX_BATCH], extra[i:i + self.MAX_BATCH])
+                     for i in range(0, n, self.MAX_BATCH)]
+            return np.concatenate([q[0] for q in parts]), np.concatenate([q[1] for q in parts])
+        with torch.cuda.stream(self.stream):
+            t = torch.from_numpy(x).to(self.device).view(-1, 7, 8, 7)
+            if self.planes == 9:
+                t = torch.cat([t, torch.from_numpy(extra).to(self.device).view(-1, 2, 8, 7)], dim=1)
+            t = t.contiguous()
+            self.ctx.set_input_shape('x', tuple(t.shape))
+            self.ctx.set_tensor_address('x', t.data_ptr())
+            for k, buf in self.out.items():
+                self.ctx.set_tensor_address(k, buf.data_ptr())
+            self.ctx.execute_async_v3(self.stream.cuda_stream)
+            p = self.out['logp'][:n].exp()
+            v = self.out['v'][:n, 0].clone()
+            p1 = torch.from_numpy(np.asarray(players, dtype=np.int64)).to(self.device) == 1
+            if p1.any():
+                p[p1] = p[p1][:, self.rot]
+            self.evals += n
+            p, v = p.cpu().numpy(), v.cpu().numpy()      # .cpu() synchronizes the stream
+        return p, v
+
+
+def make_model(path: str, device, backend: str = 'torch', half: bool = False, cuda_graphs: bool = False):
+    if backend == 'trt':
+        return TRTModel(path, device)
+    return Model(path, device, half=half, cuda_graphs=cuda_graphs)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--a', required=True)
