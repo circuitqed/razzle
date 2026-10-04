@@ -23,13 +23,40 @@ import numpy as np
 NUM_ACTIONS = 3137
 
 
-def _sparse(dense: np.ndarray) -> tuple[list[np.ndarray], list[np.ndarray]]:
-    idx, val = [], []
-    for row in dense:
-        nz = np.nonzero(row)[0]
-        idx.append(nz.astype(np.int16))
-        val.append(row[nz].astype(np.float16))
-    return idx, val
+def _csr(dense: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Dense (N, A) -> CSR (ptr int64 (N+1,), idx int16, val float16)."""
+    rows, cols = np.nonzero(dense)                     # row-major order = CSR order
+    ptr = np.zeros(len(dense) + 1, np.int64)
+    np.cumsum(np.bincount(rows, minlength=len(dense)), out=ptr[1:])
+    return ptr, cols.astype(np.int16), dense[rows, cols].astype(np.float16)
+
+
+def pack_chunk(states: np.ndarray, policies: np.ndarray, values: np.ndarray,
+               legal_masks: np.ndarray, policy_weights: np.ndarray | None = None) -> dict:
+    """Pack dense arrays into one buffer chunk (see CompactReplayBuffer.add_chunk).
+    Module-level so trainer worker processes can pack their share of a batch."""
+    n = len(states)
+    if policy_weights is None:
+        policy_weights = (policies.sum(axis=1) > 0).astype(np.float32)
+    pol_ptr, pol_idx, pol_val = _csr(policies)
+    leg_ptr, leg_idx, _ = _csr(legal_masks)
+    return dict(
+        packed=np.packbits(states.reshape(n, -1).astype(bool), axis=1),
+        pol_ptr=pol_ptr, pol_idx=pol_idx, pol_val=pol_val,
+        leg_ptr=leg_ptr, leg_idx=leg_idx,
+        value=values.astype(np.float32),
+        pweight=policy_weights.astype(np.float32),
+        planes=np.int64(states.shape[1]),
+    )
+
+
+def _gather_rows(ptr: np.ndarray, local: np.ndarray):
+    """For CSR rows `local`: (flat element positions, output row number per element)."""
+    a, b = ptr[local], ptr[local + 1]
+    lens = b - a
+    rows = np.repeat(np.arange(len(local)), lens)
+    offs = np.arange(lens.sum()) - np.repeat(np.cumsum(lens) - lens, lens)
+    return np.repeat(a, lens) + offs, rows
 
 
 class CompactReplayBuffer:
@@ -56,28 +83,21 @@ class CompactReplayBuffer:
     def add(self, states: np.ndarray, policies: np.ndarray, values: np.ndarray,
             legal_masks: np.ndarray, policy_weights: np.ndarray | None = None) -> None:
         """Add positions. states: (N, C, 8, 7) binary floats; policies/legal_masks: (N, 3137)."""
-        n = len(states)
+        if len(states) == 0:
+            return
+        self.add_chunk(pack_chunk(states, policies, values, legal_masks, policy_weights))
+
+    def add_chunk(self, chunk: dict) -> None:
+        """Add positions already packed by pack_chunk()."""
+        chunk = dict(chunk)
+        c = int(chunk.pop('planes'))
+        n = len(chunk['value'])
         if n == 0:
             return
-        c = states.shape[1]
         if self.planes is None:
             self.planes = c
         elif self.planes != c:
             raise ValueError(f'buffer holds {self.planes}-plane states, got {c}')
-        pol_idx, pol_val = _sparse(policies)
-        leg_idx, _ = _sparse(legal_masks)
-        if policy_weights is None:
-            policy_weights = (policies.sum(axis=1) > 0).astype(np.float32)
-        chunk = dict(
-            packed=np.packbits(states.reshape(n, -1).astype(bool), axis=1),
-            pol_ptr=np.concatenate([[0], np.cumsum([len(a) for a in pol_idx])]).astype(np.int64),
-            pol_idx=np.concatenate(pol_idx) if pol_idx else np.zeros(0, np.int16),
-            pol_val=np.concatenate(pol_val) if pol_val else np.zeros(0, np.float16),
-            leg_ptr=np.concatenate([[0], np.cumsum([len(a) for a in leg_idx])]).astype(np.int64),
-            leg_idx=np.concatenate(leg_idx) if leg_idx else np.zeros(0, np.int16),
-            value=values.astype(np.float32),
-            pweight=policy_weights.astype(np.float32),
-        )
         self._chunks.append(chunk)
         self._size += n
         self.total_positions_seen += n
@@ -105,7 +125,7 @@ class CompactReplayBuffer:
         rng = rng or np.random.default_rng()
         sizes = np.array([len(ch['value']) for ch in self._chunks])
         starts = np.concatenate([[0], np.cumsum(sizes)])
-        picks = np.sort(rng.integers(0, self._size, n))
+        picks = rng.integers(0, self._size, n)             # random order = batch order
         chunk_of = np.searchsorted(starts, picks, side='right') - 1
 
         c = self.planes
@@ -114,24 +134,18 @@ class CompactReplayBuffer:
         legal = np.zeros((n, NUM_ACTIONS), np.float32)
         values = np.zeros(n, np.float32)
         pweights = np.zeros(n, np.float32)
-        out = 0
         for ci in np.unique(chunk_of):
             ch = self._chunks[ci]
-            local = picks[chunk_of == ci] - starts[ci]
-            k = len(local)
-            sl = slice(out, out + k)
-            states[sl] = np.unpackbits(ch['packed'][local], axis=1)[:, : c * 56]
-            values[sl] = ch['value'][local]
-            pweights[sl] = ch['pweight'][local]
-            for j, i in enumerate(local):
-                a, b = ch['pol_ptr'][i], ch['pol_ptr'][i + 1]
-                policies[out + j, ch['pol_idx'][a:b]] = ch['pol_val'][a:b]
-                a, b = ch['leg_ptr'][i], ch['leg_ptr'][i + 1]
-                legal[out + j, ch['leg_idx'][a:b]] = 1.0
-            out += k
-        perm = rng.permutation(n)        # undo the sort so batches are mixed
-        return (states.reshape(n, c, 8, 7)[perm], policies[perm], values[perm],
-                legal[perm], pweights[perm])
+            out_rows = np.nonzero(chunk_of == ci)[0]
+            local = picks[out_rows] - starts[ci]
+            states[out_rows] = np.unpackbits(ch['packed'][local], axis=1)[:, : c * 56]
+            values[out_rows] = ch['value'][local]
+            pweights[out_rows] = ch['pweight'][local]
+            el, r = _gather_rows(ch['pol_ptr'], local)
+            policies[out_rows[r], ch['pol_idx'][el]] = ch['pol_val'][el]
+            el, r = _gather_rows(ch['leg_ptr'], local)
+            legal[out_rows[r], ch['leg_idx'][el]] = 1.0
+        return states.reshape(n, c, 8, 7), policies, values, legal, pweights
 
     # ------------------------------------------------------------------
     def save(self, path: str | Path) -> None:

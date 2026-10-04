@@ -66,30 +66,19 @@ def compute_policy_accuracy(
         legal_mask = legal_mask.detach().cpu().numpy()
 
     batch_size = pred_logits.shape[0]
+    if batch_size == 0:
+        return 0.0, 0.0
     top1_correct = 0
     top3_correct = 0
-
-    for i in range(batch_size):
-        # Get predicted probabilities (exp of log probs)
-        pred_probs = np.exp(pred_logits[i])
-
-        # Mask illegal moves if mask provided
+    for a in range(0, batch_size, 4096):           # vectorized, in row blocks
+        pred_probs = np.exp(pred_logits[a:a + 4096])
         if legal_mask is not None:
-            pred_probs = pred_probs * legal_mask[i]
-
-        # Get target's best move (argmax of target policy)
-        target_best = np.argmax(target_policy[i])
-
-        # Get prediction's top 3
-        pred_top3 = np.argsort(pred_probs)[-3:][::-1]  # Top 3, descending
-        pred_best = pred_top3[0]
-
-        # Check accuracy
-        if pred_best == target_best:
-            top1_correct += 1
-        if target_best in pred_top3:
-            top3_correct += 1
-
+            pred_probs = pred_probs * legal_mask[a:a + 4096]
+        target_best = np.argmax(target_policy[a:a + 4096], axis=1)
+        pred_best = np.argmax(pred_probs, axis=1)
+        top3 = np.argpartition(-pred_probs, 2, axis=1)[:, :3]
+        top1_correct += int(np.sum(pred_best == target_best))
+        top3_correct += int(np.sum((top3 == target_best[:, None]).any(axis=1)))
     return top1_correct / batch_size, top3_correct / batch_size
 
 
@@ -127,34 +116,22 @@ def compute_policy_metrics(
     total_legal_mass = 0.0
     total_confidence = 0.0
 
-    for i in range(batch_size):
-        # Apply softmax to get proper probabilities
-        logits = pred_logits[i]
-        logits = logits - np.max(logits)  # Numerical stability
-        pred_probs = np.exp(logits)
-        pred_probs = pred_probs / (pred_probs.sum() + 1e-10)  # Normalize to sum to 1
-
-        # Legal mass and confidence
+    for a in range(0, batch_size, 4096):           # vectorized, in row blocks
+        logits = pred_logits[a:a + 4096]
+        pred_probs = np.exp(logits - logits.max(axis=1, keepdims=True))
+        pred_probs /= pred_probs.sum(axis=1, keepdims=True) + 1e-10
         if legal_mask is not None:
-            legal_mass = np.sum(pred_probs * legal_mask[i])
-
-            # Entropy over legal moves only (renormalized)
-            legal_probs = pred_probs * legal_mask[i]
-            legal_probs = legal_probs / (legal_probs.sum() + 1e-10)  # Renormalize
-            legal_probs_safe = np.clip(legal_probs, 1e-10, 1.0)
-            entropy = -np.sum(legal_probs * np.log(legal_probs_safe) * (legal_probs > 1e-9))
-
-            # Policy confidence: max probability on legal moves (after renormalization)
-            confidence = np.max(legal_probs)
+            lm = legal_mask[a:a + 4096]
+            legal_probs = pred_probs * lm
+            total_legal_mass += float(legal_probs.sum())
+            legal_probs /= legal_probs.sum(axis=1, keepdims=True) + 1e-10    # renormalize
+            plogp = legal_probs * np.log(np.clip(legal_probs, 1e-10, 1.0)) * (legal_probs > 1e-9)
+            total_entropy += float(-plogp.sum())
+            total_confidence += float(legal_probs.max(axis=1).sum())
         else:
-            legal_mass = 1.0  # No mask means all legal
-            pred_probs_clipped = np.clip(pred_probs, 1e-10, 1.0)
-            entropy = -np.sum(pred_probs * np.log(pred_probs_clipped))
-            confidence = np.max(pred_probs)
-
-        total_entropy += entropy
-        total_legal_mass += legal_mass
-        total_confidence += confidence
+            total_legal_mass += float(len(logits))
+            total_entropy += float(-(pred_probs * np.log(np.clip(pred_probs, 1e-10, 1.0))).sum())
+            total_confidence += float(pred_probs.max(axis=1).sum())
 
     avg_entropy = total_entropy / batch_size
 

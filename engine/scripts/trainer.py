@@ -40,7 +40,7 @@ from razzle.core.symmetry import rotate_policy_180
 from razzle.training.trainer import Trainer as NetworkTrainer, TrainingConfig
 from razzle.training.api_client import TrainingAPIClient, TrainingGame
 from razzle.training.replay_buffer import ReplayBuffer
-from razzle.training.compact_buffer import CompactReplayBuffer
+from razzle.training.compact_buffer import CompactReplayBuffer, pack_chunk
 from razzle.training.metrics import (
     compute_policy_metrics, compute_value_metrics,
     compute_value_calibration, compute_calibration_error, compute_pass_stats
@@ -294,6 +294,21 @@ def games_to_training_data(
     )
 
 
+VALIDATION_POSITIONS = 16_384   # validation metrics use a random subsample of new positions
+
+
+def _convert_games_compact(args):
+    """Worker process: games -> one packed buffer chunk + a small validation sample.
+    Returning packed chunks avoids shipping (and holding) ~25 KB/position dense arrays."""
+    games, num_planes, val_n, seed = args
+    states, policies, values, legal, _ = games_to_training_data(games, network=None, num_planes=num_planes)
+    n = len(states)
+    pw = DistributedTrainer._policy_weights(policies, legal)
+    pick = np.random.default_rng(seed).choice(n, size=min(val_n, n), replace=False) if n else np.zeros(0, int)
+    val = (states[pick], policies[pick], values[pick], legal[pick])
+    return pack_chunk(states, policies, values, legal, pw), val, n, float((pw == 0).sum())
+
+
 class DistributedTrainer:
     """
     Trainer that fetches games from API and uploads models.
@@ -337,8 +352,8 @@ class DistributedTrainer:
         lr_schedule: list[tuple[int, float]] | None = None,
         replay_buffer_size: int = 100_000,  # Replay buffer capacity
         # TD(λ) parameters
-        gamma: float = 0.99,           # Discount factor
-        td_lambda: float = 0.95,       # TD blend (1.0 = pure MC)
+        gamma: float = 1.0,            # Discount factor (1.0 = final outcomes)
+        td_lambda: float = 1.0,        # TD blend (1.0 = pure MC)
         run_name: str = '',            # Prefix for model versions (e.g. "v2" → "v2_iter_001")
         optimizer_type: str = 'adam',  # 'adam' or 'sgd'
         momentum: float = 0.9,        # SGD momentum (ignored for Adam)
@@ -346,6 +361,7 @@ class DistributedTrainer:
         # legacy_buffer=True the old dense buffer / epochs-per-batch path is used.
         legacy_buffer: bool = False,
         reuse: float = 2.0,            # expected training samples per new position
+        convert_workers: int = 0,      # processes for game conversion (0 = auto)
         window_min: int = 250_000,     # replay window (positions)
         window_max: int = 3_000_000,
         window_fraction: float = 0.25,
@@ -380,6 +396,11 @@ class DistributedTrainer:
         self.run_name = run_name
         self.legacy_buffer = legacy_buffer
         self.reuse = reuse
+        self.convert_workers = convert_workers or max(1, min(16, (os.cpu_count() or 2) - 2))
+        if not legacy_buffer and (gamma < 1.0 or td_lambda < 1.0):
+            raise ValueError('the compact window trains on final outcomes; use gamma = td_lambda = 1 '
+                             '(or --legacy-buffer for discounted / TD(lambda) targets)')
+        self._pool = None
         self.value_weight = value_weight
         self.value_weight_quartic = value_weight_quartic
         self.max_batch = max_batch
@@ -721,6 +742,9 @@ class DistributedTrainer:
 
         Returns training metrics.
         """
+        if not self.legacy_buffer:
+            return self._train_on_games_compact(games)
+
         print(f"[Trainer] Converting {len(games)} games to training data...")
         # The compact path trains no difficulty head and (with gamma = lambda = 1)
         # needs no bootstrap values, so skip the per-position network pass.
@@ -766,9 +790,6 @@ class DistributedTrainer:
         validation_metrics = self._compute_validation_metrics(
             states, policies, values, legal_masks
         )
-
-        if not self.legacy_buffer:
-            return self._train_compact(games, states, policies, values, legal_masks, validation_metrics)
 
         # Add new positions to replay buffer
         self.replay_buffer.add(states, policies, values, legal_masks)
@@ -852,18 +873,44 @@ class DistributedTrainer:
         uniform = (nz > 3) & (nz == n_legal) & np.isclose(pmax, 1.0 / np.maximum(nz, 1), rtol=1e-3)
         return ((nz > 0) & ~uniform).astype(np.float32)
 
-    def _train_compact(self, games, states, policies, values, legal_masks, validation_metrics) -> dict:
-        """Add positions to the compact window and train reuse * new / batch steps on fresh samples."""
-        pweights = self._policy_weights(policies, legal_masks)
-        self.compact_buffer.add(states, policies, values, legal_masks, policy_weights=pweights)
-        new = len(states)
+    def _train_on_games_compact(self, games: list[TrainingGame]) -> dict:
+        """Compact-window iteration: convert games in parallel straight into packed
+        chunks, validate on a subsample, train. (No dense npz archive: games are
+        already persisted by the API server - see server/persistence.py.)"""
+        import multiprocessing as mp
+        t0 = time.time()
+        planes = getattr(self.network.config, 'num_input_planes', 7)
+        k = max(1, min(self.convert_workers, len(games) // 32 or 1))
+        parts = [games[i::k] for i in range(k)]
+        val_n = int(math.ceil(VALIDATION_POSITIONS / k))
+        jobs = [(part, planes, val_n, self.iteration * 1000 + i) for i, part in enumerate(parts)]
+        if k == 1:
+            results = [_convert_games_compact(jobs[0])]
+        else:
+            if self._pool is None:
+                # spawn: children never inherit the parent's CUDA context
+                self._pool = mp.get_context('spawn').Pool(self.convert_workers)
+            results = self._pool.map(_convert_games_compact, jobs)
+        new = sum(r[2] for r in results)
+        value_only = sum(r[3] for r in results)
+        t1 = time.time()
+
+        val = [np.concatenate([r[1][j] for r in results]) for j in range(4)]
+        validation_metrics = self._compute_validation_metrics(*val) if len(val[0]) else {}
+        t2 = time.time()
+
+        for r in results:
+            self.compact_buffer.add_chunk(r[0])
         steps = max(1, int(math.ceil(new * self.reuse / self.batch_size)))
         print(f"[Trainer] Window: {len(self.compact_buffer):,} / {self.compact_buffer.capacity:,} positions "
               f"({self.compact_buffer.total_positions_seen:,} seen); {new} new "
-              f"({(pweights == 0).mean():.1%} value-only); training {steps} steps")
+              f"({value_only / max(1, new):.1%} value-only); training {steps} steps")
         rng = np.random.default_rng()
         metrics = self.network_trainer.train_steps(
             lambda: self.compact_buffer.sample(self.batch_size, rng), steps)
+        t3 = time.time()
+        print(f"[Trainer] Timing: convert {t1 - t0:.1f}s ({k} procs), validate {t2 - t1:.1f}s, "
+              f"train {t3 - t2:.1f}s ({steps / max(t3 - t2, 1e-9):.1f} steps/s)")
         avg_len = sum(len(g.moves) for g in games) / len(games) if games else 0
         return {
             'games': len(games),
@@ -981,11 +1028,16 @@ class DistributedTrainer:
             pred_logits, pred_values, _ = self.network(states_tensor)
             pred_values = pred_values.squeeze(-1).cpu().numpy()
 
-        # Policy metrics
+        # Policy metrics only where there is a policy target (value-only positions
+        # - quick searches, random openings - have an all-zero or uniform row)
+        has_target = self._policy_weights(policies, legal_masks) > 0 if legal_masks is not None \
+            else policies.sum(axis=1) > 0
+        if not has_target.any():
+            has_target[:] = True
         policy_metrics = compute_policy_metrics(
-            pred_logits.cpu().numpy(),
-            policies,
-            legal_masks,
+            pred_logits.cpu().numpy()[has_target],
+            policies[has_target],
+            legal_masks[has_target] if legal_masks is not None else None,
         )
 
         # Value metrics
@@ -1237,6 +1289,8 @@ def main():
                         help='Old dense replay buffer + epochs per batch (default: compact window + steps)')
     parser.add_argument('--reuse', type=float, default=2.0,
                         help='Training samples per new position (compact buffer; default 2)')
+    parser.add_argument('--convert-workers', type=int, default=0,
+                        help='Processes converting games to positions (0 = min(16, cpus-2))')
     parser.add_argument('--window-min', type=int, default=250_000)
     parser.add_argument('--window-max', type=int, default=3_000_000)
     parser.add_argument('--window-fraction', type=float, default=0.25)
@@ -1289,6 +1343,7 @@ def main():
         momentum=args.momentum,
         legacy_buffer=args.legacy_buffer,
         reuse=args.reuse,
+        convert_workers=args.convert_workers,
         window_min=args.window_min,
         window_max=args.window_max,
         window_fraction=args.window_fraction,
