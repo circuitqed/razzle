@@ -67,6 +67,10 @@ class CreateGameRequest(BaseModel):
     time_control: Optional[float] = Field(default=None, description="Total time per player in seconds. If set, enables dynamic time management.")
     increment: float = Field(default=0.0, description="Time increment per turn in seconds.")
     client_type: Optional[str] = None
+    # Optional AI-game metadata for account history (older clients omit these).
+    human_color: Optional[int] = Field(default=None, ge=0, le=1, description="Seat the human plays in a human-vs-AI game: 0 = blue (default), 1 = red.")
+    ai_level: Optional[int] = Field(default=None, ge=1, le=100, description="Difficulty level of the AI opponent, if known.")
+    ai_model: Optional[str] = Field(default=None, max_length=200, description="Model the client-side AI plays with (e.g. 'pegasus_iter_250.pt').")
 
 
 class CreateGameResponse(BaseModel):
@@ -629,6 +633,7 @@ class Game:
         # Player IDs for ELO tracking (set when game starts)
         self.player_ids: list[Optional[str]] = [None, None]
         self.elo_updated: bool = False  # Track if ELO has been updated for this game
+        self.result_recorded: bool = False  # Final result written to the DB (history)
 
         # Resign tracking
         self.resigned_by: Optional[int] = None  # Player who resigned (0 or 1), None if no resignation
@@ -749,12 +754,30 @@ class Game:
             moves=self.moves,
         )
 
+    def record_result(self) -> None:
+        """Persist the final result once the game is over (account history).
+
+        Runs on every game-ending path (via check_and_update_elo), independent
+        of ELO, which needs both player ids and so skips anonymous games.
+        """
+        if self.result_recorded or not self.is_game_over():
+            return
+        try:
+            persistence.record_game_finished(
+                self.game_id, self.get_winner(), resigned_by=self.resigned_by
+            )
+            self.result_recorded = True
+        except Exception as e:
+            logging.error(f"Failed to record result for game {self.game_id}: {e}")
+
     def check_and_update_elo(self) -> Optional[tuple[float, float]]:
         """
         Check if game is over and update ELO ratings.
 
         Returns tuple of (p1_new_rating, p2_new_rating) if updated, None otherwise.
         """
+        self.record_result()
+
         if self.elo_updated:
             return None
 
@@ -804,28 +827,23 @@ def setup_game_players(
         user: Current authenticated user (for human player 1)
         model_version: AI model version being used
     """
-    # Player 1 (usually human)
-    if game.player_types[0] == "human":
-        if user:
-            player1 = persistence.get_or_create_human_player(
-                user["user_id"],
-                user.get("display_name") or user.get("username")
-            )
-            game.player_ids[0] = player1["player_id"]
-        # Else: anonymous human, no ELO tracking
-    elif game.player_types[0] == "ai":
-        if model_version:
-            player1 = persistence.get_or_create_ai_player(model_version, game.ai_simulations)
-            game.player_ids[0] = player1["player_id"]
-
-    # Player 2 (usually AI)
-    if game.player_types[1] == "ai":
-        if model_version:
-            player2 = persistence.get_or_create_ai_player(model_version, game.ai_simulations)
-            game.player_ids[1] = player2["player_id"]
-    elif game.player_types[1] == "human":
-        # Human vs human - would need second user to join
-        pass
+    # The signed-in user sits in the human seat: player 1, unless player 1 is
+    # the AI (human playing red). In human-vs-human local games the second
+    # seat would need a second user, so it stays untracked.
+    human_seat = 1 if game.player_types == ["ai", "human"] else 0
+    for seat in (0, 1):
+        if game.player_types[seat] == "human":
+            if user and seat == human_seat:
+                player = persistence.get_or_create_human_player(
+                    user["user_id"],
+                    user.get("display_name") or user.get("username")
+                )
+                game.player_ids[seat] = player["player_id"]
+            # Else: anonymous human, no ELO tracking
+        elif game.player_types[seat] == "ai":
+            if model_version:
+                player = persistence.get_or_create_ai_player(model_version, game.ai_simulations)
+                game.player_ids[seat] = player["player_id"]
 
 
 async def process_turn(game: Game, game_id: str, moves: list[int], user_id: str = None) -> GameStateResponse:
@@ -1155,7 +1173,9 @@ async def lifespan(app: FastAPI):
     persistence.cleanup_old_games(max_age_days=7)  # Clean up stale games
 
     # Load persisted games into memory
-    for game_data in persistence.load_all_games():
+    # Only unfinished, recently active games: finished games are kept as
+    # history and never need to be in memory.
+    for game_data in persistence.load_all_games(active_within_days=7):
         game = Game(
             game_id=game_data["game_id"],
             player1_type=game_data["player1_type"],
@@ -3075,18 +3095,31 @@ async def create_game(
 
     # Get current user if authenticated
     user = await get_current_user(auth_request, auth_cookie) if auth_request else None
-    player1_user_id = user["user_id"] if user else None
 
     # Validate bot type
     bot_type = request.bot_type
     if bot_type not in BOT_TYPES:
         raise HTTPException(status_code=400, detail=f"Invalid bot_type: {bot_type}. Must be one of: {BOT_TYPES}")
 
+    # Human playing red against the AI: the AI takes seat 1 (blue, moves first)
+    player1_type, player2_type = request.player1_type, request.player2_type
+    if request.human_color == 1 and (player1_type, player2_type) == ("human", "ai"):
+        player1_type, player2_type = "ai", "human"
+    vs_ai = "ai" in (player1_type, player2_type)
+
+    # The signed-in user takes the human seat
+    player1_user_id = player2_user_id = None
+    if user:
+        if (player1_type, player2_type) == ("ai", "human"):
+            player2_user_id = user["user_id"]
+        else:
+            player1_user_id = user["user_id"]
+
     game_id = str(uuid.uuid4())[:8]
     game = Game(
         game_id=game_id,
-        player1_type=request.player1_type,
-        player2_type=request.player2_type,
+        player1_type=player1_type,
+        player2_type=player2_type,
         ai_simulations=request.ai_simulations,
         bot_type=bot_type,
         time_control=request.time_control,
@@ -3095,9 +3128,11 @@ async def create_game(
     games[game_id] = game
 
     # Get model version for ELO tracking
-    # Neural bots use actual model version, others use bot_type as identifier
+    # Neural bots use actual model version, others use bot_type as identifier.
+    # The AI runs client-side, so a client-reported model is the one actually
+    # played; fall back to the server's model for older clients.
     if bot_type == "neural":
-        model_version = get_model_info()
+        model_version = Path(request.ai_model).name if request.ai_model else get_model_info()
     else:
         model_version = bot_type  # e.g., "mcts", "random"
 
@@ -3108,13 +3143,15 @@ async def create_game(
     persistence.save_game(
         game_id=game_id,
         state=game.state,
-        player1_type=request.player1_type,
-        player2_type=request.player2_type,
+        player1_type=player1_type,
+        player2_type=player2_type,
         ai_simulations=request.ai_simulations,
         player1_user_id=player1_user_id,
-        ai_model_version=model_version if request.player2_type == "ai" else None,
+        player2_user_id=player2_user_id,
+        ai_model_version=model_version if vs_ai else None,
         bot_type=bot_type,
         client_type=request.client_type,
+        ai_level=request.ai_level if vs_ai else None,
     )
 
     # Update game record with player IDs
@@ -3127,7 +3164,7 @@ async def create_game(
         )
 
     # Start player clocks for local PvP (both players already present)
-    if request.player1_type == "human" and request.player2_type == "human":
+    if player1_type == "human" and player2_type == "human":
         start_player_clocks(game)
 
     return CreateGameResponse(game_id=game_id)
@@ -3451,6 +3488,11 @@ async def undo_move(game_id: str):
 
     if not game.state.history:
         raise HTTPException(status_code=400, detail="Nothing to undo")
+
+    # Taking back the final move reopens the game: drop the recorded result
+    if game.result_recorded and game.resigned_by is None:
+        persistence.clear_game_result(game_id)
+        game.result_recorded = False
 
     game.state.undo_move()
     if game.moves:
@@ -4722,6 +4764,116 @@ async def get_leaderboard(
     return LeaderboardResponse(
         players=[PlayerData(**p) for p in players],
         count=len(players),
+    )
+
+
+# --- Account game history ---
+
+class HistoryOpponent(BaseModel):
+    type: str  # 'ai', 'human', or 'local' (pass-and-play)
+    name: str
+    user_id: Optional[str] = None
+    username: Optional[str] = None
+    ai_level: Optional[int] = None
+    ai_model: Optional[str] = None
+    ai_simulations: Optional[int] = None
+
+
+class HistoryGame(BaseModel):
+    game_id: str
+    mode: str  # 'ai', 'online', or 'local'
+    game_mode: str = "realtime"
+    your_color: int
+    opponent: HistoryOpponent
+    result: Optional[str]  # 'win', 'loss', 'draw', 'in_progress', 'aborted'; None for pass-and-play
+    winner: Optional[int]
+    resigned: bool = False
+    move_count: int
+    created_at: str
+    updated_at: str
+    finished_at: Optional[str] = None
+
+
+class HistoryResponse(BaseModel):
+    games: list[HistoryGame]
+    total: int
+    page: int
+    per_page: int
+    total_pages: int
+
+
+class RecordCounts(BaseModel):
+    wins: int = 0
+    losses: int = 0
+    draws: int = 0
+    games: int = 0
+
+
+class LevelRecord(RecordCounts):
+    level: int
+
+
+class AIRecord(RecordCounts):
+    by_level: list[LevelRecord] = []
+
+
+class GameSummaryStats(BaseModel):
+    vs_ai: AIRecord
+    vs_human: RecordCounts
+    highest_ai_level_beaten: int = 0
+    auto_match_level: Optional[int] = None
+    auto_match_level_updated_at: Optional[str] = None
+
+
+class AIProgress(BaseModel):
+    current_level: Optional[int] = None
+    current_level_updated_at: Optional[str] = None
+    highest_level_beaten: int = 0
+
+
+class AIProgressUpdate(BaseModel):
+    current_level: Optional[int] = Field(default=None, ge=1, le=100)
+    current_level_updated_at: Optional[str] = Field(default=None, max_length=64, description="ISO UTC time the level last changed on the client.")
+    highest_level_beaten: Optional[int] = Field(default=None, ge=0, le=100)
+
+
+@app.get("/me/games", response_model=HistoryResponse)
+async def get_my_game_history(
+    page: int = 1,
+    per_page: int = 20,
+    mode: Optional[str] = None,
+    user: dict = Depends(require_auth),
+):
+    """The signed-in user's games (newest first) with opponent and result."""
+    if mode and mode not in ("ai", "online", "local"):
+        raise HTTPException(status_code=400, detail="mode must be 'ai', 'online' or 'local'")
+    return persistence.get_user_game_history(user["user_id"], page=page, per_page=per_page, mode=mode)
+
+
+@app.get("/me/summary", response_model=GameSummaryStats)
+async def get_my_game_summary(user: dict = Depends(require_auth)):
+    """W/L/D vs AI (by level) and vs humans, highest AI level beaten, auto-match level."""
+    return persistence.get_user_game_summary(user["user_id"])
+
+
+@app.get("/me/ai-progress", response_model=AIProgress)
+async def get_my_ai_progress(user: dict = Depends(require_auth)):
+    """The account's stored auto-match level and highest AI level beaten."""
+    return persistence.get_user_ai_progress(user["user_id"])
+
+
+@app.put("/me/ai-progress", response_model=AIProgress)
+async def update_my_ai_progress(request: AIProgressUpdate, user: dict = Depends(require_auth)):
+    """Merge this device's AI progress into the account; returns the merged record.
+
+    Highest level beaten takes the max; the current level is last-writer-wins
+    by current_level_updated_at.
+    """
+    return persistence.update_user_ai_progress(
+        user["user_id"],
+        current_level=request.current_level,
+        current_level_updated_at=request.current_level_updated_at,
+        highest_level_beaten=request.highest_level_beaten,
     )
 
 

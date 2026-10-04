@@ -13,7 +13,7 @@ import threading
 import zlib
 from contextlib import contextmanager
 from dataclasses import asdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -431,6 +431,31 @@ def init_db(db_path: Path = None) -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_auth_tokens_user ON auth_tokens(user_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_auth_tokens_type ON auth_tokens(token_type)")
 
+        # --- Account game history ---
+        # ai_level: auto-match/preset level the client reported for an AI game
+        # (NULL = unknown/custom). finished_at: set once when the game ends.
+        history_migrations = [
+            "ALTER TABLE games ADD COLUMN ai_level INTEGER",
+            "ALTER TABLE games ADD COLUMN finished_at TEXT",
+        ]
+        for sql in history_migrations:
+            try:
+                conn.execute(sql)
+            except sqlite3.OperationalError:
+                pass  # Column already exists
+
+        # Per-account AI difficulty progress, so the auto-match level follows
+        # the player across devices. Anonymous players keep it in localStorage.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_ai_progress (
+                user_id TEXT PRIMARY KEY,
+                current_level INTEGER,
+                current_level_updated_at TEXT,
+                highest_level_beaten INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL
+            )
+        """)
+
         conn.commit()
 
 
@@ -491,6 +516,7 @@ def save_game(
     ai_model_version: Optional[str] = None,
     bot_type: Optional[str] = None,
     client_type: Optional[str] = None,
+    ai_level: Optional[int] = None,
     db_path: Path = None
 ) -> None:
     """Save or update a game in the database.
@@ -513,26 +539,28 @@ def save_game(
             conn.execute("""
                 INSERT INTO games (game_id, player1_type, player2_type, ai_simulations, state_json,
                                  moves_json, player1_user_id, player2_user_id, ai_model_version,
-                                 bot_type, client_type, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                 bot_type, client_type, ai_level, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(game_id) DO UPDATE SET
                     state_json = excluded.state_json,
                     moves_json = excluded.moves_json,
                     updated_at = excluded.updated_at
             """, (game_id, player1_type, player2_type, ai_simulations, state_json, moves_json,
-                  player1_user_id, player2_user_id, ai_model_version, bot_type, client_type, now, now))
+                  player1_user_id, player2_user_id, ai_model_version, bot_type, client_type,
+                  ai_level, now, now))
         else:
             # Update state only, don't touch moves_json (for in-game state updates)
             conn.execute("""
                 INSERT INTO games (game_id, player1_type, player2_type, ai_simulations, state_json,
                                  moves_json, player1_user_id, player2_user_id, ai_model_version,
-                                 bot_type, client_type, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, '[]', ?, ?, ?, ?, ?, ?, ?)
+                                 bot_type, client_type, ai_level, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, '[]', ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(game_id) DO UPDATE SET
                     state_json = excluded.state_json,
                     updated_at = excluded.updated_at
             """, (game_id, player1_type, player2_type, ai_simulations, state_json,
-                  player1_user_id, player2_user_id, ai_model_version, bot_type, client_type, now, now))
+                  player1_user_id, player2_user_id, ai_model_version, bot_type, client_type,
+                  ai_level, now, now))
         conn.commit()
 
 
@@ -627,7 +655,10 @@ def associate_user_with_game(game_id: str, user_id: str, db_path: Path = None) -
     Associate a user with a game if not already associated.
 
     This allows users who log in after starting a game to still have
-    the game counted as theirs.
+    the game counted as theirs. The user takes the human seat: player 1,
+    unless player 1 is the AI (human playing red), in which case player 2.
+    Online games (both seats human, assigned at create/join) are untouched
+    because their player 1 seat is always filled or reserved.
 
     Returns True if the association was made, False if already associated.
     """
@@ -635,25 +666,73 @@ def associate_user_with_game(game_id: str, user_id: str, db_path: Path = None) -
         db_path = DEFAULT_DB_PATH
 
     with get_connection(db_path) as conn:
-        # Check if game already has a player1_user_id
         row = conn.execute(
-            "SELECT player1_user_id FROM games WHERE game_id = ?",
+            """SELECT player1_type, player2_type, player1_user_id, player2_user_id,
+                      online_status
+               FROM games WHERE game_id = ?""",
             (game_id,)
         ).fetchone()
 
         if row is None:
             return False
+        if (row["online_status"] or "local") != "local":
+            return False
+        if user_id in (row["player1_user_id"], row["player2_user_id"]):
+            return False
+
+        if row["player1_type"] == "ai" and row["player2_type"] == "human":
+            column, current = "player2_user_id", row["player2_user_id"]
+        else:
+            column, current = "player1_user_id", row["player1_user_id"]
 
         # Only update if not already set
-        if row["player1_user_id"] is None:
+        if current is None:
             conn.execute(
-                "UPDATE games SET player1_user_id = ? WHERE game_id = ?",
+                f"UPDATE games SET {column} = ? WHERE game_id = ?",
                 (user_id, game_id)
             )
             conn.commit()
             return True
 
         return False
+
+
+def record_game_finished(
+    game_id: str,
+    winner: Optional[int],
+    resigned_by: Optional[int] = None,
+    db_path: Path = None
+) -> bool:
+    """Record a game's final result (winner: 0/1, None = draw) and finish time.
+
+    Idempotent: finished_at keeps its first value. Returns True if updated.
+    """
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+    now = datetime.utcnow().isoformat() + 'Z'
+    with get_connection(db_path) as conn:
+        cursor = conn.execute("""
+            UPDATE games
+            SET winner = ?,
+                resigned_by = COALESCE(?, resigned_by),
+                finished_at = COALESCE(finished_at, ?),
+                updated_at = ?
+            WHERE game_id = ?
+        """, (winner, resigned_by, now, now, game_id))
+        conn.commit()
+        return cursor.rowcount > 0
+
+
+def clear_game_result(game_id: str, db_path: Path = None) -> None:
+    """Undo a recorded result (a finished local game was taken back with undo)."""
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+    with get_connection(db_path) as conn:
+        conn.execute(
+            "UPDATE games SET winner = NULL, finished_at = NULL WHERE game_id = ?",
+            (game_id,)
+        )
+        conn.commit()
 
 
 def pop_move(game_id: str, db_path: Path = None) -> Optional[int]:
@@ -742,12 +821,28 @@ def load_game(game_id: str, db_path: Path = None) -> Optional[dict]:
         }
 
 
-def load_all_games(db_path: Path = None) -> list[dict]:
-    """Load all games from the database."""
+def load_all_games(db_path: Path = None, active_within_days: Optional[float] = None) -> list[dict]:
+    """Load games from the database.
+
+    With active_within_days, only unfinished games updated within that window
+    are returned (the ones worth restoring into memory on startup). Finished
+    games are kept forever as history, so loading them all would grow
+    without bound.
+    """
     if db_path is None:
         db_path = DEFAULT_DB_PATH
     with get_connection(db_path) as conn:
-        rows = conn.execute("SELECT * FROM games ORDER BY updated_at DESC").fetchall()
+        if active_within_days is None:
+            rows = conn.execute("SELECT * FROM games ORDER BY updated_at DESC").fetchall()
+        else:
+            cutoff = (datetime.utcnow() - timedelta(days=active_within_days)).isoformat() + 'Z'
+            rows = conn.execute("""
+                SELECT * FROM games
+                WHERE updated_at >= ?
+                  AND finished_at IS NULL AND winner IS NULL AND resigned_by IS NULL
+                  AND COALESCE(online_status, 'local') NOT IN ('finished', 'abandoned')
+                ORDER BY updated_at DESC
+            """, (cutoff,)).fetchall()
 
         games = []
         for row in rows:
@@ -3523,3 +3618,249 @@ def apply_elo_update(
     update_player_elo(player2_id, new_r2, games_increment=1, db_path=db_path)
 
     return new_r1, new_r2
+
+
+# --- Account game history ---
+
+def _history_entry(row, user_id: str) -> Optional[dict]:
+    """Describe one game row from user_id's perspective (None = skip it)."""
+    moves = json.loads(row["moves_json"]) if row["moves_json"] else []
+    if not moves:
+        return None  # never started
+    online_status = row["online_status"] or "local"
+    if online_status == "waiting":
+        return None
+
+    your_color = 0 if row["player1_user_id"] == user_id else 1
+    opp_color = 1 - your_color
+    types = (row["player1_type"], row["player2_type"])
+
+    # Final result: explicit winner column, else resignation, else board state
+    winner = row["winner"]
+    finished = (row["finished_at"] is not None or winner is not None
+                or row["resigned_by"] is not None
+                or online_status in ("finished", "abandoned"))
+    if winner is None and row["resigned_by"] is not None:
+        winner = 1 - row["resigned_by"]
+    if not finished or winner is None:
+        state = state_from_json(row["state_json"])
+        if state.is_terminal():
+            finished = True
+            if winner is None:
+                winner = state.get_winner()
+
+    if types[opp_color] == "ai":
+        mode = "ai"
+        opponent = {
+            "type": "ai",
+            "name": f"AI Level {row['ai_level']}" if row["ai_level"] else "AI",
+            "ai_level": row["ai_level"],
+            "ai_model": row["ai_model_version"],
+            "ai_simulations": row["ai_simulations"],
+        }
+    elif online_status != "local":
+        mode = "online"
+        opp_id = row["player2_user_id"] if your_color == 0 else row["player1_user_id"]
+        opp_name = row["p2_name"] if your_color == 0 else row["p1_name"]
+        opp_username = row["p2_username"] if your_color == 0 else row["p1_username"]
+        if opp_id and opp_id.startswith("anon_"):
+            opp_name, opp_username = "Anonymous", None
+        opponent = {
+            "type": "human",
+            "name": opp_name or opp_username or "Opponent",
+            "user_id": None if (opp_id or "").startswith("anon_") else opp_id,
+            "username": opp_username,
+        }
+    else:
+        mode = "local"  # pass-and-play on one device: no result for "you"
+        opponent = {"type": "local", "name": "Pass & play"}
+
+    if online_status == "abandoned" and winner is None:
+        result = "aborted"
+    elif not finished:
+        result = "in_progress"
+    elif mode == "local":
+        result = None
+    elif winner is None:
+        result = "draw"
+    else:
+        result = "win" if winner == your_color else "loss"
+
+    return {
+        "game_id": row["game_id"],
+        "mode": mode,
+        "game_mode": row["game_mode"] or "realtime",
+        "your_color": your_color,
+        "opponent": opponent,
+        "result": result,
+        "winner": winner,
+        "resigned": row["resigned_by"] is not None,
+        "move_count": len(moves),
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+        "finished_at": row["finished_at"],
+    }
+
+
+def _user_history(user_id: str, db_path: Path = None) -> list[dict]:
+    """All of a user's started games, newest first, from their perspective."""
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+    with get_connection(db_path) as conn:
+        rows = conn.execute("""
+            SELECT g.game_id, g.player1_type, g.player2_type,
+                   g.player1_user_id, g.player2_user_id, g.state_json, g.moves_json,
+                   g.winner, g.resigned_by, g.online_status, g.game_mode,
+                   g.ai_model_version, g.ai_simulations, g.ai_level,
+                   g.created_at, g.updated_at, g.finished_at,
+                   u1.display_name AS p1_name, u1.username AS p1_username,
+                   u2.display_name AS p2_name, u2.username AS p2_username
+            FROM games g
+            LEFT JOIN users u1 ON g.player1_user_id = u1.user_id
+            LEFT JOIN users u2 ON g.player2_user_id = u2.user_id
+            WHERE g.player1_user_id = ? OR g.player2_user_id = ?
+            ORDER BY COALESCE(g.finished_at, g.updated_at) DESC
+        """, (user_id, user_id)).fetchall()
+    history = []
+    for row in rows:
+        entry = _history_entry(row, user_id)
+        if entry is not None:
+            history.append(entry)
+    return history
+
+
+def get_user_game_history(
+    user_id: str,
+    page: int = 1,
+    per_page: int = 20,
+    mode: Optional[str] = None,
+    db_path: Path = None,
+) -> dict:
+    """Paginated game history for a user. mode filters to 'ai'/'online'/'local'."""
+    page = max(1, page)
+    per_page = max(1, min(100, per_page))
+    history = _user_history(user_id, db_path)
+    if mode:
+        history = [g for g in history if g["mode"] == mode]
+    total = len(history)
+    offset = (page - 1) * per_page
+    return {
+        "games": history[offset:offset + per_page],
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "total_pages": (total + per_page - 1) // per_page if total > 0 else 1,
+    }
+
+
+def get_user_ai_progress(user_id: str, db_path: Path = None) -> dict:
+    """The user's stored auto-match level and highest AI level beaten."""
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+    with get_connection(db_path) as conn:
+        row = conn.execute(
+            "SELECT * FROM user_ai_progress WHERE user_id = ?", (user_id,)
+        ).fetchone()
+    if row is None:
+        return {"current_level": None, "current_level_updated_at": None,
+                "highest_level_beaten": 0}
+    return {
+        "current_level": row["current_level"],
+        "current_level_updated_at": row["current_level_updated_at"],
+        "highest_level_beaten": row["highest_level_beaten"] or 0,
+    }
+
+
+def _parse_iso_utc(value: Optional[str]) -> Optional[datetime]:
+    """Parse an ISO-8601 timestamp to a naive UTC datetime (None if invalid)."""
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value.replace('Z', '+00:00'))
+    except ValueError:
+        return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
+
+
+def update_user_ai_progress(
+    user_id: str,
+    current_level: Optional[int] = None,
+    current_level_updated_at: Optional[str] = None,
+    highest_level_beaten: Optional[int] = None,
+    db_path: Path = None,
+) -> dict:
+    """Merge a client's AI progress into the stored record and return the result.
+
+    highest_level_beaten only ever goes up (max of stored and given). The
+    current level is last-writer-wins by current_level_updated_at (ISO UTC):
+    a device that played more recently wins; a stale device can't roll it back.
+    """
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+    now = datetime.utcnow().isoformat() + 'Z'
+    stored = get_user_ai_progress(user_id, db_path)
+
+    new_level = stored["current_level"]
+    new_level_at = stored["current_level_updated_at"]
+    if current_level is not None:
+        # Normalize to our ISO format; a client clock ahead of ours is clamped
+        # to now so it can't pin the level against later changes elsewhere.
+        given = _parse_iso_utc(current_level_updated_at) or datetime.utcnow()
+        given = min(given, datetime.utcnow())
+        stored_at = _parse_iso_utc(new_level_at)
+        if new_level is None or stored_at is None or given > stored_at:
+            new_level, new_level_at = current_level, given.isoformat() + 'Z'
+    new_highest = max(stored["highest_level_beaten"], highest_level_beaten or 0)
+
+    with get_connection(db_path) as conn:
+        conn.execute("""
+            INSERT INTO user_ai_progress
+                (user_id, current_level, current_level_updated_at, highest_level_beaten, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                current_level = excluded.current_level,
+                current_level_updated_at = excluded.current_level_updated_at,
+                highest_level_beaten = excluded.highest_level_beaten,
+                updated_at = excluded.updated_at
+        """, (user_id, new_level, new_level_at, new_highest, now))
+        conn.commit()
+    return {"current_level": new_level, "current_level_updated_at": new_level_at,
+            "highest_level_beaten": new_highest}
+
+
+def get_user_game_summary(user_id: str, db_path: Path = None) -> dict:
+    """W/L/D vs AI (overall and by level) and vs humans, plus AI progress."""
+    def blank():
+        return {"wins": 0, "losses": 0, "draws": 0, "games": 0}
+
+    vs_ai, vs_human, by_level = blank(), blank(), {}
+    highest_from_games = 0
+    for g in _user_history(user_id, db_path):
+        if g["result"] not in ("win", "loss", "draw"):
+            continue
+        key = {"win": "wins", "loss": "losses", "draw": "draws"}[g["result"]]
+        if g["mode"] == "ai":
+            buckets = [vs_ai]
+            level = g["opponent"].get("ai_level")
+            if level:
+                buckets.append(by_level.setdefault(level, {"level": level, **blank()}))
+                if g["result"] == "win":
+                    highest_from_games = max(highest_from_games, level)
+        elif g["mode"] == "online":
+            buckets = [vs_human]
+        else:
+            continue
+        for b in buckets:
+            b[key] += 1
+            b["games"] += 1
+
+    progress = get_user_ai_progress(user_id, db_path)
+    return {
+        "vs_ai": {**vs_ai, "by_level": [by_level[k] for k in sorted(by_level)]},
+        "vs_human": vs_human,
+        "highest_ai_level_beaten": max(progress["highest_level_beaten"], highest_from_games),
+        "auto_match_level": progress["current_level"],
+        "auto_match_level_updated_at": progress["current_level_updated_at"],
+    }
