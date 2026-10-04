@@ -781,33 +781,27 @@ def delete_game(game_id: str, db_path: Path = None) -> bool:
 
 def cleanup_old_games(max_age_days: int = 7, empty_game_max_age_hours: int = 1, db_path: Path = None) -> int:
     """
-    Delete abandoned games; never finished or account-linked ones.
+    Delete empty games only; never a game with moves.
 
-    - Unfinished games (no winner, not resigned) with no linked account, not
-      updated for max_age_days, are deleted.
     - Games with no moves older than empty_game_max_age_hours are deleted.
-    - Finished games and games linked to a user are kept: they are players'
-      game history. (This used to delete every game older than 7 days on each
-      server start; the 2026-10-03 restart wiped 101 games, restored from backup.)
+    - Games with any moves are kept: they are players' game history. Their
+      result often lives only in state_json (the winner column is unset for
+      most local AI games), so "unfinished" can't be judged from columns.
+      (This used to delete every game older than 7 days on each server start;
+      the 2026-10-03 restart wiped 101 games, restored from backup.)
+
+    max_age_days is accepted for backward compatibility and ignored.
 
     Returns number of games deleted.
     """
     if db_path is None:
         db_path = DEFAULT_DB_PATH
 
-    old_cutoff = (datetime.utcnow() - timedelta(days=max_age_days)).isoformat() + 'Z'
     empty_cutoff = (datetime.utcnow() - timedelta(hours=empty_game_max_age_hours)).isoformat() + 'Z'
 
     with get_connection(db_path) as conn:
-        # Delete old abandoned games (unfinished, anonymous)
-        cursor1 = conn.execute(
-            """DELETE FROM games
-               WHERE updated_at < ?
-                 AND winner IS NULL AND resigned_by IS NULL
-                 AND player1_user_id IS NULL AND player2_user_id IS NULL""",
-            (old_cutoff,)
-        )
-        old_deleted = cursor1.rowcount
+        # Games with moves are never deleted (history).
+        old_deleted = 0
 
         # Delete empty games (no moves) older than the empty game cutoff
         cursor2 = conn.execute(
