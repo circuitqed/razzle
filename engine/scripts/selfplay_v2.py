@@ -234,7 +234,7 @@ class ModelSource:
     def refresh(self) -> bool:
         if self.args.model:
             if self.model is None:
-                self.model = Model(self.args.model, self.device, half=self.args.fp16)
+                self.model = Model(self.args.model, self.device, half=self.args.fp16, cuda_graphs=self.args.cuda_graphs)
                 self.version = Path(self.args.model).stem
                 return True
             return False
@@ -246,7 +246,7 @@ class ModelSource:
             try:
                 if not path.exists():
                     self.client.download_model(info.version, path)
-                model = Model(str(path), self.device, half=self.args.fp16)
+                model = Model(str(path), self.device, half=self.args.fp16, cuda_graphs=self.args.cuda_graphs)
                 break
             except Exception as e:      # network error or a bad file: refetch and retry
                 print(f'[selfplay] loading {info.version} failed ({e}); retrying', flush=True)
@@ -285,6 +285,8 @@ def main():
     ap.add_argument('--seed', type=int, default=None)
     ap.add_argument('--fp16', action=argparse.BooleanOptionalAction, default=True,
                     help='half-precision inference on CUDA (default on; --no-fp16 for fp32)')
+    ap.add_argument('--cuda-graphs', action=argparse.BooleanOptionalAction, default=False,
+                    help='replay the forward pass as captured CUDA graphs (padded batch buckets)')
     args = ap.parse_args()
     if not args.api_url and not args.model:
         raise SystemExit('need --api-url or --model')

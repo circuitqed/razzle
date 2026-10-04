@@ -189,33 +189,72 @@ def random_openings(n: int, plies: int, rng: random.Random) -> list[list[int]]:
     return out
 
 
+GRAPH_BUCKETS = (64, 128, 256, 384, 512, 640, 768, 1024, 1536, 2048)
+
+
 class Model:
-    def __init__(self, path: str, device: torch.device, value_scale: float = 1.0, half: bool = False):
+    def __init__(self, path: str, device: torch.device, value_scale: float = 1.0, half: bool = False,
+                 cuda_graphs: bool = False):
         self.value_scale = value_scale   # diagnostic: stretch value outputs (clamped to [-1, 1])
         self.net = RazzleNet.load(path, device=str(device)).to(device).eval()
         # fp16 inference: ~2.4x faster forward on RTX 3060 tensor cores; vs fp32 on real
         # positions max |dp| 0.004, mean |dv| 0.0007, top move agrees 99.96%.
-        self.half = half and torch.device(device).type == 'cuda'
+        on_cuda = torch.device(device).type == 'cuda'
+        self.half = half and on_cuda
         if self.half:
             self.net = self.net.half()
         self.device = device
+        self.planes = self.net.config.num_input_planes
         self.rot = torch.from_numpy(MOVE_ROTATION_MAP.astype(np.int64)).to(device)
         self.evals = 0
+        # CUDA graphs: replay the whole forward pass as one launch instead of ~30
+        # Python-dispatched kernels. One graph per padded batch size (bucket).
+        self.cuda_graphs = cuda_graphs and on_cuda
+        self._graphs: dict[int, tuple] = {}
+
+    def _forward(self, t: torch.Tensor):
+        logp, v, _ = self.net(t)
+        return logp.float().exp(), v.float().squeeze(1)
+
+    def _graph_for(self, n: int):
+        size = next((b for b in GRAPH_BUCKETS if b >= n), None)
+        if size is None:
+            return None
+        if size not in self._graphs:
+            dtype = torch.float16 if self.half else torch.float32
+            static_in = torch.zeros(size, self.planes, 8, 7, device=self.device, dtype=dtype)
+            s = torch.cuda.Stream()
+            s.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(s):
+                for _ in range(2):                       # warm up (cuDNN autotune) off the graph
+                    self._forward(static_in)
+            torch.cuda.current_stream().wait_stream(s)
+            g = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(g):
+                static_p, static_v = self._forward(static_in)
+            self._graphs[size] = (g, static_in, static_p, static_v)
+        return self._graphs[size]
 
     @torch.no_grad()
     def __call__(self, x: np.ndarray, players: list[int], extra: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        n = len(players)
         t = torch.from_numpy(x).to(self.device).view(-1, 7, 8, 7)
-        if self.net.config.num_input_planes == 9:
+        if self.planes == 9:
             t = torch.cat([t, torch.from_numpy(extra).to(self.device).view(-1, 2, 8, 7)], dim=1)
         if self.half:
             t = t.half()
-        logp, v, _ = self.net(t)
-        p = logp.float().exp()
-        p1 = torch.tensor(players, device=self.device) == 1
+        gr = self._graph_for(n) if self.cuda_graphs else None
+        if gr is not None:
+            g, static_in, static_p, static_v = gr
+            static_in[:n].copy_(t)
+            g.replay()
+            p, v = static_p[:n].clone(), static_v[:n]
+        else:
+            p, v = self._forward(t)
+        p1 = torch.from_numpy(np.asarray(players, dtype=np.int64)).to(self.device) == 1
         if p1.any():
             p[p1] = p[p1][:, self.rot]      # back to absolute orientation for player 1
-        self.evals += len(players)
-        v = v.float().squeeze(1)
+        self.evals += n
         if self.value_scale != 1.0:
             v = (v * self.value_scale).clamp(-1.0, 1.0)
         return p.cpu().numpy(), v.cpu().numpy()
@@ -231,6 +270,8 @@ def main():
     ap.add_argument('--games', type=int, default=400, help='rounded up to an even number (paired)')
     ap.add_argument('--concurrency', type=int, default=128)
     ap.add_argument('--leaf-batch', type=int, default=8)
+    ap.add_argument('--leaf-batch-a', type=int, default=0, help='per-side override (search-quality tests)')
+    ap.add_argument('--leaf-batch-b', type=int, default=0)
     ap.add_argument('--opening-moves', type=int, default=4)
     ap.add_argument('--seed', type=int, default=0)
     ap.add_argument('--device', default='cuda')
@@ -271,7 +312,8 @@ def main():
                 continue
             if g.search is None:
                 sims = sims_a if g.mover_is_a() else sims_b
-                g.search = Search(g.cs, sims, args.leaf_batch)
+                lb = (args.leaf_batch_a if g.mover_is_a() else args.leaf_batch_b) or args.leaf_batch
+                g.search = Search(g.cs, sims, lb)
             still.append(g)
         active = still
 
@@ -310,6 +352,7 @@ def main():
     se = math.sqrt(max(s * (1 - s), 1e-9) / n)
     elo = lambda p: -400 * math.log10(1 / min(max(p, 1e-3), 1 - 1e-3) - 1)
     res = dict(a=args.a, b=args.b, sims_a=sims_a, sims_b=sims_b, games=n,
+               leaf_batch_a=args.leaf_batch_a or args.leaf_batch, leaf_batch_b=args.leaf_batch_b or args.leaf_batch,
                value_scale_a=args.value_scale_a, value_scale_b=args.value_scale_b,
                score_a=round(s, 4), ci95=round(1.96 * se, 4),
                elo_a_minus_b=round(elo(s)), elo_ci95=[round(elo(s - 1.96 * se)), round(elo(s + 1.96 * se))],

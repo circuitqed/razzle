@@ -128,6 +128,14 @@ Policy top-1/top-3 in the dashboard were computed over value-only positions too 
 and were meaningless before this fix; they now cover positions with a policy target only.
 
 One 3090 trainer now absorbs ~150k+ games/h, i.e. ~10-12 workers at the new worker speed.
-Remaining ideas: run the full leaf selection/backup for all games in one C call (the Python
-per-game loop is now the worker bottleneck); fp16/AMP training steps; a common base image
-that hosts have cached (faster, more reliable boots).
+Follow-up measurements (same day):
+- Profile with fp16 + 3 procs: the per-game Python loop is ~15% of a process; the forward
+  pass dominates and the GPU runs at ~90%, i.e. workers are now **GPU-bound**.
+- CUDA graphs (`selfplay_v2 --cuda-graphs`, padded batch buckets): outputs identical, but
+  **-18% games/h** (12,356 -> 10,090) because padding adds GPU work and graphs are recaptured on
+  every model update. Off by default.
+- Leaf batching costs search quality: same net, equal sims, 1 leaf/round vs 8
+  (`arena.py --leaf-batch-a 1 --leaf-batch-b 8`): **+34 Elo [10, 58] at 256 sims**, +14 [-20, 48]
+  at 800 sims. Duplicate leaves within a batch: 3.2% at 160 sims, 0.3% at 800 (minor).
+- Next levers: GPU throughput (TensorRT fp16/int8), and a batched C driver that makes
+  1 leaf/game with ~8x more concurrent games cheap (quality gain mainly for quick searches).
