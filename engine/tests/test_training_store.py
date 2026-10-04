@@ -66,3 +66,22 @@ def test_migrate_legacy_rows_idempotent(data_dir):
     assert persistence.migrate_legacy_training_games(log=lambda *_: None) == {"copied": 0, "skipped": 7}
     games, total = persistence.get_all_training_games(limit=100)
     assert total == 7 and sorted(g["moves"][2] for g in games) == list(range(3, 10))
+
+
+def test_training_db_uses_wal(tmp_path, monkeypatch):
+    """Exports / dashboard reads must not block self-play inserts."""
+    import sqlite3
+    from server import persistence
+    monkeypatch.setattr(persistence, "DEFAULT_DB_PATH", tmp_path / "games.db")
+    persistence.init_db(tmp_path / "games.db")
+    persistence.save_training_game("w", [1, 2], 1.0, [{}, {}], "run_iter_001")
+    db = persistence.training_db_path()
+    mode = sqlite3.connect(str(db)).execute("PRAGMA journal_mode").fetchone()[0]
+    assert mode == "wal"
+    # a long-running reader doesn't block a writer
+    reader = sqlite3.connect(str(db))
+    reader.execute("BEGIN")
+    reader.execute("SELECT count(*) FROM selfplay_games").fetchone()
+    persistence.save_training_game("w", [3], -1.0, [{}], "run_iter_001")
+    reader.rollback()
+    assert persistence.get_training_games_stats()["total"] >= 2

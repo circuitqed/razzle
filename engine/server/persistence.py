@@ -47,6 +47,12 @@ def training_archive_dir() -> Path:
 
 
 def _ensure_selfplay_schema(conn) -> None:
+    # WAL: readers (exports, dashboard, trainer fetches) don't block game inserts. In the
+    # default rollback-journal mode a 2-minute export locked out self-play submissions
+    # ("database is locked", lost games). The mode is stored in the file; setting it is
+    # a no-op once enabled. Only training.db: games.db backups copy the bare file.
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS selfplay_games (
             id INTEGER PRIMARY KEY AUTOINCREMENT,

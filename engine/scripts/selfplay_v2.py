@@ -217,6 +217,83 @@ class SelfPlayGame:
 
 # ---------------------------------------------------------------------------
 
+class Submitter:
+    """Submits finished games from a background thread, retrying with backoff.
+
+    A failed or slow submission no longer stalls the self-play loop or loses the
+    game. Games still unsent at shutdown are saved to `spool` and resent on the
+    next start.
+    """
+    MAX_QUEUE = 50_000
+
+    def __init__(self, client, worker_id: str, spool: Path):
+        import queue
+        import threading
+        self.client, self.worker_id, self.spool = client, worker_id, spool
+        self.q: queue.Queue = queue.Queue()
+        self.failed = self.sent = self.dropped = 0
+        self._stop = threading.Event()
+        if spool.exists():
+            n = 0
+            for line in spool.read_text().splitlines():
+                if line.strip():
+                    self.q.put(json.loads(line))
+                    n += 1
+            spool.unlink()
+            print(f'[selfplay] resending {n} games from {spool}', flush=True)
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+
+    def put(self, record: dict) -> None:
+        if self.q.qsize() >= self.MAX_QUEUE:
+            self.q.get_nowait()
+            self.dropped += 1
+        self.q.put(record)
+
+    def _run(self) -> None:
+        import queue
+        delay = 1.0
+        while not self._stop.is_set():
+            try:
+                rec = self.q.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            while not self._stop.is_set():
+                try:
+                    self.client.submit_game(worker_id=self.worker_id, moves=rec['moves'], result=rec['result'],
+                                            visit_counts=[{int(k): v for k, v in d.items()}
+                                                          for d in rec['visit_counts']],
+                                            model_version=rec['model'])
+                    self.sent += 1
+                    delay = 1.0
+                    break
+                except Exception as e:
+                    self.failed += 1
+                    if self.failed <= 5 or self.failed % 100 == 0:
+                        print(f'[selfplay] submit failed ({self.failed} so far, {self.q.qsize()} queued): {e}',
+                              flush=True)
+                    self._stop.wait(delay)
+                    delay = min(delay * 2, 60.0)
+            else:
+                self.q.put(rec)          # stopping: keep it for the spool
+
+    def close(self, timeout: float = 20.0) -> None:
+        """Try to drain the queue, then spool whatever is left to disk."""
+        end = time.time() + timeout
+        while not self.q.empty() and time.time() < end:
+            time.sleep(0.2)
+        self._stop.set()
+        self.thread.join(timeout=35)
+        left = []
+        while not self.q.empty():
+            left.append(self.q.get_nowait())
+        if left:
+            with open(self.spool, 'a') as f:
+                for rec in left:
+                    f.write(json.dumps(rec) + '\n')
+            print(f'[selfplay] saved {len(left)} unsent games to {self.spool}', flush=True)
+
+
 class ModelSource:
     """Latest model from the training API (or a fixed local file)."""
 
@@ -337,6 +414,8 @@ def main():
     signal.signal(signal.SIGTERM, lambda *_: stop.__setitem__('flag', True))
     signal.signal(signal.SIGINT, lambda *_: stop.__setitem__('flag', True))
     out = open(args.out_jsonl, 'a') if args.out_jsonl else None
+    submitter = (Submitter(source.client, args.worker_id, Path(args.model_dir).parent / f'unsent_{args.worker_id}.jsonl')
+                 if source.client else None)
 
     games: list[SelfPlayGame] = []
     done = 0
@@ -356,12 +435,8 @@ def main():
                 g.free()
                 record = dict(worker_id=args.worker_id, model=source.version, moves=g.moves,
                               result=g.result(), visit_counts=[{str(k): v for k, v in d.items()} for d in g.visit_counts])
-                if source.client:
-                    try:
-                        source.client.submit_game(worker_id=args.worker_id, moves=g.moves, result=g.result(),
-                                                  visit_counts=g.visit_counts, model_version=source.version)
-                    except Exception as e:
-                        print(f'[selfplay] submit failed: {e}', flush=True)
+                if submitter:
+                    submitter.put(record)
                 if out:
                     out.write(json.dumps(record) + '\n')
                     out.flush()
@@ -419,6 +494,10 @@ def main():
     for g in games:
         g.free()
     el = time.time() - t0
+    if submitter:
+        submitter.close()
+        print(f'[selfplay] submitted {submitter.sent}, retried failures {submitter.failed}, '
+              f'dropped {submitter.dropped}', flush=True)
     print(f'[selfplay] finished {done} games in {el:.0f}s ({done / max(el, 1e-9) * 3600:.0f} games/h, '
           f'{evals / max(el, 1e-9):,.0f} evals/s); tree reuse {STATS}', flush=True)
 

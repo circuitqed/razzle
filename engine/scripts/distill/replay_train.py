@@ -52,6 +52,10 @@ def main():
     ap.add_argument('--value-weight', type=float, default=1.5)
     ap.add_argument('--window-min', type=int, default=250_000)
     ap.add_argument('--checkpoints', type=int, default=4, help='save this many evenly spaced checkpoints')
+    ap.add_argument('--ema', type=float, default=0.0,
+                    help='also keep an exponential moving average of the weights (e.g. 0.999 per step); '
+                         'checkpoints then save the averaged weights')
+    ap.add_argument('--max-games', type=int, default=0)
     ap.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
     args = ap.parse_args()
 
@@ -67,6 +71,21 @@ def main():
     rng = np.random.default_rng(0)
 
     games = load_games(args.games)
+    if args.max_games:
+        games = games[:args.max_games]
+    ema = None
+    if args.ema > 0:
+        import copy
+        ema = copy.deepcopy(net).eval()
+        for q in ema.parameters():
+            q.requires_grad_(False)
+
+    def ema_update():
+        with torch.no_grad():
+            for e, q in zip(ema.parameters(), net.parameters()):
+                e.mul_(args.ema).add_(q.detach(), alpha=1 - args.ema)
+            for e, q in zip(ema.buffers(), net.buffers()):
+                e.copy_(q)
     chunks = [games[i:i + args.batch_games] for i in range(0, len(games), args.batch_games)]
     save_at = {round(len(chunks) * (k + 1) / args.checkpoints) - 1 for k in range(args.checkpoints)}
     t0 = time.time()
@@ -76,14 +95,21 @@ def main():
         pw = T.DistributedTrainer._policy_weights(policies, legal)
         buf.add(states, policies, values, legal, policy_weights=pw)
         steps = max(1, int(np.ceil(len(states) * args.reuse / args.batch_size)))
-        m = trainer.train_steps(lambda: buf.sample(args.batch_size, rng), steps, verbose=False)
+        if ema is None:
+            m = trainer.train_steps(lambda: buf.sample(args.batch_size, rng), steps, verbose=False)
+        else:   # one step at a time so the average updates after every step
+            ms = []
+            for _ in range(steps):
+                ms.append(trainer.train_steps(lambda: buf.sample(args.batch_size, rng), 1, verbose=False))
+                ema_update()
+            m = {k: float(np.mean([x[k] for x in ms])) for k in ('loss', 'policy_loss', 'value_loss')}
         m.update(iteration=it + 1, games=len(chunk), positions=len(states), window=len(buf))
         log.write(json.dumps(m) + '\n')
         log.flush()
         print(f"iter {it + 1}/{len(chunks)}: steps {steps} loss {m['loss']:.4f} pol {m['policy_loss']:.4f} "
               f"val {m['value_loss']:.4f} window {len(buf):,} ({time.time() - t0:.0f}s)", flush=True)
         if it in save_at:
-            net.save(str(out / f'replay_iter_{it + 1:03d}.pt'))
+            (ema or net).save(str(out / f'replay_iter_{it + 1:03d}.pt'))
     print(f'done in {time.time() - t0:.0f}s')
 
 
