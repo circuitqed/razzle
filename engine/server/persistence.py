@@ -799,15 +799,10 @@ def cleanup_old_games(max_age_days: int = 7, empty_game_max_age_hours: int = 1, 
     empty_cutoff = (datetime.utcnow() - timedelta(hours=empty_game_max_age_hours)).isoformat() + 'Z'
 
     with get_connection(db_path) as conn:
-        # Delete old abandoned games (unfinished, anonymous)
-        cursor1 = conn.execute(
-            """DELETE FROM games
-               WHERE updated_at < ?
-                 AND winner IS NULL AND resigned_by IS NULL
-                 AND player1_user_id IS NULL AND player2_user_id IS NULL""",
-            (old_cutoff,)
-        )
-        old_deleted = cursor1.rowcount
+        # Games with any moves are never deleted: they're players' history.
+        # (The winner column is only set for some game types — 8 of 106 games
+        # in the Oct 3 backup — so it can't identify finished games.)
+        old_deleted = 0
 
         # Delete empty games (no moves) older than the empty game cutoff
         cursor2 = conn.execute(
