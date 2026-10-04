@@ -245,8 +245,19 @@ class VastAI:
             return []
 
     def destroy_instance(self, instance_id: int) -> None:
-        """Destroy an instance."""
-        self._run('destroy', 'instance', str(instance_id))
+        """Destroy an instance.
+
+        Newer vastai CLIs ask for confirmation and abort without -y (silently
+        leaving the instance billing); older ones don't know -y. Try -y first,
+        fall back without it, and answer 'y' on stdin either way.
+        """
+        base = ['vastai', 'destroy', 'instance', str(instance_id)]
+        result = subprocess.run(base + ['-y'], capture_output=True, text=True, input='y\n')
+        if result.returncode != 0 and 'unrecognized' in (result.stderr + result.stdout).lower():
+            result = subprocess.run(base, capture_output=True, text=True, input='y\n')
+        out = (result.stdout + result.stderr).lower()
+        if result.returncode != 0 or 'aborted' in out:
+            raise RuntimeError(f"vastai destroy {instance_id} failed: {result.stdout} {result.stderr}")
 
     def wait_for_instance(
         self,

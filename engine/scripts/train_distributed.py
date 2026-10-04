@@ -456,6 +456,10 @@ class DistributedOrchestrator:
             except Exception as e:
                 print(f"[{role_name}] Failed to destroy old instance: {e}")
 
+        if failed_worker.role == "trainer" and self.trainer_gpu:
+            offers = self.vast.search_offers(gpu_name=self.trainer_gpu, max_dph=self.trainer_max_price,
+                                             min_reliability=self.min_reliability, order_by='dph_total')
+
         # Find a new offer: skip in-use and previously failed offers
         used_offer_ids = {w.offer.id for w in self.workers if w.offer}
         if self.trainer and self.trainer.offer:
@@ -661,6 +665,13 @@ class DistributedOrchestrator:
             worker_inactivity_threshold = 1800  # 30 min before replacing
 
             run_started = time.time()
+            trainer_last_progress = time.time()
+            try:
+                trainer_start_iteration = (requests.get(f"{self.api_url}/training/models/latest", timeout=10)
+                                           .json().get('model') or {}).get('iteration', -1)
+            except Exception:
+                trainer_start_iteration = -1
+            trainer_last_iteration = trainer_start_iteration
             while not self.shutdown_requested:
                 time.sleep(check_interval)
 
@@ -719,6 +730,26 @@ class DistributedOrchestrator:
                                 print(f"[Health] Worker {worker.worker_id} unresponsive for {inactive_time:.0f}s - replacing")
                                 worker.status = "failed"
                                 self.replace_failed_instance(worker, offers)
+
+                    # Trainer watchdog: games waiting but no new model for too long
+                    # (e.g. a host stuck pulling the image) -> replace the trainer.
+                    if self.trainer and self.with_trainer:
+                        try:
+                            lm = requests.get(f"{self.api_url}/training/models/latest", timeout=10).json().get('model') or {}
+                            it = lm.get('iteration', -1)
+                            if it != trainer_last_iteration:
+                                trainer_last_iteration = it
+                                trainer_last_progress = current_time
+                            grace = 2400 if trainer_last_iteration <= trainer_start_iteration else 1800
+                            stalled = current_time - trainer_last_progress
+                            if games_pending >= self.training_threshold and stalled > grace:
+                                print(f"[Health] Trainer: no new model for {stalled:.0f}s with "
+                                      f"{games_pending} games pending - replacing")
+                                self.trainer.status = "failed"
+                                self.replace_failed_instance(self.trainer, offers)
+                                trainer_last_progress = current_time
+                        except Exception as e:
+                            print(f"[Health] Trainer check failed: {e}")
 
                 except Exception as e:
                     print(f"[Status] Check failed: {e}")
