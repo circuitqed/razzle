@@ -242,6 +242,7 @@ class DistributedOrchestrator:
         full_prob: float = 0.25,
         trainer_extra: str = '',
         min_price: float = 0.0,
+        max_hours: float = 0.0,
         trainer_gpu: str = '',
         trainer_max_price: float = 0.4,
     ):
@@ -275,6 +276,7 @@ class DistributedOrchestrator:
         self.full_prob = full_prob
         self.trainer_extra = trainer_extra
         self.min_price = min_price
+        self.max_hours = max_hours
         self.trainer_gpu = trainer_gpu
         self.trainer_max_price = trainer_max_price
 
@@ -646,8 +648,16 @@ class DistributedOrchestrator:
             # plus first game at 2000 sims takes 5+ min of self-play
             worker_inactivity_threshold = 1800  # 30 min before replacing
 
+            run_started = time.time()
             while not self.shutdown_requested:
                 time.sleep(check_interval)
+
+                # Hard time cap: destroy everything so an unattended run can't overspend.
+                if self.max_hours > 0 and time.time() - run_started > self.max_hours * 3600:
+                    print(f"\n[Monitor] --max-hours {self.max_hours} reached - destroying all instances...")
+                    self.shutdown_requested = True
+                    self.cleanup()
+                    return 0
 
                 try:
                     response = requests.get(f"{self.api_url}/training/dashboard", timeout=10)
@@ -756,6 +766,9 @@ def main():
     parser.add_argument('--min-price', type=float, default=0.0,
                         help='Minimum $/hr for worker offers (cheapest hosts are often unreliable; '
                              'e.g. 0.08 for RTX 3060)')
+    parser.add_argument('--max-hours', type=float, default=0.0,
+                        help='Destroy all instances and exit after this many hours (0 = no limit). '
+                             'Note: only Ctrl-C/SIGINT or --max-hours destroy instances; SIGTERM leaves them running.')
     parser.add_argument('--trainer-gpu', type=str, default='',
                         help='GPU type for the trainer (e.g. RTX_3090); default = same as workers')
     parser.add_argument('--trainer-max-price', type=float, default=0.4)
@@ -823,6 +836,7 @@ def main():
         full_prob=args.full_prob,
         trainer_extra=args.trainer_extra,
         min_price=args.min_price,
+        max_hours=args.max_hours,
         trainer_gpu=args.trainer_gpu,
         trainer_max_price=args.trainer_max_price,
     )
