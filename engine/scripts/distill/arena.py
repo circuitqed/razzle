@@ -383,8 +383,11 @@ def _color_stats(outcomes: dict) -> dict:
             same_model += 1
     def score(as_p0):   # model A's score in the games where it played first (as_p0) / second
         r = [(0.5 if w < 0 else float((w == 0) == a0)) for v in outcomes.values() for a0, w in v if a0 == as_p0]
-        return round(sum(r) / max(1, len(r)), 4)
+        return round(sum(r) / len(r), 4) if r else None
     sa0, sa1 = score(True), score(False)
+    if sa0 is None or sa1 is None:      # fixed colours: no first-move / skill split
+        return dict(p0_win_rate=round(sum(w == 0 for w in decided) / max(1, len(decided)), 4),
+                    draws=len(games) - len(decided), score_a_first=sa0, score_a_second=sa1)
     lo = lambda p: math.log10(min(max(p, 1e-3), 1 - 1e-3) / (1 - min(max(p, 1e-3), 1 - 1e-3)))
     # Bradley-Terry with a first-move term: logit(A first) = d + f, logit(A second) = d - f
     return dict(p0_win_rate=round(sum(w == 0 for w in decided) / max(1, len(decided)), 4),
@@ -405,6 +408,9 @@ def main():
     ap.add_argument('--games', type=int, default=400, help='rounded up to an even number (paired)')
     ap.add_argument('--concurrency', type=int, default=128)
     ap.add_argument('--leaf-batch', type=int, default=8)
+    ap.add_argument('--colours', choices=['both', 'a-first', 'a-second'], default='both',
+                    help='both: each opening twice with colours swapped; a-first / a-second: A always '
+                         'moves first / second (handicap tests: how much stronger must the second player be?)')
     ap.add_argument('--leaf-batch-a', type=int, default=0, help='per-side override (search-quality tests)')
     ap.add_argument('--leaf-batch-b', type=int, default=0)
     ap.add_argument('--opening-moves', type=int, default=4)
@@ -428,8 +434,15 @@ def main():
     rng = random.Random(args.seed)
     pairs = (args.games + 1) // 2
     queue = []
-    for k, op in enumerate(random_openings(pairs, args.opening_moves, rng)):
-        queue += [(op, True, k), (op, False, k)]
+    if args.colours == 'both':
+        for k, op in enumerate(random_openings(pairs, args.opening_moves, rng)):
+            queue += [(op, True, k), (op, False, k)]
+    else:
+        # A plays P0 (the side that moves first from the initial position) or P1. Openings
+        # use an even number of plies so the side to move after the opening is still P0.
+        plies = args.opening_moves - (args.opening_moves % 2)
+        for k, op in enumerate(random_openings(2 * pairs, plies, rng)):
+            queue.append((op, args.colours == 'a-first', k))
 
     active: list[Game] = []
     scores, plies, outcomes = [], [], {}   # outcomes[pair] = [(a_is_p0, winner), ...]
@@ -488,7 +501,7 @@ def main():
     s = sum(scores) / n
     se = math.sqrt(max(s * (1 - s), 1e-9) / n)
     elo = lambda p: -400 * math.log10(1 / min(max(p, 1e-3), 1 - 1e-3) - 1)
-    res = dict(a=args.a, b=args.b, sims_a=sims_a, sims_b=sims_b, games=n,
+    res = dict(a=args.a, b=args.b, sims_a=sims_a, sims_b=sims_b, games=n, colours=args.colours,
                leaf_batch_a=args.leaf_batch_a or args.leaf_batch, leaf_batch_b=args.leaf_batch_b or args.leaf_batch,
                value_scale_a=args.value_scale_a, value_scale_b=args.value_scale_b,
                score_a=round(s, 4), ci95=round(1.96 * se, 4),
