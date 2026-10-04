@@ -83,6 +83,10 @@ class WorkerInstance:
     games_submitted: int = 0
 
 
+def _branch_arg(branch: str) -> str:
+    return f'--branch {branch} ' if branch else ''
+
+
 def _build_worker_onstart(
     worker_id: int,
     api_url: str,
@@ -94,6 +98,11 @@ def _build_worker_onstart(
     random_opening_fraction: float,
     run_id: str = '',
     api_key: str = '',
+    branch: str = '',
+    worker_kind: str = 'v1',
+    concurrency: int = 96,
+    fast_sims: int = 0,
+    full_prob: float = 0.25,
 ) -> str:
     """Build the onstart-cmd string for a worker instance.
 
@@ -105,16 +114,34 @@ def _build_worker_onstart(
         # Export API key so workers can authenticate
         f'export TRAINING_API_KEY="{api_key}"',
         # Fetch latest code from GitHub (overlay on base image)
-        'cd /tmp && git clone --depth 1 https://github.com/circuitqed/razzle.git razzle_src 2>/dev/null && '
+        f'cd /tmp && git clone --depth 1 {_branch_arg(branch)}https://github.com/circuitqed/razzle.git razzle_src 2>/dev/null && '
         'cp -r /tmp/razzle_src/engine/razzle/* /workspace/razzle/ && '
-        'cp -r /tmp/razzle_src/engine/razzle_fast /workspace/razzle_fast && '
+        'mkdir -p /workspace/razzle_fast && cp -r /tmp/razzle_src/engine/razzle_fast/. /workspace/razzle_fast/ && '
         'cp -f /tmp/razzle_src/engine/scripts/worker_selfplay.py /workspace/scripts/worker_selfplay.py && '
+        'cp -f /tmp/razzle_src/engine/scripts/selfplay_v2.py /workspace/scripts/selfplay_v2.py 2>/dev/null; '
+        'mkdir -p /workspace/scripts/distill && cp -f /tmp/razzle_src/engine/scripts/distill/arena.py /workspace/scripts/distill/arena.py 2>/dev/null; '
         'cp -f /tmp/razzle_src/engine/scripts/model_arena.py /workspace/scripts/model_arena.py 2>/dev/null; '
         'rm -rf /tmp/razzle_src',
         # Build C MCTS extension (install gcc if needed)
         'which gcc >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq gcc >/dev/null 2>&1)',
         'python -u /workspace/razzle_fast/_build.py',
     ]
+    if worker_kind == 'v2':
+        # One process per GPU running many concurrent games (batched forward passes).
+        full_id = f'{run_id}_{worker_id}' if run_id else str(worker_id)
+        lines.append(
+            f'mkdir -p /workspace/sp2 && '
+            f'nohup python -u /workspace/scripts/selfplay_v2.py '
+            f'--worker-id {full_id} --api-url {api_url} --model-dir /workspace/sp2/models '
+            f'--device cuda --concurrency {concurrency} '
+            f'--sims {simulations} --fast-sims {fast_sims or max(32, simulations // 5)} '
+            f'--full-prob {full_prob} '
+            f'--random-opening-moves {random_opening_moves} '
+            f'--random-opening-fraction {random_opening_fraction} '
+            f'</dev/null >/workspace/selfplay_v2.log 2>&1 &'
+        )
+        return '\n'.join(lines)
+
     for i in range(workers_per_instance):
         sub_worker_id = worker_id * workers_per_instance + i
         full_id = f'{run_id}_{sub_worker_id}' if run_id else str(sub_worker_id)
@@ -149,6 +176,8 @@ def _build_trainer_onstart(
     run_name: str = '',
     optimizer: str = 'adam',
     momentum: float = 0.9,
+    branch: str = '',
+    trainer_extra: str = '',
 ) -> str:
     """Build the onstart-cmd string for a trainer instance."""
     run_name_arg = f'--run-name {run_name} ' if run_name else ''
@@ -156,7 +185,7 @@ def _build_trainer_onstart(
     lines = [
         f'export TRAINING_API_KEY="{api_key}"',
         # Fetch latest code from GitHub (overlay on base image)
-        'cd /tmp && git clone --depth 1 https://github.com/circuitqed/razzle.git razzle_src 2>/dev/null && '
+        f'cd /tmp && git clone --depth 1 {_branch_arg(branch)}https://github.com/circuitqed/razzle.git razzle_src 2>/dev/null && '
         'cp -r /tmp/razzle_src/engine/razzle/* /workspace/razzle/ && '
         'cp -f /tmp/razzle_src/engine/scripts/trainer.py /workspace/scripts/trainer.py && '
         'rm -rf /tmp/razzle_src',
@@ -166,7 +195,7 @@ def _build_trainer_onstart(
         f'--network-size {network_size} --output /workspace/output '
         f'--batch-size {trainer_batch_size} --replay-buffer-size {replay_buffer_size} '
         f'--gamma {gamma} --td-lambda {td_lambda} --epochs {epochs} '
-        f'{run_name_arg}{optimizer_arg}'
+        f'{run_name_arg}{optimizer_arg}{trainer_extra} '
         f'</dev/null >/workspace/trainer.log 2>&1 &',
     ]
     return '\n'.join(lines)
@@ -200,12 +229,18 @@ class DistributedOrchestrator:
         random_opening_fraction: float = 0.0,
         trainer_batch_size: int = 512,
         replay_buffer_size: int = 100_000,
-        gamma: float = 0.99,
-        td_lambda: float = 0.95,
+        gamma: float = 1.0,
+        td_lambda: float = 1.0,
         api_key: str = '',
         run_name: str = '',
         optimizer_type: str = 'adam',
         momentum: float = 0.9,
+        branch: str = '',
+        worker_kind: str = 'v1',
+        concurrency: int = 96,
+        fast_sims: int = 0,
+        full_prob: float = 0.25,
+        trainer_extra: str = '',
     ):
         self.num_workers = num_workers
         self.api_url = api_url
@@ -230,6 +265,12 @@ class DistributedOrchestrator:
         self.run_name = run_name
         self.optimizer_type = optimizer_type
         self.momentum = momentum
+        self.branch = branch
+        self.worker_kind = worker_kind
+        self.concurrency = concurrency
+        self.fast_sims = fast_sims
+        self.full_prob = full_prob
+        self.trainer_extra = trainer_extra
 
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -278,6 +319,11 @@ class DistributedOrchestrator:
             random_opening_fraction=self.random_opening_fraction,
             run_id=self.run_id,
             api_key=self.api_key,
+            branch=self.branch,
+            worker_kind=self.worker_kind,
+            concurrency=self.concurrency,
+            fast_sims=self.fast_sims,
+            full_prob=self.full_prob,
         )
         try:
             worker.status = "creating"
@@ -313,6 +359,8 @@ class DistributedOrchestrator:
             run_name=self.run_name,
             optimizer=self.optimizer_type,
             momentum=self.momentum,
+            branch=self.branch,
+            trainer_extra=self.trainer_extra,
         )
         try:
             trainer.status = "creating"
@@ -653,7 +701,7 @@ def main():
     parser.add_argument('--gpu', type=str, default='RTX_3060', help='GPU type')
     parser.add_argument('--max-price', type=float, default=0.10, help='Max price per hour')
     parser.add_argument('--simulations', type=int, default=2000, help='MCTS simulations (default: 2000)')
-    parser.add_argument('--network-size', type=str, default='medium', choices=['small', 'medium', 'large'],
+    parser.add_argument('--network-size', type=str, default='medium', choices=['small', 'medium', 'large', 'medium_v2'],
                         help='Network size preset: small (~236K), medium (~2.4M), large (~24M)')
     parser.add_argument('--output', type=Path, default=Path('output/distributed'),
                         help='Output directory')
@@ -673,10 +721,20 @@ def main():
                         help='Training batch size (default: 512)')
     parser.add_argument('--replay-buffer-size', type=int, default=100_000,
                         help='Replay buffer capacity in positions (default: 100000)')
-    parser.add_argument('--gamma', type=float, default=0.99,
-                        help='Value discount factor for TD(λ) (default: 0.99)')
-    parser.add_argument('--td-lambda', type=float, default=0.95,
-                        help='TD(λ) trace decay (default: 0.95, 1.0=pure MC)')
+    parser.add_argument('--branch', type=str, default='',
+                        help='Git branch instances clone for code (default: repo default branch)')
+    parser.add_argument('--worker', choices=['v1', 'v2'], default='v1',
+                        help='v1 = worker_selfplay.py (N processes/GPU); v2 = selfplay_v2.py (1 process/GPU, '
+                             'many concurrent games, tree reuse, playout-cap randomization)')
+    parser.add_argument('--concurrency', type=int, default=96, help='v2: concurrent games per GPU')
+    parser.add_argument('--fast-sims', type=int, default=0, help='v2: quick-search sims (default sims/5)')
+    parser.add_argument('--full-prob', type=float, default=0.25, help='v2: probability a turn gets a full search')
+    parser.add_argument('--trainer-extra', type=str, default='',
+                        help='Extra args appended to the trainer command (e.g. "--reuse 2 --window-max 3000000")')
+    parser.add_argument('--gamma', type=float, default=1.0,
+                        help='Value discount factor (default: 1.0 = undiscounted game outcome)')
+    parser.add_argument('--td-lambda', type=float, default=1.0,
+                        help='TD(λ) trace decay (default: 1.0 = pure game outcome)')
 
     parser.add_argument('--api-key', type=str, default=None,
                         help='Training API key (default: from TRAINING_API_KEY env var or .env)')
@@ -728,6 +786,12 @@ def main():
         run_name=args.run_name,
         optimizer_type=args.optimizer,
         momentum=args.momentum,
+        branch=args.branch,
+        worker_kind=args.worker,
+        concurrency=args.concurrency,
+        fast_sims=args.fast_sims,
+        full_prob=args.full_prob,
+        trainer_extra=args.trainer_extra,
     )
 
     # Handle signals

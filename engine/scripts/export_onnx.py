@@ -37,8 +37,9 @@ def export_onnx(
     """
     model.eval()
 
-    # Dummy input: (batch=1, channels=7, rows=8, cols=7)
-    dummy_input = torch.randn(1, 7, ROWS, COLS)
+    # Dummy input: (batch=1, channels, rows=8, cols=7); 7 planes for v1 models, 9 for v2
+    planes = getattr(model.config, 'num_input_planes', 7)
+    dummy_input = torch.randn(1, planes, ROWS, COLS)
 
     # Get PyTorch reference output before export
     with torch.no_grad():
