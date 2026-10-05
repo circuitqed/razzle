@@ -55,6 +55,7 @@ class GPUOffer:
     reliability: float
     dlperf: float  # Deep learning performance score
     machine_id: int = 0  # physical host (offer ids change over time; machine ids don't)
+    cpu_cores: float = 0.0  # effective CPU cores allotted to the instance
 
     @classmethod
     def from_json(cls, data: dict) -> GPUOffer:
@@ -71,6 +72,7 @@ class GPUOffer:
             reliability=data.get('reliability2', 0),
             dlperf=data.get('dlperf', 0),
             machine_id=data.get('machine_id', 0) or 0,
+            cpu_cores=data.get('cpu_cores_effective', 0) or 0,
         )
 
 

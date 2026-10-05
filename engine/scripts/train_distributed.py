@@ -146,19 +146,33 @@ def _build_worker_onstart(
         if backend == 'trt':
             # numpy<2 in the same command: newer onnx pulls numpy 2, which breaks torch 2.1
             lines.append('pip install -q "tensorrt-cu12==10.3.0" onnx "numpy<2" >/workspace/pip_trt.log 2>&1')
-        for i in range(max(1, workers_per_instance)):
-            full_id = _v2_process_id(run_id, worker_id, i)
-            log = 'selfplay_v2.log' if i == 0 else f'selfplay_v2_p{i}.log'
-            lines.append(
-                f'nohup python -u /workspace/scripts/selfplay_v2.py '
-                f'--worker-id {full_id} --api-url {api_url} --model-dir /workspace/sp2/models '
-                f'--device cuda --concurrency {concurrency} '
-                f'--sims {simulations} --fast-sims {fast_sims or max(32, simulations // 5)} '
-                f'--full-prob {full_prob} --backend {backend} '
-                f'--random-opening-moves {random_opening_moves} '
-                f'--random-opening-fraction {random_opening_fraction} '
-                f'</dev/null >/workspace/{log} 2>&1 &'
-            )
+        # Process count from the container's real limits (nproc/free report the whole
+        # host): one per core minus one, ~3 GB each, capped at workers_per_instance.
+        lines += [
+            'if [ -f /sys/fs/cgroup/cpu.max ]; then read q p < /sys/fs/cgroup/cpu.max; else '
+            'q=$(cat /sys/fs/cgroup/cpu/cpu.cfs_quota_us 2>/dev/null || echo -1); '
+            'p=$(cat /sys/fs/cgroup/cpu/cpu.cfs_period_us 2>/dev/null || echo 100000); fi',
+            'if [ "$q" = max ] || [ "$q" -le 0 ] 2>/dev/null; then cores=$(nproc); else cores=$((q / p)); fi',
+            'ml=$(cat /sys/fs/cgroup/memory.max 2>/dev/null || cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null || echo max)',
+            "if [ \"$ml\" = max ] || [ \"$ml\" -gt $((1 << 50)) ] 2>/dev/null; then ram=$(free -g | awk '/^Mem:/{print $2}'); "
+            'else ram=$((ml >> 30)); fi',
+            f'N=$((cores - 1)); [ $N -gt $((ram / 3)) ] && N=$((ram / 3)); [ $N -gt {max(1, workers_per_instance)} ] '
+            f'&& N={max(1, workers_per_instance)}; [ $N -lt 1 ] && N=1',
+            'echo "procs $N cores $cores ram ${ram}G" > /workspace/procs.txt',
+        ]
+        base = _v2_process_id(run_id, worker_id, 0)
+        lines.append(
+            f'for i in $(seq 0 $((N-1))); do id={base}; log=selfplay_v2.log; '
+            f'[ $i -gt 0 ] && id={base}p$i && log=selfplay_v2_p$i.log; '
+            f'nohup python -u /workspace/scripts/selfplay_v2.py '
+            f'--worker-id $id --api-url {api_url} --model-dir /workspace/sp2/models '
+            f'--device cuda --concurrency {concurrency} '
+            f'--sims {simulations} --fast-sims {fast_sims or max(32, simulations // 5)} '
+            f'--full-prob {full_prob} --backend {backend} '
+            f'--random-opening-moves {random_opening_moves} '
+            f'--random-opening-fraction {random_opening_fraction} '
+            f'</dev/null >/workspace/$log 2>&1 & done'
+        )
         return '\n'.join(lines)
 
     for i in range(workers_per_instance):
@@ -267,6 +281,7 @@ class DistributedOrchestrator:
         max_hours: float = 0.0,
         boot_timeout: float = 900.0,
         min_inet_down: float = 100.0,
+        min_cpu_cores: float = 0.0,
         trainer_gpu: str = '',
         trainer_max_price: float = 0.4,
     ):
@@ -317,6 +332,7 @@ class DistributedOrchestrator:
         self.failed_machine_ids: set[int] = set(BLACKLISTED_MACHINE_IDS)
         self.boot_timeout = boot_timeout
         self.min_inet_down = min_inet_down
+        self.min_cpu_cores = min_cpu_cores
         self._load_blacklist()
 
     def find_offers(self) -> list[GPUOffer]:
@@ -339,6 +355,10 @@ class DistributedOrchestrator:
         # Slow links make the ~6 GB image pull the usual boot failure: require a
         # minimum download speed, and among similar prices prefer faster links.
         offers = [o for o in offers if o.inet_down >= self.min_inet_down]
+        # Self-play is CPU-bound per process with TensorRT: skip hosts with few cores
+        # (trainer offers are searched separately).
+        if self.min_cpu_cores > 0:
+            offers = [o for o in offers if o.cpu_cores >= self.min_cpu_cores]
         offers.sort(key=lambda o: (round(o.dph_total, 2), -o.inet_down))
 
         if not offers:
@@ -922,6 +942,8 @@ def main():
     parser.add_argument('--min-price', type=float, default=0.0,
                         help='Minimum $/hr for worker offers (cheapest hosts are often unreliable; '
                              'e.g. 0.08 for RTX 3060)')
+    parser.add_argument('--min-cpu-cores', type=float, default=0,
+                        help='Skip worker hosts with fewer effective CPU cores (TensorRT self-play wants ~8+)')
     parser.add_argument('--min-inet-down', type=float, default=100,
                         help='Minimum host download Mbps (slow links stall the image pull)')
     parser.add_argument('--boot-timeout', type=float, default=900,
@@ -1001,6 +1023,7 @@ def main():
         max_hours=args.max_hours,
         boot_timeout=args.boot_timeout,
         min_inet_down=args.min_inet_down,
+        min_cpu_cores=args.min_cpu_cores,
         trainer_gpu=args.trainer_gpu,
         trainer_max_price=args.trainer_max_price,
     )
