@@ -1158,20 +1158,23 @@ class DistributedTrainer:
         # Update best model path
         self.best_model_path = candidate_path
 
-        # Upload to API (only promoted models)
-        try:
-            self.api_client.upload_model(
-                version=version,
-                iteration=self.iteration,
-                file_path=candidate_path,
-                games_trained_on=metrics.get('games'),
-                final_loss=metrics.get('final_loss'),
-                final_policy_loss=metrics.get('final_policy_loss'),
-                final_value_loss=metrics.get('final_value_loss'),
-            )
-            print(f"[Trainer] Uploaded model: {version}")
-        except Exception as e:
-            print(f"[Trainer] Failed to upload model: {e}")
+        # Upload to API (retried: until it succeeds, workers keep playing the old model)
+        for attempt in range(4):
+            try:
+                self.api_client.upload_model(
+                    version=version,
+                    iteration=self.iteration,
+                    file_path=candidate_path,
+                    games_trained_on=metrics.get('games'),
+                    final_loss=metrics.get('final_loss'),
+                    final_policy_loss=metrics.get('final_policy_loss'),
+                    final_value_loss=metrics.get('final_value_loss'),
+                )
+                print(f"[Trainer] Uploaded model: {version}")
+                break
+            except Exception as e:
+                print(f"[Trainer] Failed to upload model (attempt {attempt + 1}/4): {e}")
+                time.sleep(5 * 2 ** attempt)
 
         return version
 
@@ -1185,7 +1188,8 @@ class DistributedTrainer:
 
         # Wait for API
         print(f"[Trainer] Waiting for API server...")
-        if not self.api_client.wait_for_server(timeout=120):
+        # Generous: a fleet of workers starting at once can keep a small server busy
+        if not self.api_client.wait_for_server(timeout=1800):
             print(f"[Trainer] API server not available")
             return
 
