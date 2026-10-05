@@ -139,3 +139,30 @@ Follow-up measurements (same day):
   at 800 sims. Duplicate leaves within a batch: 3.2% at 160 sims, 0.3% at 800 (minor).
 - Next levers: GPU throughput (TensorRT fp16/int8), and a batched C driver that makes
   1 leaf/game with ~8x more concurrent games cheap (quality gain mainly for quick searches).
+
+## 9. phoenix2 outcome and diagnosis (Oct 4-5 2026)
+
+phoenix2 (start = distilled v2 96x12 after the canary replay, LR 2e-4, reuse 2, 800/160 sims,
+25% full searches) ran 267 iterations / 476k games and **did not get stronger**. Gates vs the
+start (256 sims, 800 games, colour-corrected Elo = Bradley-Terry split of per-colour scores):
+iter 72 -3, iter 152 -22, iter 267 -21. Paired-colour gates are diluted (about 2/3 of opening
+pairs are won by the same colour), but the correction moves these numbers by only a few points.
+
+Offline replays of the 354k phoenix2 games (`scripts/distill/sherlock/replay.sbatch`), colour-
+corrected Elo vs the start at ~100k / 200k / 354k games:
+
+| setting | | | |
+|---|---|---|---|
+| LR 2e-4 (live) | +2 | -16 | -13 |
+| LR 5e-5 | +28 | 0 | +16 |
+| LR 2e-5 | 0 | +4 | +4 |
+| LR 2e-4 + EMA 0.999 | -77 | -61 | -29 (BN stats copied from the live net: implementation flaw) |
+
+The data pipeline was verified identical to the distillation pipeline (planes, policies, legal
+masks, value signs) on 200 games. Learning rate is not the problem. Open hypotheses: the
+distilled start is already at/above what these self-play targets teach; the game's colour bias
+(first player 65-79% in strong play) leaves value targets uninformative; network capacity.
+
+Related measurements: first-player edge grows with skill (beginner 52%, ~1500 rating 63%,
+superhuman 79%); moving second costs ~0.6 doublings of search at 32 sims, ~1.4 at 256, ~2.1 at
+1024; dominant opening 72 / mirror 298 (`scripts/distill/opening_analysis.py`).
