@@ -89,11 +89,26 @@ If your opponent's **most recent move** places one of their pieces **adjacent** 
 
 The ball reaches the goal row when passed to a piece on that row.
 
-## Draw Conditions
+## Repetition (official rule — NOT yet implemented)
 
-The game is drawn if:
-- The same board position occurs three times (threefold repetition)
-- An excessive number of moves occur without progress (200+ ply in our implementation)
+The original tournament rules (`docs/official/razzle_dazzle_rules_superdupergames.pdf`,
+Movement section) say:
+
+> "You may not move so as to recreate an earlier board position."
+
+So a move that recreates *any* earlier position is illegal (like positional superko in Go);
+it is not a threefold-repetition draw. Open questions before implementing: whether the
+"board position" includes the side to move and ineligibility markers, whether passes /
+end-turn count as moves, and what happens if a player has no legal move.
+
+Current engine behaviour (Python, C, TypeScript): no repetition check; a game is ended
+as a draw after 200 turns (never reached in practice — instead ~24% of strong self-play
+games contain a threefold repetition, Oct 2026).
+
+## Variant used in this implementation
+
+- All pieces start the game as ineligible receivers (not in the official rules; adopted
+  after opening-book analysis showed a strong opening pass).
 
 ## Move Notation
 
