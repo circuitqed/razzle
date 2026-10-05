@@ -45,6 +45,7 @@ class TrainingGame:
     visit_counts: list[dict[int, int]]
     model_version: Optional[str]
     created_at: str
+    search_values: Optional[list] = None   # root search value per move (side to move), if recorded
 
 
 def _write_atomic(response, dest_path: Path) -> None:
@@ -116,6 +117,7 @@ class TrainingAPIClient:
         result: float,
         visit_counts: list[dict[int, int]],
         model_version: Optional[str] = None,
+        search_values: Optional[list] = None,
     ) -> int:
         """
         Submit a completed training game.
@@ -145,6 +147,8 @@ class TrainingAPIClient:
                 "result": float(result),
                 "visit_counts": visit_counts_json,
                 "model_version": model_version,
+                **({"search_values": [None if v is None else float(v) for v in search_values]}
+                   if search_values is not None else {}),
             },
             timeout=self.timeout,
         )
@@ -249,6 +253,7 @@ class TrainingAPIClient:
                 visit_counts=visit_counts,
                 model_version=g.get("model_version"),
                 created_at=g["created_at"],
+                search_values=g.get("search_values"),
             ))
 
         return games, data["total_pending"]

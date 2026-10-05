@@ -131,6 +131,7 @@ def games_to_training_data(
     gamma: float = 1.0,           # Discount factor (1.0 = no discount)
     td_lambda: float = 1.0,       # TD blend (1.0 = pure MC)
     num_planes: Optional[int] = None,  # input planes; default from network config (7 if no network)
+    value_mix: float = 0.0,       # weight of the recorded search value in the value target
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, Optional[np.ndarray]]:
     """
     Convert API games to training arrays.
@@ -255,6 +256,15 @@ def games_to_training_data(
                     # Player 1 was to move; flip the result
                     value = -game.result
 
+            # Blend in the root search value recorded at this move (side-to-move
+            # perspective, like `value`). Outcome-only targets are the same for every
+            # position of a game, and the value head memorizes them (replays on stored
+            # games: held-out value MSE got worse while training MSE fell).
+            sv = game.search_values[i] if value_mix > 0 and getattr(game, 'search_values', None) \
+                and i < len(game.search_values) else None
+            if sv is not None:
+                value = value_mix * float(sv) + (1.0 - value_mix) * value
+
             # Clip to ±0.99 to avoid tanh saturation (tanh(±3) ≈ ±0.995)
             value = max(-0.99, min(0.99, value))
 
@@ -300,8 +310,10 @@ VALIDATION_POSITIONS = 16_384   # validation metrics use a random subsample of n
 def _convert_games_compact(args):
     """Worker process: games -> one packed buffer chunk + a small validation sample.
     Returning packed chunks avoids shipping (and holding) ~25 KB/position dense arrays."""
-    games, num_planes, val_n, seed = args
-    states, policies, values, legal, _ = games_to_training_data(games, network=None, num_planes=num_planes)
+    games, num_planes, val_n, seed = args[:4]
+    value_mix = args[4] if len(args) > 4 else 0.0
+    states, policies, values, legal, _ = games_to_training_data(games, network=None, num_planes=num_planes,
+                                                                value_mix=value_mix)
     n = len(states)
     pw = DistributedTrainer._policy_weights(policies, legal)
     pick = np.random.default_rng(seed).choice(n, size=min(val_n, n), replace=False) if n else np.zeros(0, int)
@@ -362,6 +374,7 @@ class DistributedTrainer:
         legacy_buffer: bool = False,
         reuse: float = 2.0,            # expected training samples per new position
         convert_workers: int = 0,      # processes for game conversion (0 = auto)
+        value_mix: float = 0.5,        # value target = mix * search value + (1 - mix) * outcome
         window_min: int = 250_000,     # replay window (positions)
         window_max: int = 3_000_000,
         window_fraction: float = 0.25,
@@ -397,6 +410,7 @@ class DistributedTrainer:
         self.legacy_buffer = legacy_buffer
         self.reuse = reuse
         self.convert_workers = convert_workers or max(1, min(16, (os.cpu_count() or 2) - 2))
+        self.value_mix = value_mix
         if not legacy_buffer and (gamma < 1.0 or td_lambda < 1.0):
             raise ValueError('the compact window trains on final outcomes; use gamma = td_lambda = 1 '
                              '(or --legacy-buffer for discounted / TD(lambda) targets)')
@@ -891,7 +905,7 @@ class DistributedTrainer:
         k = max(1, min(self.convert_workers, len(games) // 32 or 1))
         parts = [games[i::k] for i in range(k)]
         val_n = int(math.ceil(VALIDATION_POSITIONS / k))
-        jobs = [(part, planes, val_n, self.iteration * 1000 + i) for i, part in enumerate(parts)]
+        jobs = [(part, planes, val_n, self.iteration * 1000 + i, self.value_mix) for i, part in enumerate(parts)]
         if k == 1:
             results = [_convert_games_compact(jobs[0])]
         else:
@@ -1297,6 +1311,9 @@ def main():
                         help='Old dense replay buffer + epochs per batch (default: compact window + steps)')
     parser.add_argument('--reuse', type=float, default=2.0,
                         help='Training samples per new position (compact buffer; default 2)')
+    parser.add_argument('--value-mix', type=float, default=0.5,
+                        help='Value target = mix * recorded search value + (1 - mix) * game outcome '
+                             '(games without search values use the outcome only)')
     parser.add_argument('--convert-workers', type=int, default=0,
                         help='Processes converting games to positions (0 = min(16, cpus-2))')
     parser.add_argument('--window-min', type=int, default=250_000)
@@ -1352,6 +1369,7 @@ def main():
         legacy_buffer=args.legacy_buffer,
         reuse=args.reuse,
         convert_workers=args.convert_workers,
+        value_mix=args.value_mix,
         window_min=args.window_min,
         window_max=args.window_max,
         window_fraction=args.window_fraction,

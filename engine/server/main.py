@@ -393,6 +393,7 @@ class SubmitGameRequest(BaseModel):
     result: float  # 1.0 (P0 wins), -1.0 (P1 wins), 0.0 (draw)
     visit_counts: list[dict[str, int]]  # Sparse MCTS visit counts per position
     model_version: Optional[str] = None
+    search_values: Optional[list[Optional[float]]] = None  # root search value per move (side to move)
 
 
 class SubmitGameResponse(BaseModel):
@@ -410,6 +411,7 @@ class TrainingGameData(BaseModel):
     visit_counts: list[dict[str, int]]
     model_version: Optional[str]
     created_at: str
+    search_values: Optional[list[Optional[float]]] = None
 
 
 class FetchGamesResponse(BaseModel):
@@ -2608,6 +2610,7 @@ async def submit_training_game(request: SubmitGameRequest, _=Depends(require_tra
         result=request.result,
         visit_counts=visit_counts,
         model_version=request.model_version,
+        search_values=request.search_values,
     )
 
     return SubmitGameResponse(id=game_id, status="accepted")
@@ -2645,6 +2648,7 @@ async def fetch_training_games(
             visit_counts=[{str(k): v for k, v in vc.items()} for vc in g["visit_counts"]],
             model_version=g["model_version"],
             created_at=g["created_at"],
+            search_values=g.get("search_values"),
         )
         for g in games_data
     ]

@@ -36,7 +36,7 @@ def load_games(path):
         g = json.loads(line)
         out.append(TrainingGame(id=g.get('id', i), worker_id='replay', moves=g['moves'], result=g['result'],
                                 visit_counts=[{int(k): v for k, v in d.items()} for d in g['visit_counts']],
-                                model_version=g.get('model'), created_at=''))
+                                model_version=g.get('model'), created_at='', search_values=g.get('search_values')))
     return out
 
 
@@ -54,6 +54,8 @@ def main():
     ap.add_argument('--value-teacher', default='',
                     help='checkpoint whose value prediction is mixed into the value target '
                          '(distillation-style regularization against memorizing game outcomes)')
+    ap.add_argument('--search-value-mix', type=float, default=0.5,
+                    help='weight of the recorded search value in the value target (games that have it)')
     ap.add_argument('--value-mix', type=float, default=0.5,
                     help='value target = mix * teacher value + (1 - mix) * game outcome')
     ap.add_argument('--window-min', type=int, default=250_000)
@@ -116,7 +118,7 @@ def main():
     pool = mp.get_context('spawn').Pool(args.workers) if args.workers > 1 else None
     for it, chunk in enumerate(chunks):
         k = max(1, args.workers)
-        jobs = [(chunk[i::k], planes, 1, i) for i in range(k)]      # same conversion as the trainer
+        jobs = [(chunk[i::k], planes, 1, i, args.search_value_mix) for i in range(k)]   # trainer's conversion
         results = pool.map(T._convert_games_compact, jobs) if pool else [T._convert_games_compact(jobs[0])]
         n_new = 0
         for r in results:

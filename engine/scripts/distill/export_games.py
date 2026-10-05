@@ -40,8 +40,11 @@ with gzip.open(args.out, 'wt', compresslevel=6) as f:
         if compressed:
             gid, model, blob, result = row
             d = json.loads(zlib.decompress(blob))
-            f.write(json.dumps({"id": gid, "model": model, "moves": d["moves"], "result": result,
-                                "visit_counts": d["visit_counts"]}) + '\n')
+            rec = {"id": gid, "model": model, "moves": d["moves"], "result": result,
+                   "visit_counts": d["visit_counts"]}
+            if d.get("search_values") is not None:
+                rec["search_values"] = d["search_values"]
+            f.write(json.dumps(rec) + '\n')
         else:
             gid, model, moves, result, vc = row
             # legacy columns are JSON text already; splice without re-parsing

@@ -62,6 +62,12 @@ class SelfPlayGame:
         _lib.razzle_state_init(ctypes.byref(self.cs))
         self.moves: list[int] = []
         self.visit_counts: list[dict[int, int]] = []
+        # Root search value per move, from the side to move's perspective (visit-weighted
+        # mean child Q; +1 for an immediate win; None for random-opening moves). Used as a
+        # value target alongside the game outcome, which alone gets memorized per game.
+        self.search_values: list[float | None] = []
+        self._pending_value: float | None = None
+        self._root_q: float | None = None
         self.tree = None
         self.capacity = 0
         self.random_moves = args.random_opening_moves if rng.random() < args.random_opening_fraction else 0
@@ -141,7 +147,7 @@ class SelfPlayGame:
         win = _lib.razzle_mcts_check_immediate_win(self.tree)
         if win != -2:
             self.finished_move = win
-            self._record({win: 1} if self.turn_full else {})
+            self._record({win: 1} if self.turn_full else {}, 1.0)
             return
         if self.turn_full and self.args.dirichlet_eps > 0:
             tc = self.tree.contents
@@ -172,14 +178,16 @@ class SelfPlayGame:
         visits = (ctypes.c_int * 256)()
         a2 = (ctypes.c_float * 256)()
         a3 = (ctypes.c_float * 256)()
-        n = _lib.razzle_mcts_get_root_children(self.tree, actions, visits, a2, a3)
+        n = _lib.razzle_mcts_get_root_children(self.tree, actions, visits, a2, a3)   # a2 = Q (root player)
+        tot = sum(visits[i] for i in range(n))
+        self._root_q = sum(visits[i] * a2[i] for i in range(n)) / tot if tot > 0 else None
         return {actions[i]: visits[i] for i in range(n) if visits[i] > 0}
 
     def _finish(self):
         vc = self._root_visits_dict()
         if not vc:
             self.finished_move = self.rng.choice(legal_moves(self.cs))
-            self._record({})
+            self._record({}, None)
             return
         moves = list(vc)
         counts = np.array([vc[m] for m in moves], dtype=np.float64)
@@ -187,19 +195,22 @@ class SelfPlayGame:
             self.finished_move = moves[int(np.random.choice(len(moves), p=counts / counts.sum()))]
         else:
             self.finished_move = moves[int(np.argmax(counts))]
-        self._record(vc if self.turn_full else {})
+        self._record(vc if self.turn_full else {}, self._root_q)
 
-    def _record(self, vc):
+    def _record(self, vc, value=None):
         self._pending_record = vc
+        self._pending_value = None if value is None else round(float(value), 4)
 
     def play_random_move(self):
         lm = legal_moves(self.cs)
         m = self.rng.choice(lm)
         self.visit_counts.append({x: 1 for x in lm})     # uniform -> value-only target
+        self.search_values.append(None)
         self._apply(m, reuse=False)
 
     def commit_move(self):
         self.visit_counts.append(self._pending_record)
+        self.search_values.append(self._pending_value)
         self._apply(self.finished_move, reuse=True)
 
     def _apply(self, move: int, reuse: bool):
@@ -263,7 +274,8 @@ class Submitter:
                     self.client.submit_game(worker_id=self.worker_id, moves=rec['moves'], result=rec['result'],
                                             visit_counts=[{int(k): v for k, v in d.items()}
                                                           for d in rec['visit_counts']],
-                                            model_version=rec['model'])
+                                            model_version=rec['model'],
+                                            search_values=rec.get('search_values'))
                     self.sent += 1
                     delay = 1.0
                     break
@@ -434,7 +446,8 @@ def main():
             if g.over():
                 g.free()
                 record = dict(worker_id=args.worker_id, model=source.version, moves=g.moves,
-                              result=g.result(), visit_counts=[{str(k): v for k, v in d.items()} for d in g.visit_counts])
+                              result=g.result(), visit_counts=[{str(k): v for k, v in d.items()} for d in g.visit_counts],
+                              search_values=g.search_values)
                 if submitter:
                     submitter.put(record)
                 if out:

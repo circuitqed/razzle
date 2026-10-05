@@ -77,13 +77,17 @@ def _run_name(model_version: Optional[str]) -> str:
     return ""
 
 
-def _pack_game(moves: list, visit_counts: list) -> bytes:
-    return zlib.compress(json.dumps({"moves": moves, "visit_counts": visit_counts}).encode(), 6)
+def _pack_game(moves: list, visit_counts: list, search_values: Optional[list] = None) -> bytes:
+    d = {"moves": moves, "visit_counts": visit_counts}
+    if search_values is not None:
+        d["search_values"] = search_values
+    return zlib.compress(json.dumps(d).encode(), 6)
 
 
-def _unpack_game(blob: bytes) -> tuple[list, list]:
+def _unpack_game(blob: bytes) -> tuple[list, list, Optional[list]]:
+    """(moves, visit_counts, search_values); search_values is None for older games."""
     d = json.loads(zlib.decompress(blob))
-    return d["moves"], d["visit_counts"]
+    return d["moves"], d["visit_counts"], d.get("search_values")
 
 
 def _archive_game(record: dict) -> None:
@@ -1677,10 +1681,14 @@ def save_training_game(
     result: float,
     visit_counts: list[dict[int, int]],
     model_version: Optional[str] = None,
-    db_path: Path = None
+    db_path: Path = None,
+    search_values: Optional[list] = None,
 ) -> int:
     """
     Save a training game from a self-play worker.
+
+    search_values: per-move root search value from the side to move (None entries for
+    unsearched moves); used by the trainer as a value target alongside the outcome.
 
     Returns the game ID.
     """
@@ -1694,13 +1702,14 @@ def save_training_game(
             INSERT INTO selfplay_games (worker_id, model_version, run_name, result, num_moves, status, created_at, data)
             VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)
         """, (worker_id, model_version, _run_name(model_version), result, len(moves), now,
-              _pack_game(moves, visit_counts)))
+              _pack_game(moves, visit_counts, search_values)))
         conn.commit()
         game_id = cursor.lastrowid
 
     try:
         _archive_game({"id": game_id, "worker_id": worker_id, "model": model_version, "created_at": now,
-                       "moves": moves, "result": result, "visit_counts": visit_counts})
+                       "moves": moves, "result": result, "visit_counts": visit_counts,
+                       **({"search_values": search_values} if search_values is not None else {})})
     except Exception as e:   # never lose the DB write over an archive hiccup
         print(f"[persistence] training archive append failed: {e}")
     return game_id
@@ -1741,13 +1750,14 @@ def get_pending_training_games(
         games = []
         game_ids = []
         for row in rows:
-            moves, visit_counts = _unpack_game(row["data"])
+            moves, visit_counts, search_values = _unpack_game(row["data"])
             games.append({
                 "id": row["id"],
                 "worker_id": row["worker_id"],
                 "moves": moves,
                 "result": row["result"],
                 "visit_counts": visit_counts,
+                "search_values": search_values,
                 "model_version": row["model_version"],
                 "created_at": row["created_at"],
             })
@@ -1794,13 +1804,14 @@ def get_all_training_games(
 
         games = []
         for row in rows:
-            moves, visit_counts = _unpack_game(row["data"])
+            moves, visit_counts, search_values = _unpack_game(row["data"])
             games.append({
                 "id": row["id"],
                 "worker_id": row["worker_id"],
                 "moves": moves,
                 "result": row["result"],
                 "visit_counts": visit_counts,
+                "search_values": search_values,
                 "model_version": row["model_version"],
                 "created_at": row["created_at"],
             })
