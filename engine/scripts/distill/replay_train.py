@@ -50,6 +50,12 @@ def main():
     ap.add_argument('--batch-size', type=int, default=1024)
     ap.add_argument('--reuse', type=float, default=2.0)
     ap.add_argument('--value-weight', type=float, default=1.5)
+    ap.add_argument('--policy-weight', type=float, default=1.0)
+    ap.add_argument('--value-teacher', default='',
+                    help='checkpoint whose value prediction is mixed into the value target '
+                         '(distillation-style regularization against memorizing game outcomes)')
+    ap.add_argument('--value-mix', type=float, default=0.5,
+                    help='value target = mix * teacher value + (1 - mix) * game outcome')
     ap.add_argument('--window-min', type=int, default=250_000)
     ap.add_argument('--checkpoints', type=int, default=4, help='save this many evenly spaced checkpoints')
     ap.add_argument('--ema', type=float, default=0.0,
@@ -67,6 +73,7 @@ def main():
     planes = net.config.num_input_planes
     trainer = NetworkTrainer(net, TrainingConfig(batch_size=args.batch_size, learning_rate=args.lr,
                                                  device=args.device, value_weight=args.value_weight,
+                                                 policy_weight=args.policy_weight,
                                                  value_weight_quartic=0.0))
     buf = CompactReplayBuffer(min_positions=args.window_min)
     rng = np.random.default_rng(0)
@@ -91,6 +98,20 @@ def main():
     save_at = {round(len(chunks) * (k + 1) / args.checkpoints) - 1 for k in range(args.checkpoints)}
     t0 = time.time()
     log = open(out / 'log.jsonl', 'w')
+    teacher = None
+    if args.value_teacher:
+        teacher = RazzleNet.load(args.value_teacher, device=args.device).to(args.device).eval()
+
+    def mix_teacher_values(chunk):
+        n = len(chunk['value'])
+        st = np.unpackbits(chunk['packed'], axis=1)[:, :planes * 56].reshape(n, planes, 8, 7).astype(np.float32)
+        tv = np.empty(n, np.float32)
+        with torch.no_grad():
+            for i in range(0, n, 8192):
+                _, v, _ = teacher(torch.from_numpy(st[i:i + 8192]).to(args.device))
+                tv[i:i + 8192] = v.squeeze(1).float().cpu().numpy()
+        chunk['value'] = (args.value_mix * tv + (1 - args.value_mix) * chunk['value']).astype(np.float32)
+
     import multiprocessing as mp
     pool = mp.get_context('spawn').Pool(args.workers) if args.workers > 1 else None
     for it, chunk in enumerate(chunks):
@@ -99,6 +120,8 @@ def main():
         results = pool.map(T._convert_games_compact, jobs) if pool else [T._convert_games_compact(jobs[0])]
         n_new = 0
         for r in results:
+            if teacher is not None:
+                mix_teacher_values(r[0])
             buf.add_chunk(r[0])
             n_new += r[2]
         steps = max(1, int(np.ceil(n_new * args.reuse / args.batch_size)))
