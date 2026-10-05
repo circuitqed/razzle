@@ -40,6 +40,49 @@ from razzle_fast.wrapper import _lib, CRazzleState, _np_to_cfloat_ptr  # noqa: E
 _lib.razzle_state_extra_planes.argtypes = [ctypes.POINTER(CRazzleState), ctypes.POINTER(ctypes.c_float)]
 _lib.razzle_state_extra_planes.restype = None
 EXTRA = 2 * 8 * 7   # v2 planes 7-8 (last knight destination, forced pass)
+
+# --- Repetition rule (off unless enabled: --repetition-draw / set REPETITION_DRAW) ----------
+# Threefold repetition of the full position at the start of a turn (pieces, balls,
+# ineligibility, side to move, last knight destination) is a draw. A turn with its pass
+# chain is one move: mid-pass states never count. Searches see the game history so
+# repetition draws inside the tree are scored as draws.
+REPETITION_DRAW = False
+_lib.razzle_state_hash.argtypes = [ctypes.POINTER(CRazzleState)]
+_lib.razzle_state_hash.restype = ctypes.c_uint64
+_lib.razzle_mcts_set_history.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint64), ctypes.c_int, ctypes.c_int]
+_lib.razzle_mcts_set_history.restype = ctypes.c_int
+
+
+def state_hash(cs) -> int:
+    return int(_lib.razzle_state_hash(ctypes.byref(cs)))
+
+
+class RepetitionTracker:
+    """Turn-start position hashes of one game, in order. Call add() after every action;
+    mid-pass states are ignored."""
+
+    def __init__(self, cs):
+        self.hist: list[int] = []
+        self.counts: dict[int, int] = {}
+        self.add(cs)
+
+    def add(self, cs) -> None:
+        if cs.has_passed:
+            return
+        h = state_hash(cs)
+        self.hist.append(h)
+        self.counts[h] = self.counts.get(h, 0) + 1
+
+    def is_draw(self) -> bool:
+        return bool(self.hist) and self.counts[self.hist[-1]] >= 3
+
+
+def set_tree_history(tree, hist: list[int], root_is_turn_start: bool = True) -> None:
+    """Give a search tree the turn-start positions before its root. hist ends with the
+    latest turn start, which is the root itself unless the root is mid-pass."""
+    prior = hist[:-1] if root_is_turn_start else hist
+    arr = (ctypes.c_uint64 * max(1, len(prior)))(*prior)
+    _lib.razzle_mcts_set_history(ctypes.cast(tree, ctypes.c_void_p), arr, len(prior), 1)
 _HAS_LEAF_INFO = hasattr(_lib, 'razzle_mcts_leaf_info')   # absent in stale prebuilt .so files
 if _HAS_LEAF_INFO:
     _lib.razzle_mcts_leaf_info.argtypes = [ctypes.c_void_p, ctypes.c_int,
@@ -86,12 +129,14 @@ def legal_moves(cs: CRazzleState) -> list[int]:
 class Search:
     """One in-progress MCTS for the side to move in one game."""
 
-    def __init__(self, cs: CRazzleState, sims: int, leaf_batch: int):
+    def __init__(self, cs: CRazzleState, sims: int, leaf_batch: int, history: list[int] | None = None):
         self.sims = sims
         self.leaf_batch = max(1, min(leaf_batch, sims))
         self.tree = _lib.razzle_mcts_create(ctypes.byref(cs), max(4096, sims * 48), self.leaf_batch, 256)
         if not self.tree:
             raise MemoryError('tree alloc failed')
+        if history is not None:
+            set_tree_history(self.tree, history, root_is_turn_start=not cs.has_passed)
         self.root_cs = cs
         self.expanded = False
         self.done_sims = 0
@@ -154,14 +199,17 @@ class Game:
         self.pair = pair
         self.cs = CRazzleState()
         _lib.razzle_state_init(ctypes.byref(self.cs))
+        self.rep = RepetitionTracker(self.cs)
         for m in opening:
             _lib.razzle_state_apply_move(ctypes.byref(self.cs), m)
+            self.rep.add(self.cs)
         self.a_is_p0 = a_is_p0
         self.moves = 0
         self.search: Search | None = None
 
     def over(self) -> bool:
-        return bool(_lib.razzle_state_is_terminal(ctypes.byref(self.cs))) or self.moves >= 300
+        return (bool(_lib.razzle_state_is_terminal(ctypes.byref(self.cs))) or self.moves >= 300
+                or (REPETITION_DRAW and self.rep.is_draw()))
 
     def score_for_a(self) -> float:
         w = _lib.razzle_state_get_winner(ctypes.byref(self.cs))
@@ -408,6 +456,8 @@ def main():
     ap.add_argument('--games', type=int, default=400, help='rounded up to an even number (paired)')
     ap.add_argument('--concurrency', type=int, default=128)
     ap.add_argument('--leaf-batch', type=int, default=8)
+    ap.add_argument('--repetition-draw', action='store_true',
+                    help='rule variant: threefold repetition of the full position is a draw')
     ap.add_argument('--colours', choices=['both', 'a-first', 'a-second'], default='both',
                     help='both: each opening twice with colours swapped; a-first / a-second: A always '
                          'moves first / second (handicap tests: how much stronger must the second player be?)')
@@ -420,6 +470,8 @@ def main():
     ap.add_argument('--value-scale-a', type=float, default=1.0, help='diagnostic: multiply A value outputs')
     ap.add_argument('--value-scale-b', type=float, default=1.0)
     args = ap.parse_args()
+    global REPETITION_DRAW
+    REPETITION_DRAW = args.repetition_draw
 
     dev = torch.device(args.device)
     if dev.type == 'cuda':
@@ -463,7 +515,7 @@ def main():
             if g.search is None:
                 sims = sims_a if g.mover_is_a() else sims_b
                 lb = (args.leaf_batch_a if g.mover_is_a() else args.leaf_batch_b) or args.leaf_batch
-                g.search = Search(g.cs, sims, lb)
+                g.search = Search(g.cs, sims, lb, g.rep.hist if REPETITION_DRAW else None)
             still.append(g)
         active = still
 
@@ -493,6 +545,7 @@ def main():
         for g in active:
             if g.search is not None and g.search.finished():
                 _lib.razzle_state_apply_move(ctypes.byref(g.cs), g.search.result_move)
+                g.rep.add(g.cs)
                 g.search.free()
                 g.search = None
                 g.moves += 1
@@ -502,6 +555,7 @@ def main():
     se = math.sqrt(max(s * (1 - s), 1e-9) / n)
     elo = lambda p: -400 * math.log10(1 / min(max(p, 1e-3), 1 - 1e-3) - 1)
     res = dict(a=args.a, b=args.b, sims_a=sims_a, sims_b=sims_b, games=n, colours=args.colours,
+               repetition_draw=args.repetition_draw,
                leaf_batch_a=args.leaf_batch_a or args.leaf_batch, leaf_batch_b=args.leaf_batch_b or args.leaf_batch,
                value_scale_a=args.value_scale_a, value_scale_b=args.value_scale_b,
                score_a=round(s, 4), ci95=round(1.96 * se, 4),

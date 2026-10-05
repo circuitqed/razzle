@@ -17,6 +17,12 @@ from .bitboard import (
 )
 from .symmetry import rotate_tensor_180
 
+# Rule variant: threefold repetition of a turn-start position is a draw. Off by default
+# (set REPETITION_DRAW = True before creating games). A turn with its pass chain is one
+# move, so only positions at the start of a turn are counted; the position is the full
+# state (pieces, balls, ineligibility, side to move, last knight destination).
+REPETITION_DRAW = False
+
 
 @dataclass(frozen=False)
 class GameState:
@@ -46,11 +52,24 @@ class GameState:
     last_knight_dst: int = -1
     ply: int = 0
     history: list = field(default_factory=list)
+    # Turn-start position -> occurrences, when the repetition rule is on (else None)
+    position_counts: Optional[dict] = None
 
     @classmethod
     def new_game(cls) -> GameState:
         """Create a new game in the starting position."""
-        return cls()
+        s = cls()
+        if REPETITION_DRAW:
+            s.position_counts = {s.position_key(): 1}
+        return s
+
+    def position_key(self) -> tuple:
+        """The repetition rule's notion of a position (see REPETITION_DRAW)."""
+        return (self.pieces, self.balls, self.current_player, self.touched_mask, self.last_knight_dst)
+
+    def is_repetition_draw(self) -> bool:
+        return (self.position_counts is not None and not self.has_passed
+                and self.position_counts.get(self.position_key(), 0) >= 3)
 
     @property
     def my_pieces(self) -> int:
@@ -93,6 +112,8 @@ class GameState:
         # Move limit: current player loses if exceeded
         if self.ply > 200:
             return True
+        if self.is_repetition_draw():
+            return True
         return False
 
     def get_winner(self) -> Optional[int]:
@@ -123,7 +144,8 @@ class GameState:
             has_passed=self.has_passed,
             last_knight_dst=self.last_knight_dst,
             ply=self.ply,
-            history=[]  # Fresh history for copy
+            history=[],  # Fresh history for copy
+            position_counts=dict(self.position_counts) if self.position_counts is not None else None,
         )
 
     def apply_move(self, move: int) -> None:
@@ -155,6 +177,7 @@ class GameState:
             self.has_passed = False
             self.last_knight_dst = -1  # No knight move this turn (was a pass)
             self.ply += 1
+            self._count_position(+1)
             return
 
         src = move // NUM_SQUARES
@@ -204,11 +227,24 @@ class GameState:
             self.has_passed = False
             self.ply += 1
 
+        self._count_position(+1)      # no-op mid-pass (has_passed) or with the rule off
+
+    def _count_position(self, delta: int) -> None:
+        if self.position_counts is None or self.has_passed:
+            return
+        k = self.position_key()
+        n = self.position_counts.get(k, 0) + delta
+        if n > 0:
+            self.position_counts[k] = n
+        else:
+            self.position_counts.pop(k, None)
+
     def undo_move(self) -> None:
         """Undo the last move."""
         if not self.history:
             raise ValueError("No moves to undo")
 
+        self._count_position(-1)
         entry = self.history.pop()
         (_, self.pieces, self.balls, self.current_player, self.touched_mask,
          self.has_passed, self.last_knight_dst, self.ply) = entry

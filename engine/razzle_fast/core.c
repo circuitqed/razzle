@@ -69,6 +69,11 @@ typedef struct {
     int32_t  *leaf_indices;
     int32_t   max_batch;
     int32_t   max_depth;
+    /* Repetition rule (see core.h) */
+    uint64_t *history;
+    int32_t   history_len;
+    int32_t   history_cap;
+    int32_t   repetition_draw;
 } MCTSTree;
 
 /* ============================================================
@@ -207,6 +212,25 @@ int razzle_state_get_winner(const RazzleState *s) {
     if (s->balls[1] & ROW1_MASK) return 1;
     if (s->ply > 200) return 1 - s->current_player;
     return -1;
+}
+
+static inline uint64_t mix64(uint64_t x) {
+    x += 0x9e3779b97f4a7c15ULL;
+    x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
+    return x ^ (x >> 31);
+}
+
+uint64_t razzle_state_hash(const RazzleState *s) {
+    uint64_t h = mix64(s->pieces[0]);
+    h = mix64(h ^ s->pieces[1]);
+    h = mix64(h ^ s->balls[0]);
+    h = mix64(h ^ s->balls[1]);
+    h = mix64(h ^ s->touched_mask);
+    h = mix64(h ^ ((uint64_t)(s->current_player & 1)
+                   | ((uint64_t)(s->has_passed & 1) << 1)
+                   | ((uint64_t)(s->last_knight_dst + 1) << 2)));
+    return h;
 }
 
 float razzle_state_get_result(const RazzleState *s, int player) {
@@ -484,7 +508,34 @@ MCTSTree *razzle_mcts_create(const RazzleState *root_state, int max_nodes,
     razzle_state_copy(root_state, &tree->nodes[tree->root].state);
     tree->nodes[tree->root].is_terminal = razzle_state_is_terminal(root_state);
 
+    tree->history = NULL;
+    tree->history_len = 0;
+    tree->history_cap = 0;
+    tree->repetition_draw = 0;
     return tree;
+}
+
+int razzle_mcts_set_history(MCTSTree *tree, const uint64_t *hashes, int n, int repetition_draw) {
+    if (n > tree->history_cap) {
+        uint64_t *h = (uint64_t *)realloc(tree->history, (size_t)n * sizeof(uint64_t));
+        if (!h) return -1;
+        tree->history = h;
+        tree->history_cap = n;
+    }
+    if (n > 0) memcpy(tree->history, hashes, (size_t)n * sizeof(uint64_t));
+    tree->history_len = n;
+    tree->repetition_draw = repetition_draw;
+    return 0;
+}
+
+/* Earlier occurrences of position h: game history + the search path above the leaf. */
+static int repetition_count(const MCTSTree *tree, const int *path, int path_len, uint64_t h) {
+    int c = 0, i;
+    for (i = 0; i < tree->history_len; i++)
+        c += tree->history[i] == h;
+    for (i = 0; i < path_len - 1; i++)
+        c += razzle_state_hash(&tree->nodes[path[i]].state) == h;
+    return c;
 }
 
 void razzle_mcts_free(MCTSTree *tree) {
@@ -493,6 +544,7 @@ void razzle_mcts_free(MCTSTree *tree) {
     free(tree->path_buf);
     free(tree->path_lens);
     free(tree->leaf_indices);
+    free(tree->history);
     free(tree);
 }
 
@@ -646,6 +698,15 @@ int razzle_mcts_select_leaves(MCTSTree *tree, int batch_size, int vloss,
                 path[path_len++] = node_idx;
             }
         }
+
+        /* Repetition rule: an unexpanded leaf at the start of a turn whose position already
+         * occurred twice is a terminal draw. Only turn-start positions count (a turn with
+         * its passes is one move; mid-pass states are not game positions). In a tree the
+         * path to a node is fixed, so this is permanent. */
+        if (tree->repetition_draw && !node->is_terminal && !node->is_expanded && path_len > 1 &&
+                !node->state.has_passed &&
+                repetition_count(tree, path, path_len, razzle_state_hash(&node->state)) >= 2)
+            node->is_terminal = 1;
 
         /* Apply virtual loss to leaf */
         node->virtual_loss += vloss;

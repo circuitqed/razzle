@@ -31,6 +31,10 @@ int      razzle_state_get_legal_moves(const RazzleState *s, int *moves_out);
 void     razzle_state_to_tensor(const RazzleState *s, float *out);
 void     razzle_state_extra_planes(const RazzleState *s, float *out);  /* v2 planes 7-8 */
 int      razzle_state_equals(const RazzleState *a, const RazzleState *b);
+/* 64-bit hash of the full position (everything but ply): pieces, balls, ineligibility,
+ * side to move, last knight destination (forced-pass trigger), mid-pass flag. Repetition
+ * only compares turn-start positions (mid-pass flag 0). */
+uint64_t razzle_state_hash(const RazzleState *s);
 
 /* ============================================================
  * MCTS Tree
@@ -60,9 +64,20 @@ typedef struct {
     int32_t  *leaf_indices;
     int32_t   max_batch;
     int32_t   max_depth;
+    /* Repetition rule (appended: earlier fields keep their offsets for ctypes mirrors).
+     * history = hashes of the turn-start positions before the root. With
+     * repetition_draw set, a turn-start leaf whose position already occurred twice
+     * (history + search path) is a terminal draw. Mid-pass states never count. */
+    uint64_t *history;
+    int32_t   history_len;
+    int32_t   history_cap;
+    int32_t   repetition_draw;
 } MCTSTree;
 
 MCTSTree *razzle_mcts_create(const RazzleState *root_state, int max_nodes, int max_batch, int max_depth);
+/* Set the game history (hashes of positions before the root) and the repetition rule
+ * (0 = none, 1 = threefold repetition is a draw). Call again after razzle_mcts_reroot. */
+int       razzle_mcts_set_history(MCTSTree *tree, const uint64_t *hashes, int n, int repetition_draw);
 void      razzle_mcts_free(MCTSTree *tree);
 
 void razzle_mcts_expand_root(MCTSTree *tree, const float *policy);
