@@ -107,8 +107,8 @@ games contain a threefold repetition, Oct 2026).
 
 ## Variant used in this implementation
 
-- All pieces start the game as ineligible receivers (not in the official rules; adopted
-  after opening-book analysis showed a strong opening pass).
+- All pieces start the game as ineligible receivers (not in the official rules; a change
+  adopted after the earlier opening-book analysis).
 
 ## Move Notation
 
