@@ -194,6 +194,153 @@ class Search:
         return actions[best]
 
 
+_lib.razzle_mcts_select_leaves_forced.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_float,
+                                                  ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_int32)]
+_lib.razzle_mcts_select_leaves_forced.restype = ctypes.c_int
+
+
+def root_children(tree):
+    """(actions, visits, q from the root player's perspective, priors) of the root's children."""
+    acts = (ctypes.c_int * 256)()
+    vis = (ctypes.c_int * 256)()
+    qs = (ctypes.c_float * 256)()
+    pri = (ctypes.c_float * 256)()
+    n = _lib.razzle_mcts_get_root_children(tree, acts, vis, qs, pri)    # C order: actions, visits, values, priors
+    return (np.array(acts[:n]), np.array(vis[:n], dtype=np.float64),
+            np.array(qs[:n], dtype=np.float64), np.array(pri[:n], dtype=np.float64))
+
+
+class GumbelSearch:
+    """Gumbel root search (Danihelka et al., ICLR 2022), same interface as Search.
+
+    After the root is evaluated: take m candidate moves by Gumbel-top-k on the prior
+    (noise=False: no Gumbel noise, i.e. the prior's top m), split the simulation budget
+    over ceil(log2 m) rounds of sequential halving -- each round gives every remaining
+    candidate the same number of simulations (forced at the root, PUCT below), then
+    keeps the better half by g + logit + sigma(q) -- and play the best survivor.
+    sigma(q) = (c_visit + max_N) * c_scale * q01, q01 = q min-max rescaled over visited
+    root children (as in DeepMind's mctx).
+    """
+
+    NO_FORCE = -9999
+
+    def __init__(self, cs, sims: int, leaf_batch: int, m: int = 16, noise: bool = False,
+                 history: list[int] | None = None, rng=None, c_visit: float = 50.0, c_scale: float = 0.1):
+        self.sims = max(1, sims)
+        self.leaf_batch = max(1, min(leaf_batch, self.sims))
+        self.m, self.noise = m, noise
+        self.rng = rng or np.random.default_rng()
+        self.c_visit, self.c_scale = c_visit, c_scale
+        self.tree = _lib.razzle_mcts_create(ctypes.byref(cs), max(4096, self.sims * 48), self.leaf_batch, 256)
+        if not self.tree:
+            raise MemoryError('tree alloc failed')
+        if history is not None:
+            set_tree_history(self.tree, history, root_is_turn_start=not cs.has_passed)
+        self.root_cs = cs
+        self.expanded = False
+        self.done_sims = 0
+        self.buf = np.zeros(self.leaf_batch * TENSOR, dtype=np.float32)
+        self.forced = (ctypes.c_int32 * self.leaf_batch)()
+        self.pending = 0
+        self.result_move: int | None = None
+        self.cand: list[int] = []
+        self.todo: dict[int, int] = {}
+
+    def free(self):
+        if self.tree:
+            _lib.razzle_mcts_free(self.tree)
+            self.tree = None
+
+    def finished(self) -> bool:
+        return self.result_move is not None
+
+    # -- sequential halving ---------------------------------------------------
+    def _setup(self):
+        acts, vis, q, pri = root_children(self.tree)
+        if len(acts) == 0:
+            self.result_move = -1
+            return
+        logit = np.log(np.maximum(pri, 1e-12))
+        g = self.rng.gumbel(size=len(acts)) if self.noise else np.zeros(len(acts))
+        self.base = {int(a): float(gg + lg) for a, gg, lg in zip(acts, g, logit)}
+        k = max(1, min(self.m, len(acts), self.sims))
+        order = np.argsort(-(g + logit))[:k]
+        self.cand = [int(acts[i]) for i in order]
+        if len(self.cand) == 1:
+            self.result_move = self.cand[0]
+            return
+        self.phases_left = max(1, int(math.ceil(math.log2(len(self.cand)))))
+        self._new_phase()
+
+    def _new_phase(self):
+        per = max(1, (self.sims - self.done_sims) // (self.phases_left * len(self.cand)))
+        self.todo = {a: per for a in self.cand}
+
+    def _scores(self) -> dict[int, float]:
+        acts, vis, q, _ = root_children(self.tree)
+        visited = vis > 0
+        if visited.any():
+            lo, hi = q[visited].min(), q[visited].max()
+            q01 = (q - lo) / (hi - lo) if hi > lo else np.full_like(q, 0.5)
+        else:
+            q01 = np.full_like(q, 0.5)
+        sigma = (self.c_visit + (vis.max() if len(vis) else 0)) * self.c_scale * q01
+        sc = {int(a): s for a, s in zip(acts, sigma)}
+        return {a: self.base[a] + sc.get(a, 0.0) for a in self.cand}
+
+    def _halve(self):
+        sc = self._scores()
+        self.phases_left -= 1
+        keep = max(1, (len(self.cand) + 1) // 2)
+        self.cand = sorted(self.cand, key=lambda a: -sc[a])[:keep]
+        if len(self.cand) == 1 or self.done_sims >= self.sims or self.phases_left <= 0:
+            self.result_move = max(self.cand, key=lambda a: sc[a])
+        else:
+            self._new_phase()
+
+    # -- search interface -------------------------------------------------------
+    def request(self):
+        if not self.expanded:
+            t = np.zeros(TENSOR, dtype=np.float32)
+            _lib.razzle_state_to_tensor(ctypes.byref(self.root_cs), _np_to_cfloat_ptr(t))
+            self.pending = -1
+            return t[None], [self.root_cs.current_player], extra_planes(self.root_cs)[None]
+        while self.result_move is None:
+            a = next((x for x in self.cand if self.todo.get(x, 0) > 0), None)
+            if a is None or self.done_sims >= self.sims:
+                self._halve()
+                continue
+            want = min(self.leaf_batch, self.todo[a], self.sims - self.done_sims)
+            for i in range(want):
+                self.forced[i] = a
+            n = _lib.razzle_mcts_select_leaves_forced(self.tree, want, VLOSS, C_PUCT,
+                                                      _np_to_cfloat_ptr(self.buf), self.forced)
+            self.todo[a] -= want
+            self.done_sims += want
+            self.pending = n
+            if n == 0:
+                return np.zeros((0, TENSOR), np.float32), [], np.zeros((0, EXTRA), np.float32)
+            players, extras = leaf_info(self.tree, n)
+            return self.buf[: n * TENSOR].reshape(n, TENSOR), players, extras
+        return np.zeros((0, TENSOR), np.float32), [], np.zeros((0, EXTRA), np.float32)
+
+    def deliver(self, policies: np.ndarray, values: np.ndarray):
+        if self.pending == -1:
+            _lib.razzle_mcts_expand_root(self.tree, _np_to_cfloat_ptr(np.ascontiguousarray(policies[0])))
+            self.expanded = True
+            win = _lib.razzle_mcts_check_immediate_win(self.tree)
+            if win != -2:
+                self.result_move = win
+            else:
+                self._setup()
+        elif self.pending > 0:
+            _lib.razzle_mcts_expand_and_backup(
+                self.tree, self.pending,
+                _np_to_cfloat_ptr(np.ascontiguousarray(policies)),
+                _np_to_cfloat_ptr(np.ascontiguousarray(values)), VLOSS)
+        self.pending = 0
+
+
 class Game:
     def __init__(self, opening: list[int], a_is_p0: bool, pair: int = -1):
         self.pair = pair
@@ -461,6 +608,9 @@ def main():
     ap.add_argument('--colours', choices=['both', 'a-first', 'a-second'], default='both',
                     help='both: each opening twice with colours swapped; a-first / a-second: A always '
                          'moves first / second (handicap tests: how much stronger must the second player be?)')
+    ap.add_argument('--gumbel-a', type=int, default=0,
+                    help='side A uses Gumbel root search with this many candidates (0 = PUCT)')
+    ap.add_argument('--gumbel-b', type=int, default=0)
     ap.add_argument('--leaf-batch-a', type=int, default=0, help='per-side override (search-quality tests)')
     ap.add_argument('--leaf-batch-b', type=int, default=0)
     ap.add_argument('--opening-moves', type=int, default=4)
@@ -515,7 +665,10 @@ def main():
             if g.search is None:
                 sims = sims_a if g.mover_is_a() else sims_b
                 lb = (args.leaf_batch_a if g.mover_is_a() else args.leaf_batch_b) or args.leaf_batch
-                g.search = Search(g.cs, sims, lb, g.rep.hist if REPETITION_DRAW else None)
+                gm = args.gumbel_a if g.mover_is_a() else args.gumbel_b
+                hist = g.rep.hist if REPETITION_DRAW else None
+                g.search = (GumbelSearch(g.cs, sims, lb, m=gm, history=hist) if gm
+                            else Search(g.cs, sims, lb, hist))
             still.append(g)
         active = still
 
@@ -555,7 +708,7 @@ def main():
     se = math.sqrt(max(s * (1 - s), 1e-9) / n)
     elo = lambda p: -400 * math.log10(1 / min(max(p, 1e-3), 1 - 1e-3) - 1)
     res = dict(a=args.a, b=args.b, sims_a=sims_a, sims_b=sims_b, games=n, colours=args.colours,
-               repetition_draw=args.repetition_draw,
+               repetition_draw=args.repetition_draw, gumbel_a=args.gumbel_a, gumbel_b=args.gumbel_b,
                leaf_batch_a=args.leaf_batch_a or args.leaf_batch, leaf_batch_b=args.leaf_batch_b or args.leaf_batch,
                value_scale_a=args.value_scale_a, value_scale_b=args.value_scale_b,
                score_a=round(s, 4), ci95=round(1.96 * se, 4),

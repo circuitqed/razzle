@@ -669,8 +669,13 @@ static int select_child(MCTSTree *tree, int node_idx, float c_puct) {
     return best_child;
 }
 
-int razzle_mcts_select_leaves(MCTSTree *tree, int batch_size, int vloss,
-                               float c_puct, float *tensors_out) {
+#define NO_FORCED_ACTION (-9999)
+
+/* Leaf selection. forced_actions (may be NULL): per batch slot, the root action to
+ * descend into first (NO_FORCED_ACTION = normal PUCT at the root). Used by Gumbel
+ * root search, which allocates simulations to root candidates itself. */
+static int select_leaves_impl(MCTSTree *tree, int batch_size, int vloss,
+                              float c_puct, float *tensors_out, const int32_t *forced_actions) {
     int leaf_count = 0;
     int terminal_count = 0;
     int b;
@@ -689,6 +694,18 @@ int razzle_mcts_select_leaves(MCTSTree *tree, int batch_size, int vloss,
 
         /* Traverse tree to leaf, applying virtual loss */
         MCTSNode *node = node_at(tree, node_idx);
+        if (forced_actions && forced_actions[b] != NO_FORCED_ACTION &&
+                node->is_expanded && !node->is_terminal) {
+            int c = node->first_child;
+            while (c >= 0 && node_at(tree, c)->parent_action != forced_actions[b])
+                c = node_at(tree, c)->next_sibling;
+            if (c >= 0) {
+                node->virtual_loss += vloss;
+                node_idx = c;
+                node = node_at(tree, c);
+                if (path_len < tree->max_depth) path[path_len++] = node_idx;
+            }
+        }
         while (node->is_expanded && node->first_child >= 0 && !node->is_terminal) {
             node->virtual_loss += vloss;
             node_idx = select_child(tree, node_idx, c_puct);
@@ -750,6 +767,16 @@ int razzle_mcts_select_leaves(MCTSTree *tree, int batch_size, int vloss,
     }
 
     return leaf_count;
+}
+
+int razzle_mcts_select_leaves(MCTSTree *tree, int batch_size, int vloss,
+                               float c_puct, float *tensors_out) {
+    return select_leaves_impl(tree, batch_size, vloss, c_puct, tensors_out, NULL);
+}
+
+int razzle_mcts_select_leaves_forced(MCTSTree *tree, int batch_size, int vloss,
+                                     float c_puct, float *tensors_out, const int32_t *forced_actions) {
+    return select_leaves_impl(tree, batch_size, vloss, c_puct, tensors_out, forced_actions);
 }
 
 void razzle_mcts_leaf_info(const MCTSTree *tree, int count, int32_t *players_out, float *extras_out) {

@@ -91,6 +91,11 @@ int  razzle_mcts_select_leaves(MCTSTree *tree, int batch_size, int vloss,
  * v2 extra planes (2*56 floats each). One call instead of per-leaf ctypes work. */
 void razzle_mcts_leaf_info(const MCTSTree *tree, int count, int32_t *players_out, float *extras_out);
 
+/* As razzle_mcts_select_leaves, but slot b first descends into root action
+ * forced_actions[b] (-9999 = no forcing). For Gumbel root search. */
+int  razzle_mcts_select_leaves_forced(MCTSTree *tree, int batch_size, int vloss,
+                                      float c_puct, float *tensors_out, const int32_t *forced_actions);
+
 void razzle_mcts_expand_and_backup(MCTSTree *tree, int count,
                                     const float *policies,
                                     const float *values,
