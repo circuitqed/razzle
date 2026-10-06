@@ -58,6 +58,13 @@ def main():
                     help='weight of the recorded search value in the value target (games that have it)')
     ap.add_argument('--value-mix', type=float, default=0.5,
                     help='value target = mix * teacher value + (1 - mix) * game outcome')
+    ap.add_argument('--policy-teacher-mix', type=float, default=0.0,
+                    help='policy target = mix * teacher policy (legal moves) + (1 - mix) * search visits '
+                         '(needs --value-teacher; distillation used 0.5)')
+    ap.add_argument('--rehearsal-games', default='',
+                    help='broad games rehearsed in every batch (teacher-mixed like the main data)')
+    ap.add_argument('--rehearsal-max-games', type=int, default=100_000)
+    ap.add_argument('--rehearsal-frac', type=float, default=0.5, help='share of each batch from rehearsal')
     ap.add_argument('--window-min', type=int, default=250_000)
     ap.add_argument('--checkpoints', type=int, default=4, help='save this many evenly spaced checkpoints')
     ap.add_argument('--ema', type=float, default=0.0,
@@ -104,18 +111,62 @@ def main():
     if args.value_teacher:
         teacher = RazzleNet.load(args.value_teacher, device=args.device).to(args.device).eval()
 
+    from razzle.training.compact_buffer import _csr, _gather_rows, CompactReplayBuffer as _CRB
+
     def mix_teacher_values(chunk):
+        """Teacher value into the value target; optionally teacher policy into the policy target."""
         n = len(chunk['value'])
         st = np.unpackbits(chunk['packed'], axis=1)[:, :planes * 56].reshape(n, planes, 8, 7).astype(np.float32)
         tv = np.empty(n, np.float32)
+        pm = args.policy_teacher_mix
+        new_pol = []
         with torch.no_grad():
-            for i in range(0, n, 8192):
-                _, v, _ = teacher(torch.from_numpy(st[i:i + 8192]).to(args.device))
-                tv[i:i + 8192] = v.squeeze(1).float().cpu().numpy()
+            for i in range(0, n, 4096):
+                lp, v, _ = teacher(torch.from_numpy(st[i:i + 4096]).to(args.device))
+                tv[i:i + 4096] = v.squeeze(1).float().cpu().numpy()
+                if pm > 0:
+                    rows = np.arange(i, min(n, i + 4096))
+                    b = len(rows)
+                    vis = np.zeros((b, 3137), np.float32)
+                    el, r = _gather_rows(chunk['pol_ptr'], rows)
+                    vis[r, chunk['pol_idx'][el]] = chunk['pol_val'][el]
+                    leg = np.zeros((b, 3137), np.float32)
+                    el, r = _gather_rows(chunk['leg_ptr'], rows)
+                    leg[r, chunk['leg_idx'][el]] = 1.0
+                    tp = lp.float().exp().cpu().numpy() * leg          # stored targets are side-to-move oriented
+                    tp /= np.maximum(tp.sum(1, keepdims=True), 1e-12)
+                    has = (chunk['pweight'][rows] > 0)[:, None]
+                    new_pol.append(np.where(has, pm * tp + (1 - pm) * vis, vis))
         chunk['value'] = (args.value_mix * tv + (1 - args.value_mix) * chunk['value']).astype(np.float32)
+        if pm > 0:
+            chunk['pol_ptr'], chunk['pol_idx'], chunk['pol_val'] = _csr(np.concatenate(new_pol))
+
+    rehearsal = None
+    if args.rehearsal_games:
+        assert teacher is not None, '--rehearsal-games needs --value-teacher'
+        rg = load_games(args.rehearsal_games)[:args.rehearsal_max_games]
+        rehearsal = _CRB(min_positions=10 ** 9, max_positions=10 ** 9)
 
     import multiprocessing as mp
     pool = mp.get_context('spawn').Pool(args.workers) if args.workers > 1 else None
+    if rehearsal is not None:
+        for i0 in range(0, len(rg), 8192):
+            part = rg[i0:i0 + 8192]
+            k = max(1, args.workers)
+            jobs = [(part[i::k], planes, 1, i, args.search_value_mix) for i in range(k)]
+            for r in (pool.map(T._convert_games_compact, jobs) if pool else [T._convert_games_compact(jobs[0])]):
+                mix_teacher_values(r[0])
+                rehearsal.add_chunk(r[0])
+        print(f'rehearsal set: {len(rg)} games, {len(rehearsal):,} positions', flush=True)
+        del rg
+    n_reh = int(round(args.batch_size * args.rehearsal_frac)) if rehearsal is not None else 0
+
+    def sample_batch():
+        if not n_reh:
+            return buf.sample(args.batch_size, rng)
+        a = buf.sample(args.batch_size - n_reh, rng)
+        b = rehearsal.sample(n_reh, rng)
+        return tuple(np.concatenate([x, y]) for x, y in zip(a, b))
     for it, chunk in enumerate(chunks):
         k = max(1, args.workers)
         jobs = [(chunk[i::k], planes, 1, i, args.search_value_mix) for i in range(k)]   # trainer's conversion
@@ -128,11 +179,11 @@ def main():
             n_new += r[2]
         steps = max(1, int(np.ceil(n_new * args.reuse / args.batch_size)))
         if ema is None:
-            m = trainer.train_steps(lambda: buf.sample(args.batch_size, rng), steps, verbose=False)
+            m = trainer.train_steps(sample_batch, steps, verbose=False)
         else:   # one step at a time so the average updates after every step
             ms = []
             for _ in range(steps):
-                ms.append(trainer.train_steps(lambda: buf.sample(args.batch_size, rng), 1, verbose=False))
+                ms.append(trainer.train_steps(sample_batch, 1, verbose=False))
                 ema_update()
             m = {k: float(np.mean([x[k] for x in ms])) for k in ('loss', 'policy_loss', 'value_loss')}
         m.update(iteration=it + 1, games=len(chunk), positions=n_new, window=len(buf))
