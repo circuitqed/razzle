@@ -375,6 +375,8 @@ class DistributedTrainer:
         reuse: float = 2.0,            # expected training samples per new position
         convert_workers: int = 0,      # processes for game conversion (0 = auto)
         value_mix: float = 0.5,        # value target = mix * search value + (1 - mix) * outcome
+        value_teacher: str = '',       # model version whose value is mixed into targets (frozen anchor)
+        value_teacher_mix: float = 0.5,
         window_min: int = 250_000,     # replay window (positions)
         window_max: int = 3_000_000,
         window_fraction: float = 0.25,
@@ -411,6 +413,9 @@ class DistributedTrainer:
         self.reuse = reuse
         self.convert_workers = convert_workers or max(1, min(16, (os.cpu_count() or 2) - 2))
         self.value_mix = value_mix
+        self.value_teacher_version = value_teacher
+        self.value_teacher_mix = value_teacher_mix
+        self._value_teacher = None
         if not legacy_buffer and (gamma < 1.0 or td_lambda < 1.0):
             raise ValueError('the compact window trains on final outcomes; use gamma = td_lambda = 1 '
                              '(or --legacy-buffer for discounted / TD(lambda) targets)')
@@ -895,6 +900,30 @@ class DistributedTrainer:
         uniform = (nz > 3) & (nz == n_legal) & np.isclose(pmax, 1.0 / np.maximum(nz, 1), rtol=1e-3)
         return ((nz > 0) & ~uniform).astype(np.float32)
 
+    def _mix_teacher_values(self, chunk: dict) -> None:
+        """value target = mix * frozen teacher value + (1 - mix) * existing target.
+
+        A frozen anchor stops the value head from memorizing game outcomes, and unlike
+        the current network's own search values it cannot feed its errors back into its
+        targets. Refresh the teacher (--value-teacher) only after a gate confirms a
+        stronger network."""
+        if self._value_teacher is None:
+            path = self.models_dir / f"{self.value_teacher_version}.pt"
+            if not path.exists():
+                self.api_client.download_model(self.value_teacher_version, path)
+            self._value_teacher = RazzleNet.load(str(path), device=self.device).to(self.device).eval()
+            print(f"[Trainer] Value teacher: {self.value_teacher_version} (mix {self.value_teacher_mix})")
+        planes = getattr(self._value_teacher.config, 'num_input_planes', 7)
+        n = len(chunk['value'])
+        st = np.unpackbits(chunk['packed'], axis=1)[:, :planes * 56].reshape(n, planes, 8, 7).astype(np.float32)
+        tv = np.empty(n, np.float32)
+        with torch.no_grad():
+            for i in range(0, n, 8192):
+                _, v, _ = self._value_teacher(torch.from_numpy(st[i:i + 8192]).to(self.device))
+                tv[i:i + 8192] = v.squeeze(1).float().cpu().numpy()
+        m = self.value_teacher_mix
+        chunk['value'] = (m * tv + (1 - m) * chunk['value']).astype(np.float32)
+
     def _train_on_games_compact(self, games: list[TrainingGame]) -> dict:
         """Compact-window iteration: convert games in parallel straight into packed
         chunks, validate on a subsample, train. (No dense npz archive: games are
@@ -922,6 +951,8 @@ class DistributedTrainer:
         t2 = time.time()
 
         for r in results:
+            if self.value_teacher_version:
+                self._mix_teacher_values(r[0])
             self.compact_buffer.add_chunk(r[0])
         steps = max(1, int(math.ceil(new * self.reuse / self.batch_size)))
         print(f"[Trainer] Window: {len(self.compact_buffer):,} / {self.compact_buffer.capacity:,} positions "
@@ -1315,6 +1346,10 @@ def main():
                         help='Old dense replay buffer + epochs per batch (default: compact window + steps)')
     parser.add_argument('--reuse', type=float, default=2.0,
                         help='Training samples per new position (compact buffer; default 2)')
+    parser.add_argument('--value-teacher', default='',
+                        help='Model version whose value prediction is mixed into the value target '
+                             '(frozen anchor; e.g. the run\'s _iter_000). Use with --value-mix 0.')
+    parser.add_argument('--value-teacher-mix', type=float, default=0.5)
     parser.add_argument('--value-mix', type=float, default=0.5,
                         help='Value target = mix * recorded search value + (1 - mix) * game outcome '
                              '(games without search values use the outcome only)')
@@ -1374,6 +1409,8 @@ def main():
         reuse=args.reuse,
         convert_workers=args.convert_workers,
         value_mix=args.value_mix,
+        value_teacher=args.value_teacher,
+        value_teacher_mix=args.value_teacher_mix,
         window_min=args.window_min,
         window_max=args.window_max,
         window_fraction=args.window_fraction,
