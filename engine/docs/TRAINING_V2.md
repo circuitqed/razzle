@@ -166,3 +166,30 @@ distilled start is already at/above what these self-play targets teach; the game
 Related measurements: first-player edge grows with skill (beginner 52%, ~1500 rating 63%,
 superhuman 79%); moving second costs ~0.6 doublings of search at 32 sims, ~1.4 at 256, ~2.1 at
 1024; dominant opening 72 / mirror 298 (`scripts/distill/opening_analysis.py`).
+
+## 10. phoenix3 / phoenix4 and what they ruled out (Oct 5-6 2026)
+
+**phoenix3** (800/160 sims, value target = 1/2 recorded search value + 1/2 outcome, LR 5e-5,
+start = replay checkpoint +56 over phoenix2's start): gates vs its start -38 / -7 / -8.
+Offline A/B on its 414k games: own search values -23/-25/-22, frozen teacher +2/-2/+19.
+The current network's search values feed its own errors back into the value target.
+
+**phoenix4** (every move a 3200-sim search, value = 1/2 frozen teacher + 1/2 outcome): gates
+-77 (iter 25, 256 sims), -98 (iter 40, 1024 sims), -82 (iter 55). Not a colour bug (worse
+with both colours) and not only shallow-search miscalibration (as bad at 1024 sims).
+Benchmarks explain it:
+
+| | deep-game positions (in-distribution) | phoenix2 positions (held out, broader) |
+|---|---|---|
+| start | move match 0.695, value MSE 0.526 | move match 0.764, value MSE 0.559 |
+| iter 55 | 0.700, 0.494 | **0.738**, 0.565 |
+
+The network specialises on the narrow positions of deep-search self-play and forgets broad
+knowledge from distillation; policies also sharpen (EBF 3.43 -> 2.85). A frozen value anchor
+only constrains positions that appear in training. Next candidates: also mix the teacher's
+policy into the policy target (as distillation did), rehearse the broad distillation dataset
+in every batch, more diverse self-play openings, and Gumbel root search (calibrated, Q-based
+policy targets; see GUMBEL_SEARCH.md).
+
+Tooling added: fixed deep-search benchmark (agreement with 3200-sim moves on 62,914 held-out
+positions), gates on the trainer's GPU (no Sherlock queue), offline replay A/B on vast.ai.
