@@ -14,6 +14,7 @@ import { OnnxEvaluator, PureTSEvaluator, GPUEvaluator, RandomEvaluator, GL_CONTE
 import type { Evaluator } from '../engine/evaluator';
 import { createModelFromOnnx } from '../engine/inference';
 import { createGPUModelFromOnnx } from '../engine/webglForwardPass';
+import { onnxInputPlanes } from '../engine/onnxWeights';
 import { search, type MCTSConfig, type MCTSNode, DEFAULT_CONFIG } from '../engine/mcts';
 import type { EngineState } from '../engine/state';
 import { getCachedModel, cacheModel } from '../engine/modelCache';
@@ -214,6 +215,9 @@ async function loadOnnxRuntime(msg: LoadMessage): Promise<void> {
   }
 
   const modelBuffer = await getModelBuffer(msg);
+  // v2 networks take 9 input planes (v1: 7). Read it before handing the buffer
+  // to onnxruntime, which may take ownership of it.
+  const inputPlanes = onnxInputPlanes(modelBuffer);
 
   self.postMessage({ type: 'loading_progress', stage: 'initializing' });
 
@@ -240,7 +244,7 @@ async function loadOnnxRuntime(msg: LoadMessage): Promise<void> {
     activeBackend = 'wasm';
   }
 
-  evaluator = new OnnxEvaluator(session!);
+  evaluator = new OnnxEvaluator(session!, inputPlanes);
   self.postMessage({ type: 'loaded', success: true, isRandom: false, backend: activeBackend });
 }
 

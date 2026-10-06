@@ -15,7 +15,9 @@
  *              invariant sweeps
  *  inference — CPU (pure-TS) and GPU (WebGL2 GEMM) forward passes vs Python
  *              reference fixtures (catches the "ONNX Runtime WebGL plays
- *              randomly" class, efdd7ca) on THIS device's GPU
+ *              randomly" class, efdd7ca) on THIS device's GPU; v1 (7-plane,
+ *              FC head) and, when inference-fixtures-v2.json + its model are
+ *              available, v2 (9-plane, spatial policy head) networks
  *  mcts      — CPU-vs-GPU full MCTS agreement (best move + visit counts),
  *              deterministic at temperature 0 (value backprop / perspective
  *              classes: 1bf6125, 490622d, 04d9ced; batch deadlock: 2e28821)
@@ -47,6 +49,7 @@ import { getLegalMoves, getPassMoves, getKnightMoves, mustPass, decodeMove } fro
 import { END_TURN_MOVE } from './engine/bitboard';
 import { createModelFromOnnx } from './engine/inference';
 import { createGPUModelFromOnnx } from './engine/webglForwardPass';
+import { stateToTensor } from './engine/tensor';
 import { PureTSEvaluator, GPUEvaluator } from './engine/evaluator';
 import { search, DEFAULT_CONFIG } from './engine/mcts';
 import { clearModelCache } from './engine/modelCache';
@@ -443,14 +446,7 @@ async function groupInference() {
   check('fixtures structure', fixtures.positions?.length > 0,
     `${fixtures.positions.length} positions for ${fixtures.model}`);
 
-  const tensors: Float32Array[] = fixtures.positions.map((pos: any) => {
-    const tensor = new Float32Array(7 * 56);
-    for (let c = 0; c < 7; c++)
-      for (let r = 0; r < 8; r++)
-        for (let col = 0; col < 7; col++)
-          tensor[c * 56 + r * 7 + col] = pos.tensor[c][r][col];
-    return tensor;
-  });
+  const tensors: Float32Array[] = fixtures.positions.map((pos: any) => flattenTensor(pos.tensor));
 
   // Python-reference model may no longer exist server-side (models get
   // renamed/pruned between training runs). Reference checks are best-depth;
@@ -470,8 +466,12 @@ async function groupInference() {
   const gpuCanvas = document.createElement('canvas');
   const gpuModel = createGPUModelFromOnnx(modelBuffer, gpuCanvas);
 
+  // The fallback model may be a v2 (9-plane) network: zero-pad/trim the
+  // fixture inputs to its plane count (agreement only needs identical inputs).
+  const modelPlanes = cpuModel.config.numInputPlanes;
   let xMaxPolicy = 0, xMaxValue = 0;
-  for (const tensor of tensors) {
+  for (const fixtureTensor of tensors) {
+    const tensor = fitPlanes(fixtureTensor, modelPlanes);
     const cpu = cpuModel.forward(tensor);
     const gpu = gpuModel.forward(tensor);
     for (let i = 0; i < 3137; i++) {
@@ -510,6 +510,99 @@ async function groupInference() {
   check('CPU value vs Python', cpuMaxValue < 0.01, `maxΔ=${cpuMaxValue.toExponential(2)}`);
   check('GPU policy vs Python', gpuMaxPolicy < 0.05, `maxΔ=${gpuMaxPolicy.toExponential(2)}`);
   check('GPU value vs Python', gpuMaxValue < 0.01, `maxΔ=${gpuMaxValue.toExponential(2)}`);
+
+  await inferenceV2();
+}
+
+function flattenTensor(t: number[][][]): Float32Array {
+  const out = new Float32Array(t.length * 56);
+  for (let c = 0; c < t.length; c++)
+    for (let r = 0; r < 8; r++)
+      for (let col = 0; col < 7; col++)
+        out[c * 56 + r * 7 + col] = t[c][r][col];
+  return out;
+}
+
+function fitPlanes(t: Float32Array, planes: number): Float32Array {
+  if (t.length === planes * 56) return t;
+  const out = new Float32Array(planes * 56);
+  out.set(t.subarray(0, Math.min(t.length, out.length)));
+  return out;
+}
+
+/** v2 networks (9 planes, spatial policy head) vs Python reference, when available. */
+async function inferenceV2() {
+  const fixResp = await fetch('/inference-fixtures-v2.json');
+  if (!fixResp.ok || (fixResp.headers.get('content-type') ?? '').includes('html')) {
+    p('SKIP: v2 inference checks — inference-fixtures-v2.json not bundled', 'warn');
+    return;
+  }
+  const fixtures = await fixResp.json();
+  // 9-plane input encoding: device TS engine vs Python to_tensor(num_planes=9)
+  let tensorMismatch = 0;
+  for (const pos of fixtures.positions) {
+    const st = pos.state;
+    const s: EngineState = {
+      pieces: [BigInt(st.pieces[0]), BigInt(st.pieces[1])],
+      balls: [BigInt(st.balls[0]), BigInt(st.balls[1])],
+      currentPlayer: st.currentPlayer, touchedMask: BigInt(st.touchedMask),
+      hasPassed: st.hasPassed, lastKnightDst: st.lastKnightDst, ply: st.ply,
+    };
+    const t = stateToTensor(s, undefined, 9);
+    const ref = flattenTensor(pos.tensor);
+    if (t.some((v, i) => v !== ref[i])) tensorMismatch++;
+  }
+  check('v2: 9-plane tensor matches Python', tensorMismatch === 0,
+    `${fixtures.positions.length - tensorMismatch}/${fixtures.positions.length}`);
+
+  let buffer = await fetchLocal('/test-model-fixtures-v2.onnx');
+  if (!buffer) {
+    try {
+      const infoResp = await fetch(`${API_BASE}/models/onnx/by-name/${encodeURIComponent(fixtures.model)}`, { credentials: 'include' });
+      if (infoResp.ok) {
+        const info = await infoResp.json();
+        const modelResp = await fetch(`${API_BASE}${info.url}`, { credentials: 'include' });
+        if (modelResp.ok) buffer = await modelResp.arrayBuffer();
+      }
+    } catch { /* offline */ }
+  }
+  if (!buffer) {
+    p(`SKIP: v2 Python-reference checks — model '${fixtures.model}' not available`, 'warn');
+    return;
+  }
+  const cpu = createModelFromOnnx(buffer);
+  const gpu = createGPUModelFromOnnx(buffer, document.createElement('canvas'));
+  check('v2: architecture detected', cpu.config.numInputPlanes === 9 && cpu.config.policyHead === 'spatial'
+    && gpu.config.numInputPlanes === 9 && gpu.config.policyHead === 'spatial', JSON.stringify(cpu.config));
+  let cpuP = 0, gpuP = 0, xP = 0, cpuV = 0, gpuV = 0, topOk = 0;
+  for (const pos of fixtures.positions) {
+    const x = flattenTensor(pos.tensor);
+    const c = cpu.forward(x);
+    const cPolicy = Float32Array.from(c.policy);
+    const g = gpu.forward(x);
+    let cBest = 0, gBest = 0, rBest = 0;
+    for (let i = 0; i < 3137; i++) {
+      // probabilities: PAD logits sit at -1e4 where float32 log-probs differ by ~1e-3
+      const pr = Math.exp(pos.policy[i]);
+      cpuP = Math.max(cpuP, Math.abs(Math.exp(cPolicy[i]) - pr));
+      gpuP = Math.max(gpuP, Math.abs(Math.exp(g.policy[i]) - pr));
+      xP = Math.max(xP, Math.abs(Math.exp(g.policy[i]) - Math.exp(cPolicy[i])));
+      if (cPolicy[i] > cPolicy[cBest]) cBest = i;
+      if (g.policy[i] > g.policy[gBest]) gBest = i;
+      if (pos.policy[i] > pos.policy[rBest]) rBest = i;
+    }
+    if (cBest === rBest && gBest === rBest) topOk++;
+    cpuV = Math.max(cpuV, Math.abs(c.value - pos.value));
+    gpuV = Math.max(gpuV, Math.abs(g.value - pos.value));
+  }
+  gpu.dispose();
+  const n = fixtures.positions.length;
+  check('v2: GPU vs CPU policy agreement', xP < 1e-3, `max|dp|=${xP.toExponential(2)}`);
+  check('v2: CPU policy vs Python', cpuP < 1e-3, `max|dp|=${cpuP.toExponential(2)}`);
+  check('v2: GPU policy vs Python', gpuP < 1e-3, `max|dp|=${gpuP.toExponential(2)}`);
+  check('v2: CPU value vs Python', cpuV < 0.01, `maxΔ=${cpuV.toExponential(2)}`);
+  check('v2: GPU value vs Python', gpuV < 0.01, `maxΔ=${gpuV.toExponential(2)}`);
+  check('v2: top move matches Python (CPU and GPU)', topOk === n, `${topOk}/${n}`);
 }
 
 async function groupMcts() {

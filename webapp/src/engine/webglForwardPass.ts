@@ -12,6 +12,10 @@
  * - Residual add+ReLU as a fragment shader
  * - Render-to-texture between layers (no CPU round-trips)
  * - FC layers on CPU (small enough that GPU overhead isn't worth it)
+ * - v2 spatial policy head: 3x3 conv + 1x1 conv (no ReLU) + mean-pool on the
+ *   GPU; the 64x56 move planes and the F pooled features are read back and the
+ *   END linear + 3137-action gather run on the CPU (see modelConfig.ts)
+ * - Input texture height = numInputPlanes (7 for v1 networks, 9 for v2)
  *
  * Data layout:
  * - Activation textures: (HW, C) — texel (hw, c) = value at channel c, spatial hw
@@ -20,6 +24,9 @@
  */
 
 import { type WeightTensor, parseOnnxWeights } from './onnxWeights';
+import {
+  type ModelConfig, inferModelConfig, sortedConvTensors, gatherSpatialLogits, SPATIAL_POLICY_PLANES,
+} from './modelConfig';
 
 const ROWS = 8;
 const COLS = 7;
@@ -143,6 +150,48 @@ void main() {
          * texelFetch(uInput, ivec2(hw, ic), 0).r;
   }
   fragColor = vec4(max(0.0, sum), 0.0, 0.0, 1.0);
+}
+`;
+
+// Conv 1x1 + bias, no ReLU (v2 spatial policy output: F -> 64 move planes)
+// Input: (HW*N, inC)  Weight: (inC, outC)  Bias: (outC, 1)  Output: (HW*N, outC)
+const CONV1X1_NORELU_SRC = `#version 300 es
+precision highp float;
+precision highp sampler2D;
+uniform sampler2D uInput;
+uniform sampler2D uWeight;
+uniform sampler2D uBias;
+uniform int uInC;
+out vec4 fragColor;
+void main() {
+  int hw = int(gl_FragCoord.x);
+  int oc = int(gl_FragCoord.y);
+  float sum = texelFetch(uBias, ivec2(oc, 0), 0).r;
+  for (int ic = 0; ic < uInC; ic++) {
+    sum += texelFetch(uWeight, ivec2(ic, oc), 0).r
+         * texelFetch(uInput, ivec2(hw, ic), 0).r;
+  }
+  fragColor = vec4(sum, 0.0, 0.0, 1.0);
+}
+`;
+
+// Mean over the uSingleHW squares of each batch element, per channel.
+// Input: (HW*N, C)  Output: (N, C) — texel (b, c) = mean_hw input(b*HW + hw, c)
+const MEAN_POOL_SRC = `#version 300 es
+precision highp float;
+precision highp sampler2D;
+uniform sampler2D uInput;
+uniform int uSingleHW;
+out vec4 fragColor;
+void main() {
+  int b = int(gl_FragCoord.x);
+  int c = int(gl_FragCoord.y);
+  int base = b * uSingleHW;
+  float sum = 0.0;
+  for (int i = 0; i < uSingleHW; i++) {
+    sum += texelFetch(uInput, ivec2(base + i, c), 0).r;
+  }
+  fragColor = vec4(sum / float(uSingleHW), 0.0, 0.0, 1.0);
 }
 `;
 
@@ -315,6 +364,18 @@ void main() {
 }
 `;
 
+/**
+ * Fragment shader sources, exported for the CPU emulation test
+ * (__tests__/webgl-forward-emulated.test.ts), which runs GPUForwardPass's host
+ * code against a fake WebGL2 context with JS ports of these shaders.
+ */
+export const GPU_SHADER_SOURCES = {
+  CONV3X3_RELU_SRC, CONV3X3_NORELU_SRC, RESIDUAL_RELU_SRC, CONV1X1_RELU_SRC,
+  CONV1X1_NORELU_SRC, MEAN_POOL_SRC,
+  CONV3X3_RGBA_RELU_SRC, CONV3X3_RGBA_NORELU_SRC, CONV3X3_R2RGBA_RELU_SRC,
+  RESIDUAL_RGBA_RELU_SRC, CONV1X1_RGBA_TO_R_RELU_SRC,
+} as const;
+
 // ---- GPU Context ----
 
 interface ConvLayerGPU {
@@ -339,15 +400,6 @@ interface LinearLayer {
   inFeatures: number;
 }
 
-interface ModelConfig {
-  numFilters: number;
-  numBlocks: number;
-  policyFilters: number;
-  valueFilters: number;
-  valueHidden: number;
-  policyHidden: number;
-}
-
 interface ShaderProgram {
   program: WebGLProgram;
   uniforms: Record<string, WebGLUniformLocation>;
@@ -362,6 +414,8 @@ export class GPUForwardPass {
   private conv3x3NoRelu: ShaderProgram;
   private residualRelu: ShaderProgram;
   private conv1x1Relu: ShaderProgram;
+  private conv1x1NoRelu: ShaderProgram;
+  private meanPool: ShaderProgram;
 
   // Shader programs (RGBA-packed)
   private conv3x3RgbaRelu: ShaderProgram;
@@ -386,8 +440,14 @@ export class GPUForwardPass {
   private valueConvRgba: ConvLayerRGBA;  // Conv1x1 RGBA→R: weight R32F, bias R32F
 
   // FC layers (CPU — small enough that GPU overhead isn't worth it)
-  private policyFc: LinearLayer;
+  private policyFc: LinearLayer | null;   // v1 FC head (null for spatial)
   private policyFc1: LinearLayer | null;
+  // v2 spatial head: policyConv is its 3x3 F->F conv; policyOut the 1x1 F->64
+  // conv (with bias); policyEnd the END_TURN linear on mean-pooled features.
+  private policyOut: ConvLayerGPU | null;
+  private policyEnd: LinearLayer | null;
+  private poolTex: WebGLTexture | null;
+  private poolFb: WebGLFramebuffer | null;
   private valueFc1: LinearLayer;
   private valueFc2: LinearLayer;
 
@@ -426,6 +486,7 @@ export class GPUForwardPass {
   constructor(config: ModelConfig, weights: Map<string, WeightTensor>, canvas?: HTMLCanvasElement | OffscreenCanvas) {
     this.config = config;
     const f = config.numFilters;
+    const spatial = config.policyHead === 'spatial';
 
     // Create WebGL2 context
     const cvs = canvas ?? (typeof OffscreenCanvas !== 'undefined'
@@ -446,6 +507,8 @@ export class GPUForwardPass {
     this.conv3x3NoRelu = this.createShaderProgram(CONV3X3_NORELU_SRC, ['uInput', 'uWeight', 'uBias', 'uInC', 'uH', 'uW', 'uSingleHW']);
     this.residualRelu = this.createShaderProgram(RESIDUAL_RELU_SRC, ['uA', 'uB']);
     this.conv1x1Relu = this.createShaderProgram(CONV1X1_RELU_SRC, ['uInput', 'uWeight', 'uBias', 'uInC']);
+    this.conv1x1NoRelu = this.createShaderProgram(CONV1X1_NORELU_SRC, ['uInput', 'uWeight', 'uBias', 'uInC']);
+    this.meanPool = this.createShaderProgram(MEAN_POOL_SRC, ['uInput', 'uSingleHW']);
 
     // Compile shaders (RGBA-packed)
     this.conv3x3RgbaRelu = this.createShaderProgram(CONV3X3_RGBA_RELU_SRC, ['uInput', 'uWeight', 'uBias', 'uInC4', 'uH', 'uW', 'uSingleHW']);
@@ -457,9 +520,7 @@ export class GPUForwardPass {
     this.vao = this.createQuadVAO(this.conv3x3Relu.program);
 
     // Upload model weights to GPU
-    const convTensors = [...weights.values()]
-      .filter(t => t.name.startsWith('onnx::Conv_'))
-      .sort((a, b) => parseInt(a.name.split('_').pop()!) - parseInt(b.name.split('_').pop()!));
+    const convTensors = sortedConvTensors(weights.values());
 
     if (convTensors.length % 2 !== 0) {
       throw new Error(
@@ -469,9 +530,9 @@ export class GPUForwardPass {
     }
 
     // Pair consecutive tensors as (weight, bias) — R32F layout
-    const makeConvGPU = (weightIdx: number): ConvLayerGPU => {
-      const wt = convTensors[weightIdx];
-      const bt = convTensors[weightIdx + 1];
+    const makeConvGPU = (weightIdx: number): ConvLayerGPU =>
+      makeConvGPUFrom(convTensors[weightIdx], convTensors[weightIdx + 1]);
+    const makeConvGPUFrom = (wt: WeightTensor, bt: WeightTensor): ConvLayerGPU => {
       const outC = wt.shape[0];
       const inC = wt.shape.length === 4 ? wt.shape[1] : wt.data.length / (outC * (wt.shape[2] === 3 ? 9 : 1));
       const kSize = wt.shape.length === 4 ? wt.shape[2] * wt.shape[3] : 1;
@@ -576,7 +637,8 @@ export class GPUForwardPass {
       idx += 4;
     }
     this.policyConv = makeConvGPU(idx);
-    this.policyConvRgba = makeConv1x1RgbaToR(idx);
+    // (RGBA layers are unused by forward(); v2's policy conv is 3x3 F->F)
+    this.policyConvRgba = spatial ? makeConv3x3Rgba(idx) : makeConv1x1RgbaToR(idx);
     idx += 2;
     this.valueConv = makeConvGPU(idx);
     this.valueConvRgba = makeConv1x1RgbaToR(idx);
@@ -589,12 +651,21 @@ export class GPUForwardPass {
       return { weight: w.data, bias: b.data, outFeatures: w.shape[0], inFeatures: w.shape[1] };
     };
 
-    if (config.policyHidden > 0) {
-      this.policyFc1 = getFC('policy_fc1');
-      this.policyFc = getFC('policy_fc2');
-    } else {
+    if (spatial) {
       this.policyFc1 = null;
-      this.policyFc = getFC('policy_fc');
+      this.policyFc = null;
+      this.policyOut = makeConvGPUFrom(weights.get('policy_out.weight')!, weights.get('policy_out.bias')!);
+      this.policyEnd = getFC('policy_end');
+    } else {
+      this.policyOut = null;
+      this.policyEnd = null;
+      if (config.policyHidden > 0) {
+        this.policyFc1 = getFC('policy_fc1');
+        this.policyFc = getFC('policy_fc2');
+      } else {
+        this.policyFc1 = null;
+        this.policyFc = getFC('policy_fc');
+      }
     }
     this.valueFc1 = getFC('value_fc1');
     this.valueFc2 = getFC('value_fc2');
@@ -603,7 +674,8 @@ export class GPUForwardPass {
     const MAX_BATCH = 16;
 
     // Create R32F activation textures (HW*MAX_BATCH x maxC) — kept for backward compat
-    const maxC = Math.max(f, config.policyFilters, config.valueFilters);
+    // Head texture must also hold the 64 spatial move planes (v2)
+    const maxC = Math.max(f, config.policyFilters, config.valueFilters, spatial ? SPATIAL_POLICY_PLANES : 0);
     this.actTexA = this.createEmptyTex(HW * MAX_BATCH, maxC);
     this.actTexB = this.createEmptyTex(HW * MAX_BATCH, maxC);
     this.actFbA = this.createFb(this.actTexA);
@@ -624,16 +696,28 @@ export class GPUForwardPass {
     this.headTexRgba = this.createEmptyTexRgba(HW * MAX_BATCH, maxC4);
     this.headFbRgba = this.createFb(this.headTexRgba);
 
-    // Input texture (7 channels, wide enough for batch) — R32F
-    this.inputTex = this.createEmptyTex(HW * MAX_BATCH, 7);
+    // Spatial head: mean-pooled features, one texel column per batch element
+    if (spatial) {
+      this.poolTex = this.createEmptyTex(MAX_BATCH, f);
+      this.poolFb = this.createFb(this.poolTex);
+    } else {
+      this.poolTex = null;
+      this.poolFb = null;
+    }
+
+    // Input texture (numInputPlanes channels, wide enough for batch) — R32F
+    this.inputTex = this.createEmptyTex(HW * MAX_BATCH, config.numInputPlanes);
     this.inputFb = this.createFb(this.inputTex);
 
     // CPU buffers (sized for max batch)
-    const maxHeadSize = Math.max(config.policyFilters, config.valueFilters) * HW * MAX_BATCH;
+    const maxHeadSize = Math.max(
+      config.policyFilters, config.valueFilters, spatial ? SPATIAL_POLICY_PLANES : 0,
+    ) * HW * MAX_BATCH;
     this.readBuf = new Float32Array(maxHeadSize * 4); // RGBA
     this.policyHiddenBuf = this.policyFc1 ? new Float32Array(this.policyFc1.outFeatures) : null;
-    this.policyLogitsBuf = new Float32Array(this.policyFc.outFeatures);
-    this.policyOutBuf = new Float32Array(this.policyFc.outFeatures);
+    const numActions = this.policyFc ? this.policyFc.outFeatures : 3137;
+    this.policyLogitsBuf = new Float32Array(numActions);
+    this.policyOutBuf = new Float32Array(numActions);
     this.valueHiddenBuf = new Float32Array(this.valueFc1.outFeatures);
     this.valueOutBuf = new Float32Array(1);
   }
@@ -646,10 +730,14 @@ export class GPUForwardPass {
   forward(input: Float32Array): { policy: Float32Array; value: number } {
     const gl = this.gl;
     const f = this.config.numFilters;
+    const inPlanes = this.config.numInputPlanes;
+    if (input.length !== inPlanes * HW) {
+      throw new Error(`GPUForwardPass.forward: input has ${input.length} floats, model expects ${inPlanes} planes (${inPlanes * HW})`);
+    }
 
-    // Upload input tensor (7, 8, 7) → R32F texture (HW=56, C=7)
+    // Upload input tensor (planes, 8, 7) → R32F texture (HW=56, C=planes)
     gl.bindTexture(gl.TEXTURE_2D, this.inputTex);
-    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, HW, 7, gl.RED, gl.FLOAT, input);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, HW, inPlanes, gl.RED, gl.FLOAT, input);
 
     // === Input conv (7 → f) + ReLU ===
     this.runConv3x3(this.conv3x3Relu, this.inputTex, this.inputConv, HW, f, this.actTexA, this.actFbA);
@@ -668,20 +756,28 @@ export class GPUForwardPass {
       const tmpFb = currentFb; currentFb = scratchFb; scratchFb = tmpFb;
     }
 
-    // === Policy head: 1x1 conv + ReLU ===
-    const pf = this.config.policyFilters;
-    this.runConv1x1(currentTex, this.policyConv, HW, pf, this.headTex, this.headFb);
+    // === Policy head ===
+    const policyLogits = this.policyLogitsBuf;
+    let policyFlat: Float32Array | null = null;
+    if (this.policyOut) {
+      // v2 spatial head (GPU convs + pool, CPU gather) → logits directly
+      this.runSpatialPolicy(currentTex, scratchTex, scratchFb, 1, [policyLogits]);
+    } else {
+      // 1x1 conv + ReLU
+      const pf = this.config.policyFilters;
+      this.runConv1x1(currentTex, this.policyConv, HW, pf, this.headTex, this.headFb);
 
-    // Read back policy head (pf * HW floats, R32F output)
-    gl.bindFramebuffer(gl.FRAMEBUFFER, this.headFb);
-    const policySize = pf * HW;
-    if (this.readBuf.length < policySize * 4) {
-      this.readBuf = new Float32Array(policySize * 4);
-    }
-    gl.readPixels(0, 0, HW, pf, gl.RGBA, gl.FLOAT, this.readBuf);
-    const policyFlat = new Float32Array(policySize);
-    for (let i = 0; i < policySize; i++) {
-      policyFlat[i] = this.readBuf[i * 4]; // Extract R channel
+      // Read back policy head (pf * HW floats, R32F output)
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this.headFb);
+      const policySize = pf * HW;
+      if (this.readBuf.length < policySize * 4) {
+        this.readBuf = new Float32Array(policySize * 4);
+      }
+      gl.readPixels(0, 0, HW, pf, gl.RGBA, gl.FLOAT, this.readBuf);
+      policyFlat = new Float32Array(policySize);
+      for (let i = 0; i < policySize; i++) {
+        policyFlat[i] = this.readBuf[i * 4]; // Extract R channel
+      }
     }
 
     // === Value head: 1x1 conv + ReLU ===
@@ -704,19 +800,8 @@ export class GPUForwardPass {
 
     // === FC layers on CPU ===
 
-    // Policy FC
-    const policyLogits = this.policyLogitsBuf;
-    if (this.policyFc1) {
-      const hidden = this.policyHiddenBuf!;
-      linearCPU(policyFlat, this.policyFc1.weight, this.policyFc1.bias,
-        this.policyFc1.outFeatures, this.policyFc1.inFeatures, hidden);
-      for (let i = 0; i < hidden.length; i++) hidden[i] = Math.max(0, hidden[i]);
-      linearCPU(hidden, this.policyFc.weight, this.policyFc.bias,
-        this.policyFc.outFeatures, this.policyFc.inFeatures, policyLogits);
-    } else {
-      linearCPU(policyFlat, this.policyFc.weight, this.policyFc.bias,
-        this.policyFc.outFeatures, this.policyFc.inFeatures, policyLogits);
-    }
+    // Policy FC (v1 only; the spatial head already produced logits)
+    if (policyFlat) this.policyFcCPU(policyFlat, policyLogits);
 
     const policy = this.policyOutBuf;
     logSoftmax(policyLogits, policy, policyLogits.length);
@@ -748,13 +833,17 @@ export class GPUForwardPass {
     if (N === 1) return [this.forward(inputs[0])];
 
     const totalHW = HW * N;
+    const inPlanes = this.config.numInputPlanes;
 
-    // Stack all input tensors into one wide texture (HW*N, 7)
-    // Each input is CHW (7 * HW floats). Stack side by side in x-dimension.
-    const stacked = new Float32Array(7 * totalHW);
+    // Stack all input tensors into one wide texture (HW*N, planes)
+    // Each input is CHW (planes * HW floats). Stack side by side in x-dimension.
+    const stacked = new Float32Array(inPlanes * totalHW);
     for (let b = 0; b < N; b++) {
       const input = inputs[b];
-      for (let c = 0; c < 7; c++) {
+      if (input.length !== inPlanes * HW) {
+        throw new Error(`GPUForwardPass.forwardBatch: input ${b} has ${input.length} floats, model expects ${inPlanes * HW}`);
+      }
+      for (let c = 0; c < inPlanes; c++) {
         for (let hw = 0; hw < HW; hw++) {
           stacked[c * totalHW + b * HW + hw] = input[c * HW + hw];
         }
@@ -762,7 +851,7 @@ export class GPUForwardPass {
     }
 
     gl.bindTexture(gl.TEXTURE_2D, this.inputTex);
-    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, totalHW, 7, gl.RED, gl.FLOAT, stacked);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, totalHW, inPlanes, gl.RED, gl.FLOAT, stacked);
 
     // === Conv tower (R32F, same as single but with totalHW width) ===
     this.runConv3x3(this.conv3x3Relu, this.inputTex, this.inputConv, totalHW, f, this.actTexA, this.actFbA);
@@ -781,27 +870,33 @@ export class GPUForwardPass {
     }
 
     // === Policy head (all N at once) ===
-    const pf = this.config.policyFilters;
-    this.runConv1x1(currentTex, this.policyConv, totalHW, pf, this.headTex, this.headFb);
-
-    gl.bindFramebuffer(gl.FRAMEBUFFER, this.headFb);
-    const policyTotalSize = pf * totalHW;
-    if (this.readBuf.length < policyTotalSize * 4) {
-      this.readBuf = new Float32Array(policyTotalSize * 4);
-    }
-    gl.readPixels(0, 0, totalHW, pf, gl.RGBA, gl.FLOAT, this.readBuf);
-
-    // Extract per-element policy flats
     const policyFlats: Float32Array[] = [];
-    for (let b = 0; b < N; b++) {
-      const flat = new Float32Array(pf * HW);
-      for (let oc = 0; oc < pf; oc++) {
-        for (let hw = 0; hw < HW; hw++) {
-          const readIdx = (oc * totalHW + b * HW + hw) * 4;
-          flat[oc * HW + hw] = this.readBuf[readIdx];
-        }
+    let spatialLogits: Float32Array[] | null = null;
+    if (this.policyOut) {
+      spatialLogits = Array.from({ length: N }, () => new Float32Array(3137));
+      this.runSpatialPolicy(currentTex, scratchTex, scratchFb, N, spatialLogits);
+    } else {
+      const pf = this.config.policyFilters;
+      this.runConv1x1(currentTex, this.policyConv, totalHW, pf, this.headTex, this.headFb);
+
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this.headFb);
+      const policyTotalSize = pf * totalHW;
+      if (this.readBuf.length < policyTotalSize * 4) {
+        this.readBuf = new Float32Array(policyTotalSize * 4);
       }
-      policyFlats.push(flat);
+      gl.readPixels(0, 0, totalHW, pf, gl.RGBA, gl.FLOAT, this.readBuf);
+
+      // Extract per-element policy flats
+      for (let b = 0; b < N; b++) {
+        const flat = new Float32Array(pf * HW);
+        for (let oc = 0; oc < pf; oc++) {
+          for (let hw = 0; hw < HW; hw++) {
+            const readIdx = (oc * totalHW + b * HW + hw) * 4;
+            flat[oc * HW + hw] = this.readBuf[readIdx];
+          }
+        }
+        policyFlats.push(flat);
+      }
     }
 
     // === Value head (all N at once) ===
@@ -832,18 +927,13 @@ export class GPUForwardPass {
     // === FC layers on CPU (per element) ===
     const results: Array<{ policy: Float32Array; value: number }> = [];
     for (let b = 0; b < N; b++) {
-      // Policy FC
-      const policyLogits = new Float32Array(this.policyFc.outFeatures);
-      if (this.policyFc1) {
-        const hidden = new Float32Array(this.policyFc1.outFeatures);
-        linearCPU(policyFlats[b], this.policyFc1.weight, this.policyFc1.bias,
-          this.policyFc1.outFeatures, this.policyFc1.inFeatures, hidden);
-        for (let i = 0; i < hidden.length; i++) hidden[i] = Math.max(0, hidden[i]);
-        linearCPU(hidden, this.policyFc.weight, this.policyFc.bias,
-          this.policyFc.outFeatures, this.policyFc.inFeatures, policyLogits);
+      // Policy FC (v1) / gathered spatial logits (v2)
+      let policyLogits: Float32Array;
+      if (spatialLogits) {
+        policyLogits = spatialLogits[b];
       } else {
-        linearCPU(policyFlats[b], this.policyFc.weight, this.policyFc.bias,
-          this.policyFc.outFeatures, this.policyFc.inFeatures, policyLogits);
+        policyLogits = new Float32Array(this.policyFc!.outFeatures);
+        this.policyFcCPU(policyFlats[b], policyLogits, new Float32Array(this.policyFc1?.outFeatures ?? 0));
       }
       const policy = new Float32Array(policyLogits.length);
       logSoftmax(policyLogits, policy, policyLogits.length);
@@ -879,6 +969,9 @@ export class GPUForwardPass {
       this.actFbA, this.actFbB, this.headFb, this.inputFb,
       this.actFbRgbaA, this.actFbRgbaB, this.headFbRgba,
     ];
+    if (this.poolTex) textures.push(this.poolTex);
+    if (this.poolFb) fbs.push(this.poolFb);
+    if (this.policyOut) textures.push(this.policyOut.weightTex, this.policyOut.biasTex);
     // R32F layers
     for (const layer of [this.inputConv, this.policyConv, this.valueConv]) {
       textures.push(layer.weightTex, layer.biasTex);
@@ -899,6 +992,7 @@ export class GPUForwardPass {
     for (const f of fbs) gl.deleteFramebuffer(f);
     for (const p of [
       this.conv3x3Relu, this.conv3x3NoRelu, this.residualRelu, this.conv1x1Relu,
+      this.conv1x1NoRelu, this.meanPool,
       this.conv3x3RgbaRelu, this.conv3x3RgbaNoRelu, this.conv3x3R2RgbaRelu,
       this.residualRgbaRelu, this.conv1x1RgbaToRRelu,
     ]) {
@@ -944,9 +1038,9 @@ export class GPUForwardPass {
     inputTex: WebGLTexture, conv: ConvLayerGPU,
     totalWidth: number, outC: number,
     _outTex: WebGLTexture, outFb: WebGLFramebuffer,
+    shader: ShaderProgram = this.conv1x1Relu,
   ): void {
     const gl = this.gl;
-    const shader = this.conv1x1Relu;
     gl.bindFramebuffer(gl.FRAMEBUFFER, outFb);
     gl.viewport(0, 0, totalWidth, outC);
     gl.useProgram(shader.program);
@@ -967,6 +1061,86 @@ export class GPUForwardPass {
 
     gl.bindVertexArray(this.vao);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  }
+
+  private runMeanPool(inputTex: WebGLTexture, n: number, channels: number, outFb: WebGLFramebuffer): void {
+    const gl = this.gl;
+    const shader = this.meanPool;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, outFb);
+    gl.viewport(0, 0, n, channels);
+    gl.useProgram(shader.program);
+
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, inputTex);
+    gl.uniform1i(shader.uniforms.uInput, 0);
+    gl.uniform1i(shader.uniforms.uSingleHW, HW);
+
+    gl.bindVertexArray(this.vao);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  }
+
+  /**
+   * v2 spatial policy head for N batch elements (tower output in towerTex).
+   * GPU: h = ReLU(conv3x3(tower)) → hTex (the free ping-pong buffer);
+   *      planes = conv1x1(h) + bias (64 ch) → headTex;  pooled = mean_hw(h) → poolTex.
+   * CPU: read back planes (64 x 56N) and pooled (N x F), END = policy_end(pooled),
+   *      gather into 3137 logits per element (written into outLogits[b]).
+   * Leaves headTex free for the value head afterwards.
+   */
+  private runSpatialPolicy(
+    towerTex: WebGLTexture, hTex: WebGLTexture, hFb: WebGLFramebuffer,
+    n: number, outLogits: Float32Array[],
+  ): void {
+    const gl = this.gl;
+    const f = this.config.numFilters;
+    const totalHW = HW * n;
+    const P = SPATIAL_POLICY_PLANES;
+
+    this.runConv3x3(this.conv3x3Relu, towerTex, this.policyConv, totalHW, f, hTex, hFb);
+    this.runConv1x1(hTex, this.policyOut!, totalHW, P, this.headTex, this.headFb, this.conv1x1NoRelu);
+
+    const planesSize = P * totalHW;
+    if (this.readBuf.length < planesSize * 4) this.readBuf = new Float32Array(planesSize * 4);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.headFb);
+    gl.readPixels(0, 0, totalHW, P, gl.RGBA, gl.FLOAT, this.readBuf);
+    // Row oc of the readback holds plane oc for all N elements side by side
+    const planes = Array.from({ length: n }, () => new Float32Array(P * HW));
+    for (let oc = 0; oc < P; oc++) {
+      for (let b = 0; b < n; b++) {
+        const dst = planes[b];
+        const rowOff = (oc * totalHW + b * HW) * 4;
+        for (let hw = 0; hw < HW; hw++) dst[oc * HW + hw] = this.readBuf[rowOff + hw * 4];
+      }
+    }
+
+    this.runMeanPool(hTex, n, f, this.poolFb!);
+    const poolRead = new Float32Array(n * f * 4);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.poolFb);
+    gl.readPixels(0, 0, n, f, gl.RGBA, gl.FLOAT, poolRead);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+
+    const pe = this.policyEnd!;
+    const pooled = new Float32Array(f);
+    const end = new Float32Array(1);
+    for (let b = 0; b < n; b++) {
+      for (let c = 0; c < f; c++) pooled[c] = poolRead[(c * n + b) * 4];
+      linearCPU(pooled, pe.weight, pe.bias, pe.outFeatures, pe.inFeatures, end);
+      gatherSpatialLogits(planes[b], end[0], outLogits[b]);
+    }
+  }
+
+  /** v1 FC policy head on CPU: (bottleneck FC + ReLU +) FC → logits. */
+  private policyFcCPU(policyFlat: Float32Array, out: Float32Array, hidden: Float32Array | null = this.policyHiddenBuf): void {
+    const fc = this.policyFc!;
+    if (this.policyFc1) {
+      const fc1 = this.policyFc1;
+      const h = hidden!;
+      linearCPU(policyFlat, fc1.weight, fc1.bias, fc1.outFeatures, fc1.inFeatures, h);
+      for (let i = 0; i < h.length; i++) h[i] = Math.max(0, h[i]);
+      linearCPU(h, fc.weight, fc.bias, fc.outFeatures, fc.inFeatures, out);
+    } else {
+      linearCPU(policyFlat, fc.weight, fc.bias, fc.outFeatures, fc.inFeatures, out);
+    }
   }
 
   private runResidualRelu(
@@ -1144,25 +1318,5 @@ export function createGPUModelFromOnnx(buffer: ArrayBuffer, canvas?: HTMLCanvasE
   const tensors = parseOnnxWeights(buffer);
   const tensorMap = new Map<string, WeightTensor>();
   for (const t of tensors) tensorMap.set(t.name, t);
-
-  const convTensors = tensors.filter(t => t.name.startsWith('onnx::Conv_'));
-  const firstConv = convTensors.find(t => t.shape.length === 4 && t.shape[1] !== t.shape[0]);
-  const numFilters = firstConv ? firstConv.shape[0] : 96;
-
-  const conv3x3Count = convTensors.filter(t => t.shape.length === 4 && t.shape[2] === 3).length;
-  const numBlocks = (conv3x3Count - 1) / 2;
-
-  const conv1x1s = convTensors.filter(t => t.shape.length === 4 && t.shape[2] === 1);
-  const policyFilters = conv1x1s[0]?.shape[0] ?? 2;
-  const valueFilters = conv1x1s[1]?.shape[0] ?? 1;
-
-  const valueFc1 = tensorMap.get('value_fc1.weight');
-  const valueHidden = valueFc1 ? valueFc1.shape[0] : 256;
-
-  const policyFc1 = tensorMap.get('policy_fc1.weight');
-  const policyHidden = policyFc1 ? policyFc1.shape[0] : 0;
-
-  return new GPUForwardPass({
-    numFilters, numBlocks, policyFilters, valueFilters, valueHidden, policyHidden,
-  }, tensorMap, canvas);
+  return new GPUForwardPass(inferModelConfig(tensorMap), tensorMap, canvas);
 }

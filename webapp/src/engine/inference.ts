@@ -15,6 +15,11 @@
  */
 
 import { type WeightTensor, parseOnnxWeights } from './onnxWeights';
+import {
+  type ModelConfig, inferModelConfig, sortedConvTensors, gatherSpatialLogits, SPATIAL_POLICY_PLANES,
+} from './modelConfig';
+
+export type { ModelConfig } from './modelConfig';
 
 // Board dimensions
 const ROWS = 8;
@@ -170,6 +175,24 @@ function conv1x1(
 }
 
 /**
+ * Conv2d (1x1) + bias, no ReLU (v2 spatial policy output conv).
+ */
+function conv1x1noRelu(
+  input: Float32Array, weight: Float32Array, bias: Float32Array,
+  inC: number, outC: number, HW: number,
+  output: Float32Array,
+): void {
+  gemm(weight, input, output, outC, inC, HW);
+  for (let oc = 0; oc < outC; oc++) {
+    const b = bias[oc];
+    const off = oc * HW;
+    for (let i = 0; i < HW; i++) {
+      output[off + i] += b;
+    }
+  }
+}
+
+/**
  * Linear (fully connected) layer: output = input @ weight^T + bias
  */
 function linear(
@@ -228,15 +251,6 @@ interface LinearLayer {
   inFeatures: number;
 }
 
-interface ModelConfig {
-  numFilters: number;
-  numBlocks: number;
-  policyFilters: number;
-  valueFilters: number;
-  valueHidden: number;
-  policyHidden: number;
-}
-
 export class PureTSModel {
   readonly config: ModelConfig;
 
@@ -245,8 +259,13 @@ export class PureTSModel {
   private resBlocks: Array<{ conv1: ConvLayer; conv2: ConvLayer }>;
   private policyConv: ConvLayer;
   private valueConv: ConvLayer;
-  private policyFc: LinearLayer;
+  // FC policy head (v1) — null for the spatial head
+  private policyFc: LinearLayer | null;
   private policyFc1: LinearLayer | null; // bottleneck hidden layer
+  // Spatial policy head (v2): policyConv is its 3x3 F->F conv; these are the
+  // 1x1 F->64 output conv (with bias) and the END_TURN linear on pooled features.
+  private policyOut: ConvLayer | null;
+  private policyEnd: LinearLayer | null;
   private valueFc1: LinearLayer;
   private valueFc2: LinearLayer;
 
@@ -261,19 +280,19 @@ export class PureTSModel {
   private policyOutBuf: Float32Array;
   private valueHiddenBuf: Float32Array;
   private valueOutBuf: Float32Array;
+  // Spatial head scratch (v2 only; zero-length for v1)
+  private spatialHBuf: Float32Array;
+  private spatialPlanesBuf: Float32Array;
+  private pooledBuf: Float32Array;
+  private endBuf: Float32Array;
 
   constructor(config: ModelConfig, weights: Map<string, WeightTensor>) {
     this.config = config;
     const f = config.numFilters;
+    const spatial = config.policyHead === 'spatial';
 
     // Sort conv tensors by ONNX node number
-    const convTensors = [...weights.values()]
-      .filter(t => t.name.startsWith('onnx::Conv_'))
-      .sort((a, b) => {
-        const numA = parseInt(a.name.split('_').pop()!);
-        const numB = parseInt(b.name.split('_').pop()!);
-        return numA - numB;
-      });
+    const convTensors = sortedConvTensors(weights.values());
 
     // Pair consecutive conv tensors as (weight, bias). If the export omitted
     // bias tensors (some seed models were exported with bias=False), bail out
@@ -295,7 +314,7 @@ export class PureTSModel {
     // Assign conv layers in model order:
     // 0: input conv
     // 1..2*numBlocks: residual blocks (2 convs each)
-    // 2*numBlocks+1: policy conv
+    // 2*numBlocks+1: policy conv (v1: 1x1 F->policy_filters; v2: 3x3 F->F)
     // 2*numBlocks+2: value conv
     // 2*numBlocks+3: difficulty conv (ignored)
     let idx = 0;
@@ -325,18 +344,30 @@ export class PureTSModel {
       };
     };
 
-    if (config.policyHidden > 0) {
-      this.policyFc1 = getFC('policy_fc1');
-      this.policyFc = getFC('policy_fc2');
-    } else {
+    if (spatial) {
       this.policyFc1 = null;
-      this.policyFc = getFC('policy_fc');
+      this.policyFc = null;
+      this.policyOut = {
+        weight: weights.get('policy_out.weight')!.data,
+        bias: weights.get('policy_out.bias')!.data,
+      };
+      this.policyEnd = getFC('policy_end');
+    } else {
+      this.policyOut = null;
+      this.policyEnd = null;
+      if (config.policyHidden > 0) {
+        this.policyFc1 = getFC('policy_fc1');
+        this.policyFc = getFC('policy_fc2');
+      } else {
+        this.policyFc1 = null;
+        this.policyFc = getFC('policy_fc');
+      }
     }
     this.valueFc1 = getFC('value_fc1');
     this.valueFc2 = getFC('value_fc2');
 
     // Pre-allocate ALL scratch buffers — forward() does zero allocations
-    this.inputColBuf = new Float32Array(7 * 9 * HW);
+    this.inputColBuf = new Float32Array(config.numInputPlanes * 9 * HW);
     this.colBuf = new Float32Array(f * 9 * HW);
     this.towerBuf1 = new Float32Array(f * HW);
     this.towerBuf2 = new Float32Array(f * HW);
@@ -346,15 +377,21 @@ export class PureTSModel {
     ));
     this.policyHiddenBuf = this.policyFc1
       ? new Float32Array(this.policyFc1.outFeatures) : null;
-    this.policyLogitsBuf = new Float32Array(this.policyFc.outFeatures);
-    this.policyOutBuf = new Float32Array(this.policyFc.outFeatures);
+    const numActions = this.policyFc ? this.policyFc.outFeatures : 3137;
+    this.policyLogitsBuf = new Float32Array(numActions);
+    this.policyOutBuf = new Float32Array(numActions);
     this.valueHiddenBuf = new Float32Array(this.valueFc1.outFeatures);
     this.valueOutBuf = new Float32Array(1);
+    this.spatialHBuf = new Float32Array(spatial ? f * HW : 0);
+    this.spatialPlanesBuf = new Float32Array(spatial ? SPATIAL_POLICY_PLANES * HW : 0);
+    this.pooledBuf = new Float32Array(spatial ? f : 0);
+    this.endBuf = new Float32Array(1);
   }
 
   /**
    * Run forward pass.
-   * @param input Float32Array of shape (7, 8, 7) = 392 elements in CHW order
+   * @param input Float32Array of shape (numInputPlanes, 8, 7) in CHW order
+   *   (392 elements for v1 networks, 504 for v2 — see stateToTensor)
    * @returns policy (log-probs, 3137 elements) and value (scalar in [-1, 1])
    *
    * NOTE: The returned policy Float32Array is reused across calls.
@@ -362,10 +399,14 @@ export class PureTSModel {
    */
   forward(input: Float32Array): { policy: Float32Array; value: number } {
     const f = this.config.numFilters;
+    const inPlanes = this.config.numInputPlanes;
+    if (input.length !== inPlanes * HW) {
+      throw new Error(`PureTSModel.forward: input has ${input.length} floats, model expects ${inPlanes} planes (${inPlanes * HW})`);
+    }
 
-    // Input conv (7 → f) + fused BN + ReLU
+    // Input conv (planes → f) + fused BN + ReLU
     conv3x3relu(input, this.inputConv.weight, this.inputConv.bias,
-      7, f, ROWS, COLS, this.inputColBuf, this.towerBuf1);
+      inPlanes, f, ROWS, COLS, this.inputColBuf, this.towerBuf1);
 
     // Residual tower
     let current = this.towerBuf1;
@@ -396,15 +437,33 @@ export class PureTSModel {
     // Tower output is in `current`
 
     // --- Policy head ---
-    const pf = this.config.policyFilters;
-    const policyHead = this.headBuf;
-    conv1x1(current, this.policyConv.weight, this.policyConv.bias,
-      f, pf, HW, policyHead);
-
-    const policyFlat = policyHead.subarray(0, pf * HW);
     const policyLogits = this.policyLogitsBuf;
 
-    if (this.policyFc1) {
+    if (this.policyOut) {
+      // Spatial head (v2): h = ReLU(BN(conv3x3(tower))) (BN fused)
+      const h = this.spatialHBuf;
+      conv3x3relu(current, this.policyConv.weight, this.policyConv.bias,
+        f, f, ROWS, COLS, col, h);
+      // Per-square move planes: conv1x1 F->64 with bias, plane-major
+      const planes = this.spatialPlanesBuf;
+      conv1x1noRelu(h, this.policyOut.weight, this.policyOut.bias,
+        f, SPATIAL_POLICY_PLANES, HW, planes);
+      // END_TURN from h averaged over the board
+      const pooled = this.pooledBuf;
+      for (let c = 0; c < f; c++) {
+        let sum = 0;
+        const off = c * HW;
+        for (let i = 0; i < HW; i++) sum += h[off + i];
+        pooled[c] = sum / HW;
+      }
+      const pe = this.policyEnd!;
+      linear(pooled, pe.weight, pe.bias, pe.outFeatures, pe.inFeatures, this.endBuf);
+      gatherSpatialLogits(planes, this.endBuf[0], policyLogits);
+    } else if (this.policyFc1) {
+      const pf = this.config.policyFilters;
+      const policyFlat = this.headBuf.subarray(0, pf * HW);
+      conv1x1(current, this.policyConv.weight, this.policyConv.bias,
+        f, pf, HW, this.headBuf);
       // Bottleneck: FC1 + ReLU + FC2
       const hidden = this.policyHiddenBuf!;
       linear(policyFlat, this.policyFc1.weight, this.policyFc1.bias,
@@ -412,11 +471,15 @@ export class PureTSModel {
       for (let i = 0; i < hidden.length; i++) {
         hidden[i] = Math.max(0, hidden[i]);
       }
-      linear(hidden, this.policyFc.weight, this.policyFc.bias,
-        this.policyFc.outFeatures, this.policyFc.inFeatures, policyLogits);
+      const fc = this.policyFc!;
+      linear(hidden, fc.weight, fc.bias, fc.outFeatures, fc.inFeatures, policyLogits);
     } else {
-      linear(policyFlat, this.policyFc.weight, this.policyFc.bias,
-        this.policyFc.outFeatures, this.policyFc.inFeatures, policyLogits);
+      const pf = this.config.policyFilters;
+      const policyFlat = this.headBuf.subarray(0, pf * HW);
+      conv1x1(current, this.policyConv.weight, this.policyConv.bias,
+        f, pf, HW, this.headBuf);
+      const fc = this.policyFc!;
+      linear(policyFlat, fc.weight, fc.bias, fc.outFeatures, fc.inFeatures, policyLogits);
     }
 
     // Log-softmax
@@ -459,36 +522,5 @@ export function createModelFromOnnx(buffer: ArrayBuffer): PureTSModel {
   for (const t of tensors) {
     tensorMap.set(t.name, t);
   }
-
-  // Infer config from weight shapes
-  const convTensors = tensors.filter(t => t.name.startsWith('onnx::Conv_'));
-  const firstConv = convTensors.find(t => t.shape.length === 4 && t.shape[1] !== t.shape[0]);
-  const numFilters = firstConv ? firstConv.shape[0] : 96;
-
-  // Count res block convs: total conv3x3 pairs minus input conv = 2 * numBlocks
-  const conv3x3Count = convTensors.filter(t => t.shape.length === 4 && t.shape[2] === 3).length;
-  const numBlocks = (conv3x3Count - 1) / 2; // subtract input conv
-
-  // Policy/value filter counts from 1x1 conv shapes
-  const conv1x1s = convTensors.filter(t => t.shape.length === 4 && t.shape[2] === 1);
-  const policyFilters = conv1x1s[0]?.shape[0] ?? 2;
-  const valueFilters = conv1x1s[1]?.shape[0] ?? 1;
-
-  // FC hidden sizes
-  const valueFc1 = tensorMap.get('value_fc1.weight');
-  const valueHidden = valueFc1 ? valueFc1.shape[0] : 256;
-
-  const policyFc1 = tensorMap.get('policy_fc1.weight');
-  const policyHidden = policyFc1 ? policyFc1.shape[0] : 0;
-
-  const config: ModelConfig = {
-    numFilters,
-    numBlocks,
-    policyFilters,
-    valueFilters,
-    valueHidden,
-    policyHidden,
-  };
-
-  return new PureTSModel(config, tensorMap);
+  return new PureTSModel(inferModelConfig(tensorMap), tensorMap);
 }

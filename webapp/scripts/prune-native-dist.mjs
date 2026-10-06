@@ -23,6 +23,7 @@ const TEST_FILES = [
   'test-chrome.html',
   'test-webgl-inference.html',
   'inference-fixtures.json',
+  'inference-fixtures-v2.json',
 ];
 
 let freed = 0;

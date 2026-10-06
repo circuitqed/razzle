@@ -89,11 +89,14 @@ The webapp includes a full TypeScript port of the game engine and MCTS, enabling
 - Models are loaded reactively when `aiModel` changes in useGame
 - `random_weights` uses a RandomEvaluator (no ONNX needed)
 - ONNX protobuf parser handles PyTorch field 9 (opset 17+) for tensor data
+- Two network generations, detected from the ONNX weights (`src/engine/modelConfig.ts#inferModelConfig`): v1 = 7 input planes + FC policy head; v2 = 9 planes (7: opponent's last knight dst one-hot, 8: forced pass) + spatial policy head (`policy_out.*`/`policy_end.*` weights; 64x56 move planes gathered via `SPATIAL_ACTION_INDEX`). `stateToTensor(state, out, 9)` builds v2 inputs; evaluators size inputs from `model.config.numInputPlanes` (ORT path: `onnxInputPlanes(buffer)`). The legacy `webglInference.ts` is v1-only.
 
 ### Testing
 - `test-webgl-inference.html` — self-contained browser test comparing CPU vs GPU inference + Python reference
 - `test-mcts.html` — full MCTS comparison (CPU vs GPU, visit counts)
 - `src/engine/__tests__/inference-fixtures.json` — 20 positions with Python reference outputs
+- `src/engine/__tests__/inference-fixtures-v2.json` — 20 real self-play positions (forced-pass, pass-chain, player 1) for a v2 net, from `engine/scripts/gen_v2_inference_fixtures.py`; tested by `inference-v2.test.ts` (needs `<model>.onnx` in `engine/output/models` or `/tmp/models`, else skips)
+- `webgl-forward-emulated.test.ts` — runs `GPUForwardPass` against a fake WebGL2 context with JS ports of the shaders (v1 + v2); not a substitute for a real GPU run
 - Run via Playwright: `mcr.microsoft.com/playwright:v1.58.2-noble`
 
 ### iOS on-device test suite

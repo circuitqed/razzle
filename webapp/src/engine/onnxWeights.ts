@@ -193,6 +193,72 @@ function isTensor(t: WeightTensor | TensorDebug): t is WeightTensor {
 
 // --- ModelProto / GraphProto parser ---
 
+/** Field `field` (length-delimited) of a message, or null. Returns the first occurrence. */
+function findSubmessage(buf: Uint8Array, field: number): Uint8Array | null {
+  let pos = 0;
+  while (pos < buf.length) {
+    const [fieldNumber, wireType, tagEnd] = readTag(buf, pos);
+    pos = tagEnd;
+    if (fieldNumber === field && wireType === 2) {
+      return readLengthDelimited(buf, pos)[0];
+    }
+    pos = skipField(buf, pos, wireType);
+  }
+  return null;
+}
+
+/**
+ * Shape of the model's first graph input (dim_value per axis; -1 for symbolic
+ * dims like "batch"), read straight from the protobuf without touching weights.
+ * ModelProto.graph(7) → GraphProto.input(11) → ValueInfoProto.type(2) →
+ * TypeProto.tensor_type(1) → shape(2) → dim(1)* → dim_value(1) | dim_param(2).
+ */
+export function onnxInputShape(buffer: ArrayBuffer): number[] | null {
+  const graph = findSubmessage(new Uint8Array(buffer), 7);
+  if (!graph) return null;
+  const input = findSubmessage(graph, 11);
+  const typeProto = input && findSubmessage(input, 2);
+  const tensorType = typeProto && findSubmessage(typeProto, 1);
+  const shape = tensorType && findSubmessage(tensorType, 2);
+  if (!shape) return null;
+  const dims: number[] = [];
+  let pos = 0;
+  while (pos < shape.length) {
+    const [fieldNumber, wireType, tagEnd] = readTag(shape, pos);
+    pos = tagEnd;
+    if (fieldNumber === 1 && wireType === 2) {
+      const [dim, end] = readLengthDelimited(shape, pos);
+      pos = end;
+      let value = -1;
+      let p = 0;
+      while (p < dim.length) {
+        const [f, wt, te] = readTag(dim, p);
+        p = te;
+        if (f === 1 && wt === 0) {
+          [value, p] = readVarint64(dim, p);
+        } else {
+          p = skipField(dim, p, wt);
+        }
+      }
+      dims.push(value);
+    } else {
+      pos = skipField(shape, pos, wireType);
+    }
+  }
+  return dims;
+}
+
+/**
+ * Number of input planes the network expects: 7 (v1) or 9 (v2).
+ * Reads the graph input shape [batch, C, 8, 7]; defaults to 7 if it is missing
+ * or unexpected (all pre-v2 exports are 7-plane).
+ */
+export function onnxInputPlanes(buffer: ArrayBuffer): number {
+  const shape = onnxInputShape(buffer);
+  if (shape && shape.length === 4 && (shape[1] === 7 || shape[1] === 9)) return shape[1];
+  return 7;
+}
+
 /**
  * Parse an ONNX model file and extract all float32 initializer tensors.
  */

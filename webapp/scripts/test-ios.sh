@@ -50,6 +50,21 @@ if [ -f "$CACHE/fixtures-$FIXMODEL.onnx" ]; then
   cp "$CACHE/fixtures-$FIXMODEL.onnx" dist/test-model-fixtures.onnx
 fi
 
+# Same for the v2 (9-plane, spatial policy head) fixtures' model.
+FIXMODEL2=$(python3 -c 'import json; print(json.load(open("public/inference-fixtures-v2.json"))["model"])' 2>/dev/null || true)
+if [ -n "$FIXMODEL2" ] && [ ! -f "$CACHE/fixtures-$FIXMODEL2.onnx" ]; then
+  step "Fetching v2 fixtures model $FIXMODEL2 (one-time)"
+  if INFO=$(curl -sf "https://knightball.org/api/models/onnx/by-name/$FIXMODEL2"); then
+    URLPATH=$(echo "$INFO" | python3 -c 'import json,sys; print(json.load(sys.stdin)["url"])')
+    curl -sf "https://knightball.org/api${URLPATH}" -o "$CACHE/fixtures-$FIXMODEL2.onnx" || true
+  else
+    echo "    v2 fixtures model '$FIXMODEL2' not on server — v2 reference checks will be skipped"
+  fi
+fi
+if [ -n "$FIXMODEL2" ] && [ -f "$CACHE/fixtures-$FIXMODEL2.onnx" ]; then
+  cp "$CACHE/fixtures-$FIXMODEL2.onnx" dist/test-model-fixtures-v2.onnx
+fi
+
 step "Syncing Capacitor"
 npx cap sync ios >/dev/null
 

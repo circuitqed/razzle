@@ -15,6 +15,8 @@ import type { PureTSModel } from './inference';
 import type { WebGLModel } from './webglInference';
 import type { GPUForwardPass } from './webglForwardPass';
 
+const HW = 8 * 7;
+
 export interface Evaluator {
   evaluate(state: EngineState): Promise<{ policy: Float32Array; value: number }>;
   /** Optional batch evaluation — processes multiple states in a single GPU call. */
@@ -31,21 +33,30 @@ export interface Evaluator {
 export class OnnxEvaluator implements Evaluator {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private session: any;
+  /** Network input planes: 7 (v1) or 9 (v2). */
+  readonly numInputPlanes: number;
 
+  /**
+   * @param numInputPlanes 7 (v1) or 9 (v2). Pass onnxInputPlanes(modelBuffer)
+   *   (onnxWeights.ts); if omitted, read from the session's input metadata
+   *   (onnxruntime-web >= 1.20), else 7.
+   */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  constructor(session: any) {
+  constructor(session: any, numInputPlanes?: number) {
     this.session = session;
+    this.numInputPlanes = numInputPlanes ?? sessionInputPlanes(session) ?? 7;
   }
 
   async evaluate(
     state: EngineState,
   ): Promise<{ policy: Float32Array; value: number }> {
-    const tensor = stateToTensor(state);
+    const planes = this.numInputPlanes;
+    const tensor = stateToTensor(state, undefined, planes);
 
-    // Create ONNX tensor: shape [1, 7, 8, 7]
+    // Create ONNX tensor: shape [1, planes, 8, 7]
     // ort is loaded in the worker context
     const ort = self.ort ?? (await import('onnxruntime-web'));
-    const inputTensor = new ort.Tensor('float32', tensor, [1, 7, 8, 7]);
+    const inputTensor = new ort.Tensor('float32', tensor, [1, planes, 8, 7]);
     const feeds = { board_input: inputTensor };
 
     const results = await this.session.run(feeds);
@@ -76,6 +87,18 @@ export class OnnxEvaluator implements Evaluator {
   }
 }
 
+/** Channel dim of the session's first input, if onnxruntime exposes input metadata. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function sessionInputPlanes(session: any): number | undefined {
+  try {
+    const meta = session?.inputMetadata?.[0];
+    const c = meta?.shape?.[1];
+    return c === 7 || c === 9 ? c : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Pure TypeScript evaluator — no WASM, no SharedArrayBuffer.
  *
@@ -93,7 +116,8 @@ export class PureTSEvaluator implements Evaluator {
 
   constructor(model: PureTSModel) {
     this.model = model;
-    this.tensorBuf = new Float32Array(7 * 8 * 7); // 392
+    // 392 floats for v1 (7 planes), 504 for v2 (9 planes)
+    this.tensorBuf = new Float32Array(model.config.numInputPlanes * HW);
     this.policyBuf = new Float32Array(NUM_ACTIONS);
   }
 
@@ -185,7 +209,7 @@ export class GPUEvaluator implements Evaluator {
 
   constructor(model: GPUForwardPass) {
     this.model = model;
-    this.tensorBuf = new Float32Array(7 * 8 * 7);
+    this.tensorBuf = new Float32Array(model.config.numInputPlanes * HW);
     this.policyBuf = new Float32Array(NUM_ACTIONS);
   }
 
@@ -224,7 +248,7 @@ export class GPUEvaluator implements Evaluator {
 
     // Convert states to tensors
     const tensors = states.map(s => {
-      const buf = new Float32Array(7 * 8 * 7);
+      const buf = new Float32Array(this.model.config.numInputPlanes * HW);
       stateToTensor(s, buf);
       return buf;
     });

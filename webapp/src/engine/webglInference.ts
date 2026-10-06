@@ -10,6 +10,7 @@
  */
 
 import { type WeightTensor, parseOnnxWeights } from './onnxWeights';
+import { inferModelConfig } from './modelConfig';
 import { WebGLGemm } from './webglGemm';
 
 const ROWS = 8;
@@ -322,23 +323,12 @@ export function createWebGLModelFromOnnx(buffer: ArrayBuffer, canvas?: HTMLCanva
   const tensorMap = new Map<string, WeightTensor>();
   for (const t of tensors) tensorMap.set(t.name, t);
 
-  const convTensors = tensors.filter(t => t.name.startsWith('onnx::Conv_'));
-  const firstConv = convTensors.find(t => t.shape.length === 4 && t.shape[1] !== t.shape[0]);
-  const numFilters = firstConv ? firstConv.shape[0] : 96;
-
-  const conv3x3Count = convTensors.filter(t => t.shape.length === 4 && t.shape[2] === 3).length;
-  const numBlocks = (conv3x3Count - 1) / 2;
-
-  const conv1x1s = convTensors.filter(t => t.shape.length === 4 && t.shape[2] === 1);
-  const policyFilters = conv1x1s[0]?.shape[0] ?? 2;
-  const valueFilters = conv1x1s[1]?.shape[0] ?? 1;
-
-  const valueFc1 = tensorMap.get('value_fc1.weight');
-  const valueHidden = valueFc1 ? valueFc1.shape[0] : 256;
-
-  const policyFc1 = tensorMap.get('policy_fc1.weight');
-  const policyHidden = policyFc1 ? policyFc1.shape[0] : 0;
-
+  const cfg = inferModelConfig(tensorMap);
+  if (cfg.numInputPlanes !== 7 || cfg.policyHead !== 'fc') {
+    // Legacy per-call-GEMM path: v1 only. v2 networks run on GPUForwardPass.
+    throw new Error('createWebGLModelFromOnnx supports v1 networks only (7 planes, FC policy head); use createGPUModelFromOnnx');
+  }
+  const { numFilters, numBlocks, policyFilters, valueFilters, valueHidden, policyHidden } = cfg;
   return new WebGLModel({
     numFilters, numBlocks, policyFilters, valueFilters, valueHidden, policyHidden,
   }, tensorMap, canvas);
