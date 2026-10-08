@@ -30,6 +30,9 @@
  *  backend   — prod REST/WS integration: health, models, game CRUD, undo,
  *              resign, server-AI posture, worker-context CORS, anon identity
  *              (X-Anon-Id) persistence, WSS auth
+ *  ladder    — OPT-IN (groups=ladder): app levels (?levels=1,10,20) from the
+ *              BUNDLED models with the native 10s/4s time budgets, AI vs
+ *              random mover as P0 and P1; reports ms/move and sims/sec
  *
  * Query params:
  *   ?groups=env,rules,...   run a subset (default: all)
@@ -55,6 +58,7 @@ import { search, DEFAULT_CONFIG } from './engine/mcts';
 import { clearModelCache } from './engine/modelCache';
 import { API_BASE, isNativeApp, gameWebSocketUrl, installNativeIdentity, setNativeAuthToken } from './api/base';
 import { TIERS } from './utils/autoMatch';
+import { getBundledModelInfo } from './engine/bundledModels';
 
 installNativeIdentity();
 
@@ -1096,6 +1100,70 @@ async function groupBackend() {
   }
 }
 
+
+// ladder (opt-in): app levels vs random mover with BUNDLED models and the
+// app's native time budgets (useGame.ts: 10s search, 4s continuation).
+function ladderSearch(worker: Worker, state: EngineState, numSimulations: number, maxTimeMs: number): Promise<SearchResult & { searchMs?: number }> {
+  return new Promise((resolve) => {
+    const onMsg = (event: MessageEvent) => {
+      if (event.data.type === 'search_result') { worker.removeEventListener('message', onMsg); resolve(event.data); }
+    };
+    worker.addEventListener('message', onMsg);
+    worker.postMessage({ type: 'search', state: serializeState(state), config: { numSimulations, maxTimeMs } });
+  });
+}
+
+async function groupLadder() {
+  p('', undefined);
+  p('=== ladder: bundled v2 models at app levels (native time budget) ===', 'info');
+  const levels = (params.get('levels') ?? '1,10,20').split(',').map((s) => parseInt(s, 10));
+  for (const level of levels) {
+    const tier = TIERS[level - 1];
+    const version = tier.model.replace(/\.pt$/, '');
+    const info = await getBundledModelInfo(version);
+    check(`L${level}: ${version} is bundled`, info !== null);
+    if (!info) continue;
+    const worker = createAIWorker();
+    const loaded = await loadModel(worker, info.url, info.version);
+    check(`L${level}: worker loads bundled model`, loaded.success, loaded.success ? `backend=${loaded.backend}` : loaded.error);
+    if (!loaded.success) { worker.terminate(); continue; }
+    for (const aiPlayer of [0, 1]) {
+      const rng = makeRng(1000 + level * 2 + aiPlayer);
+      let state = newGame();
+      let plies = 0, illegal = 0, sims = 0;
+      const ms: number[] = [];
+      while (!isTerminal(state) && plies < 400) {
+        let move: number;
+        if (state.currentPlayer === aiPlayer) {
+          const budget = state.hasPassed ? 4_000 : 10_000;
+          const t = performance.now();
+          const r = await ladderSearch(worker, state, tier.sims, budget);
+          ms.push(performance.now() - t);
+          if (!r.success) throw new Error('search failed: ' + r.error);
+          sims += r.simsDone;
+          move = r.bestMove;
+          if (!getLegalMoves(state).includes(move)) { illegal++; move = getLegalMoves(state)[0]; }
+        } else {
+          const moves = getLegalMoves(state);
+          move = moves[Math.floor(rng.next() * moves.length)];
+        }
+        state = copyState(state);
+        applyMove(state, move);
+        plies++;
+      }
+      const total = ms.reduce((a, b) => a + b, 0);
+      const sorted = [...ms].sort((a, b) => a - b);
+      p(`  L${level} (${version}, ${tier.sims} sims) as P${aiPlayer}: winner=${getWinner(state)} plies=${plies} aiMoves=${ms.length} ` +
+        `ms/move avg=${(total / ms.length).toFixed(0)} med=${sorted[Math.floor(sorted.length / 2)].toFixed(0)} max=${sorted[sorted.length - 1].toFixed(0)} ` +
+        `sims/move=${(sims / ms.length).toFixed(0)} ${(sims / (total / 1000)).toFixed(1)} sims/sec`, 'dim');
+      check(`L${level} as P${aiPlayer}: legal moves only`, illegal === 0, `${illegal} illegal`);
+      check(`L${level} as P${aiPlayer}: beats random mover`, getWinner(state) === aiPlayer, `winner=${getWinner(state)}`);
+      check(`L${level} as P${aiPlayer}: max move ≤ 11s`, sorted[sorted.length - 1] <= 11_000, `${sorted[sorted.length - 1].toFixed(0)}ms`);
+    }
+    worker.terminate();
+  }
+}
+
 // --------------------------------------------------------------------- main
 
 const ALL_GROUPS: Record<string, () => Promise<void>> = {
@@ -1107,10 +1175,12 @@ const ALL_GROUPS: Record<string, () => Promise<void>> = {
   game: groupGame,
   soak: groupSoak,
   backend: groupBackend,
+  ladder: groupLadder,
 };
 
 async function run() {
-  const requested = (params.get('groups') ?? Object.keys(ALL_GROUPS).join(','))
+  // ladder is opt-in (~3.5 min): scripts/test-ios.sh 'groups=ladder' [&levels=1,10,20]
+  const requested = (params.get('groups') ?? Object.keys(ALL_GROUPS).filter((g) => g !== 'ladder').join(','))
     .split(',').map((s) => s.trim()).filter((s) => s in ALL_GROUPS);
   // Back-compat with the v1 harness flag.
   const groups = params.get('skipbackend') === '1' ? requested.filter((g) => g !== 'backend') : requested;

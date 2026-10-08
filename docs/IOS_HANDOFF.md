@@ -755,3 +755,31 @@ ASK:
 COMING: new ladder (v2 students 16x2 … 128x16 replacing pegasus at levels 1–20) once
 calibration finishes; that changes the bundled models, so a second test round follows.
 BLOCKED: no
+
+## 2026-10-08T19:30:00Z — [MINI]
+STATUS: iOS test round on main@abe43a9 (simulator only): ALL GREEN. No real iPhone attached.
+Xcode 27.0 (27A266a); license + runFirstLaunch done by Dave. The first run on c8eefc9 was INVALID:
+the build failed (CoreSimulator out of date) and the script tested a stale App.app. Fixed in abe43a9;
+this run's build is confirmed `** BUILD SUCCEEDED **`.
+test:ios (iPhone 17 Pro sim, all default groups, 140.6s): 76/76
+  env 5/5 · rules 16/16 · inference 15/15 · mcts 2/2 · cache 4/4 · game 6/6 · soak 2/2 · backend 26/26
+  v2 checks RAN (not skipped), phoenix3_iter_235: GPU-vs-CPU max|dp| 7.7e-7, CPU-vs-Python
+  1.27e-6, GPU-vs-Python 9.5e-7, value maxΔ ≤ 3e-6, top move 20/20 (CPU and GPU).
+  backend: "all 6 difficulty-tier models resolve".
+SPEED (sim): mcts group (main thread, 128 sims): GPU 4006 ms/search (~32 sims/s), CPU 7683 ms
+  (~17 sims/s). game group (ai.worker, iter_865, 128 sims): 88.0 / 84.2 sims/s.
+LADDER (new opt-in group `scripts/test-ios.sh 'groups=ladder'`, 24/24): BUNDLED models, native
+budgets (10s search / 4s continuation), AI vs random mover as P0 and P1. All 6 bundled loads OK,
+backend=gpu, 0 illegal moves, AI won all 6 games.
+  L1  16x2  1 sims:    ~12 ms/move, max 30 ms (as P0 needed 247 plies to beat random; weak, as intended)
+  L10 32x4  64 sims:   avg 437–464 ms, max 1036 ms, ~107–123 sims/s (search ends early, ~50–54 sims/move)
+  L20 96x12 1024 sims: avg 6.4–7.6 s, med 8.0–10.0 s, MAX 10.26 / 10.90 s; ~720 sims/move,
+      96–112 sims/s. The 10s cap binds as expected; it overshoots by ≤0.9s (cap checked between batches).
+OFFLINE SMOKE: NOT DONE. The simulator has no airplane mode; it shares the mini's network, and cutting
+  that would drop Dave's remote session. What is verified: every ladder level loads from the app bundle
+  (no network fetch). Still unverified: the offline game flow and the replay to history on reconnect.
+  Needs a real iPhone in airplane mode (Dave, or a TestFlight build).
+TESTFLIGHT: not uploaded. Waiting on Dave's direct OK in the MINI session. Not submitted for review.
+BRANCH: this entry + the ladder group are on `mini/ios-test-round` (based on main; ios-app has diverged).
+  Please merge.
+BLOCKED: offline smoke test (needs a device); TestFlight upload (Dave's OK).
