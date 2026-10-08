@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=kb-distill
-#SBATCH --partition=owners
+#SBATCH --partition=owners,gpu
 #SBATCH --gpus=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=48G
