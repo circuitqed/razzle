@@ -21,11 +21,12 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const MODELS = [
-  { version: 'pegasus_iter_050', sha256: '564ea2f2ab70d95d49691c67baf18000b9fd68512a9a1aac1d30be494484fe5a' },
-  { version: 'distill_s32x4', sha256: '265b8fb515e7f27b091c74079c757db9432e5898b2d690fa01cf188fc1d5839d' },
-  { version: 'distill_s48x6', sha256: 'ebd5b2bcb29d9b48692b20e7739afa49bb9da1a2cb6dc4daa716a515626b9652' },
-  { version: 'distill_s64x8', sha256: '50dfa5d2adcfd0b8f57a10d3e087f5889af51956b4f9a3c159b9f4a4283e651f' },
-  { version: 'distill_s96x12', sha256: '10586464ebe90e14119fb5b521c977d2f42b4340dcb4c4dccb4b14048423a309' },
+  { version: 'distill_v2_16x2', sha256: '53f56803d504868b1c3b929bc034dbb6a59d4e5d35b4a484784e9d896f93c439' },
+  { version: 'distill_v2_24x3', sha256: '77521ea3f8d19bd83f6a902d657152bf0abbb8470e39064d867930fd2a2ec6f7' },
+  { version: 'distill_v2_32x4', sha256: 'b791f756c852e55b691775962ceb81bb8748c4b53ab1d5bce74823d38209f632' },
+  { version: 'distill_v2_48x6', sha256: '2591c72bbbd92dcc465b7f76526834cdc5cd8d090d83b6e4dfd306acaccb2b54' },
+  { version: 'distill_v2_64x8', sha256: '876f761a3f88c0f2c3fcd1df0645c0b8ba72b23e33f391232e4ad84c4d476627' },
+  { version: 'distill_v2_96x12', sha256: '22a5da34b981af85f9d059cb2eb257a7b0001827154b07bdedc953fa0e3ed753' },
 ];
 
 const DOWNLOAD_BASE = 'https://knightball.org/api/models/onnx';

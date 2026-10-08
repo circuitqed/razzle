@@ -193,3 +193,33 @@ policy targets; see GUMBEL_SEARCH.md).
 
 Tooling added: fixed deep-search benchmark (agreement with 3200-sim moves on 62,914 held-out
 positions), gates on the trainer's GPU (no Sherlock queue), offline replay A/B on vast.ai.
+
+## 11. v2 student ladder for the app (Oct 7-8 2026)
+
+Seven v2 students (9-plane input, spatial policy head) were distilled from phoenix3_iter_000
+on all 1.6M archived games (½ MCTS visits + ½ teacher policy; ½ outcome + ½ teacher value),
+for 100k-250k steps. They were trained on vast.ai RTX 3090s (~$1.30 in total) and on Sherlock.
+
+| Student | Matches the teacher's top move | Teacher KL | Value MSE vs teacher |
+|---|---|---|---|
+| 16x2 | 0.595 | 0.438 | 0.097 |
+| 24x3 | 0.684 | 0.280 | 0.071 |
+| 32x4 | 0.749 | 0.185 | 0.049 |
+| 48x6 | 0.804 | 0.100 | 0.029 |
+| 64x8 | 0.829 | 0.079 | 0.023 |
+| 96x12 | 0.844 | 0.068 | 0.022 |
+| 128x16 | 0.849 | 0.065 | 0.024 |
+
+Calibration: 117 new 200-game matches (Sherlock H100/H200, about 1 h), fitted jointly with
+the 111 earlier matches (Bradley-Terry; `scripts/distill/calibration.py fit`). The data is in
+`docs/calibration/`. The displayed rating is 880 + Elo relative to pegasus_iter_050 at 1 sim.
+
+- **v2 students beat v1 students of the same size.** v2 96x12 at 1024 sims rates 2225, against
+  2107 for v1 s96x12.
+- **128x16 is not worth it.** At equal sims it is only ~20-40 Elo above 96x12 (256: 2066 vs
+  2025; 512: 2171 vs 2136; 1024: 2245 vs 2225). It costs about twice the compute, and a
+  doubling of sims is worth ~100 Elo. The ladder stops at 96x12.
+- **Very low sim counts are noisy.** 16x2 at 2 and at 4 sims rate about the same.
+- The app ladder (`webapp/src/utils/autoMatch.ts` TIERS) uses the smallest network that
+  reaches each level's rating, spanning 815 (16x2 @ 1 sim) to 2225 (96x12 @ 1024 sims), with
+  steps of 56-98 Elo. Levels 1-5 cost 50-100x less per evaluation than the old pegasus_iter_050 levels.

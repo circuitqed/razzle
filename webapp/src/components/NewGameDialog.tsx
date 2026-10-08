@@ -63,7 +63,7 @@ const SIMULATION_OPTIONS = [
   { value: 65536, label: '64K' },
 ];
 
-// Bot difficulty presets from pegasus training run Elo tournament.
+// Bot difficulty presets: named points on the calibrated ladder.
 // model/sims come from the shared TIERS ladder (utils/autoMatch.ts) — the
 // single source of truth for which model files exist — so the two tables
 // can't drift when checkpoints are re-tiered. Preset level N = TIERS[N-1].
