@@ -26,6 +26,7 @@ import AboutPage from './components/AboutPage';
 import NewGameDialog from './components/NewGameDialog';
 import type { NewGameSettings } from './components/NewGameDialog';
 import { BOT_PRESETS } from './components/NewGameDialog';
+import ThinkingIndicator from './components/ThinkingIndicator';
 import { useGame } from './hooks/useGame';
 import { setSoundEnabled, isSoundEnabled } from './utils/sounds';
 import { adjustAfterGame, getAutoMatchLevel, getLevelLabel, getTierSettings } from './utils/autoMatch';
@@ -740,13 +741,7 @@ function AppContent() {
                   <span className={`inline-block px-3 py-0.5 rounded text-white text-sm font-medium ${turnIndicator.colorClass}`}>
                     {turnIndicator.text}
                   </span>
-                  {turnIndicator.isThinking && (
-                    <span className="text-blue-400 text-sm animate-pulse">
-                      thinking{aiProgress && aiProgress.totalSims > 0
-                        ? ` ${Math.min(99, Math.round((100 * aiProgress.simsDone) / aiProgress.totalSims))}%`
-                        : '...'}
-                    </span>
-                  )}
+                  {turnIndicator.isThinking && <ThinkingIndicator progress={aiProgress} />}
                   {aiModelLoading && !turnIndicator.isThinking && (
                     <span className="text-yellow-400 text-xs animate-pulse">loading model...</span>
                   )}

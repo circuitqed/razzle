@@ -9,6 +9,8 @@
  * difficulty curve from random-ish play up to near-maximum strength.
  */
 
+import { isDesktopWeb } from './device';
+
 const STORAGE_KEY = 'knightball_ai_level';
 const LOSS_STREAK_KEY = 'knightball_ai_loss_streak';
 /** ISO time the level last changed on this device (for cross-device sync). */
@@ -23,6 +25,8 @@ export interface TierSettings {
   label: string;
   /** Approximate displayed rating (see below). */
   rating: number;
+  /** Deep-search level offered only in desktop browsers (see isDesktopWeb). */
+  desktopOnly?: boolean;
 }
 
 // Calibrated ladder (Oct 2026, v2). Each (model, sims) pair was placed on one
@@ -54,9 +58,21 @@ export const TIERS: TierSettings[] = [
   { model: 'distill_v2_64x8.pt',  sims: 512,  rating: 2080, label: 'Level 18 — Expert' },
   { model: 'distill_v2_96x12.pt', sims: 640,  rating: 2165, label: 'Level 19 — Master' },       // interp.
   { model: 'distill_v2_96x12.pt', sims: 1024, rating: 2225, label: 'Level 20 — Master' },
+  // Desktop browsers only: deep searches that would take minutes per move on a phone.
+  { model: 'distill_v2_96x12.pt',  sims: 2048, rating: 2320, label: 'Level 21 — Grandmaster', desktopOnly: true },
+  { model: 'distill_v2_128x16.pt', sims: 2048, rating: 2345, label: 'Level 22 — Grandmaster', desktopOnly: true },
+  { model: 'distill_v2_128x16.pt', sims: 4096, rating: 2430, label: 'Level 23 — Grandmaster', desktopOnly: true },
+  { model: 'distill_v2_128x16.pt', sims: 8192, rating: 2500, label: 'Level 24 — Grandmaster', desktopOnly: true },
 ];
 
 export const MAX_LEVEL = TIERS.length;
+
+/** Highest level offered on this device: desktop browsers get the desktopOnly levels. */
+export function maxLevelForDevice(desktop: boolean = isDesktopWeb()): number {
+  if (desktop) return MAX_LEVEL;
+  const firstDesktop = TIERS.findIndex((t) => t.desktopOnly);
+  return firstDesktop < 0 ? MAX_LEVEL : firstDesktop;
+}
 
 /** Read the current auto-match level from localStorage (1-indexed, default 1). */
 export function getAutoMatchLevel(): number {
@@ -64,7 +80,8 @@ export function getAutoMatchLevel(): number {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
       const n = parseInt(raw, 10);
-      if (n >= 1 && n <= MAX_LEVEL) return n;
+      // A desktop-only level synced to a phone plays as the phone's top level.
+      if (n >= 1) return Math.min(n, maxLevelForDevice());
     }
   } catch { /* ignore */ }
   return 1;
@@ -73,6 +90,8 @@ export function getAutoMatchLevel(): number {
 /** Persist the auto-match level to localStorage. Resets the loss streak —
  * any level change (earned or manual) starts fresh at the new level. */
 export function setAutoMatchLevel(level: number): void {
+  // Clamped to the whole ladder, not this device: a desktop-only level synced
+  // from another device is kept (and plays as this device's top level).
   const clamped = Math.max(1, Math.min(MAX_LEVEL, level));
   try {
     localStorage.setItem(STORAGE_KEY, String(clamped));
@@ -100,12 +119,15 @@ function setLossStreak(n: number): void {
  * Win => level + 1 immediately (and the loss streak resets).
  * Loss => level - 1 only after LOSS_STREAK_TO_DEMOTE consecutive losses;
  * a single loss at a freshly reached level keeps you there (hysteresis).
- * Clamped to [1, MAX_LEVEL]. Returns the new level.
+ * Clamped to [1, maxLevelForDevice()]. Returns the new level.
  */
 export function adjustAfterGame(won: boolean): number {
   const current = getAutoMatchLevel();
   if (won) {
-    const next = Math.min(MAX_LEVEL, current + 1);
+    const next = Math.min(maxLevelForDevice(), current + 1);
+    // At this device's top level there is nowhere to go; leave the stored
+    // level alone so a higher desktop level synced from elsewhere survives.
+    if (next === current) { setLossStreak(0); return current; }
     setAutoMatchLevel(next); // also resets the loss streak
     return next;
   }
@@ -121,7 +143,7 @@ export function adjustAfterGame(won: boolean): number {
 
 /** Get the model + sims config for a given level (1-indexed). */
 export function getTierSettings(level: number): TierSettings {
-  const idx = Math.max(0, Math.min(TIERS.length - 1, level - 1));
+  const idx = Math.max(0, Math.min(maxLevelForDevice() - 1, level - 1));
   return TIERS[idx];
 }
 

@@ -69,10 +69,11 @@ describe('calibrated ladder', () => {
     });
   });
 
-  it('only uses models that the native app bundles (offline play)', async () => {
+  it('app levels only use models that the native app bundles (offline play)', async () => {
     const { readFileSync } = await import('fs');
     const src = readFileSync('scripts/bundle-models.mjs', 'utf8')  // vitest runs from webapp/;
     const bundled = new Set([...src.matchAll(/version: '([^']+)'/g)].map(m => m[1]));
-    for (const t of TIERS) expect(bundled.has(t.model.replace(/\.pt$/, ''))).toBe(true);
+    // desktopOnly levels are never offered in the native app, so need not be bundled.
+    for (const t of TIERS.filter(t => !t.desktopOnly)) expect(bundled.has(t.model.replace(/\.pt$/, ''))).toBe(true);
   });
 });

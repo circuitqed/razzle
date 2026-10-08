@@ -3,7 +3,10 @@ import { useAuth } from '../contexts/AuthContext';
 import { useOnlineStatus } from '../hooks/useOnlineStatus';
 import * as onlineApi from '../api/online';
 import type { ModelInfo } from '../api/engine';
-import { getAutoMatchLevel, setAutoMatchLevel, getTierSettings, getLevelLabel, TIERS } from '../utils/autoMatch';
+import { getAutoMatchLevel, setAutoMatchLevel, getTierSettings, getLevelLabel, TIERS, maxLevelForDevice } from '../utils/autoMatch';
+import { estimateMoveSeconds, formatSeconds } from '../utils/searchSpeed';
+import { isNativeApp } from '../api/base';
+import { NATIVE_SEARCH_BUDGET_MS } from '../hooks/useGame';
 import { useDialogA11y } from '../hooks/useDialogA11y';
 
 type GameMode = 'ai' | 'pvp' | 'online';
@@ -488,7 +491,7 @@ export default function NewGameDialog({
                     Adjusts after each game. Or pick a level:
                   </p>
                   <div className="grid grid-cols-5 gap-1">
-                    {TIERS.map((tier, i) => {
+                    {TIERS.slice(0, maxLevelForDevice()).map((tier, i) => {
                       const level = i + 1;
                       const isCurrentAuto = level === selectedLevel;
                       return (
@@ -501,15 +504,18 @@ export default function NewGameDialog({
                           className={`px-1 py-1.5 rounded text-xs font-medium transition-colors ${
                             isCurrentAuto
                               ? 'bg-green-600 text-white ring-1 ring-green-400'
-                              : 'bg-gray-700 text-gray-400 hover:bg-gray-600 hover:text-white'
+                              : tier.desktopOnly
+                                ? 'bg-purple-900/60 text-purple-300 hover:bg-purple-800 hover:text-white'
+                                : 'bg-gray-700 text-gray-400 hover:bg-gray-600 hover:text-white'
                           }`}
-                          title={tier.label}
+                          title={tier.desktopOnly ? `${tier.label} (desktop only: deep search)` : tier.label}
                         >
                           {level}
                         </button>
                       );
                     })}
                   </div>
+                  <MoveTimeHint level={selectedLevel} />
                 </>
               )}
             </div>
@@ -1103,5 +1109,24 @@ export default function NewGameDialog({
         )}
       </div>
     </div>
+  );
+}
+
+/** Expected AI time per move at a level, shown once it is more than a few seconds. */
+function MoveTimeHint({ level }: { level: number }) {
+  const tier = getTierSettings(level);
+  const secs = estimateMoveSeconds(tier.model, tier.sims, isNativeApp ? NATIVE_SEARCH_BUDGET_MS : 0);
+  if (secs == null) {
+    return tier.desktopOnly ? (
+      <p className="text-xs text-gray-400 mt-2">
+        Deep-search level: the AI can take a minute or more per move.
+      </p>
+    ) : null;
+  }
+  if (secs < 3) return null;
+  return (
+    <p className="text-xs text-gray-400 mt-2">
+      The AI takes about {formatSeconds(secs)} per move at this level on this device.
+    </p>
   );
 }

@@ -12,6 +12,7 @@ import { hapticMove, hapticGameOver } from '../utils/haptics';
 import { useAIWorker, SEARCH_CANCELLED } from './useAIWorker';
 import { App as CapacitorApp } from '@capacitor/app';
 import { useBoardInteraction } from './useBoardInteraction';
+import { recordSearchSpeed } from '../utils/searchSpeed';
 import type { EngineState } from '../engine/state';
 import { newGame as newEngineGame, applyMove as applyEngineMove } from '../engine/state';
 
@@ -84,7 +85,7 @@ function shouldCreateLocalGame(): boolean {
  * levels' 4096-8192 sims would take a minute or more per move; cap it so the
  * AI stays responsive (and the phone stays cool). 0 = no cap.
  */
-const NATIVE_SEARCH_BUDGET_MS = 10_000;
+export const NATIVE_SEARCH_BUDGET_MS = 10_000;
 /** Mid-pass-chain continuations of the same turn get less: the line was mostly searched already. */
 const NATIVE_CONTINUATION_BUDGET_MS = 4_000;
 
@@ -326,6 +327,9 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
             aiMove = result.bestMove;
             aiValue = result.value;
             if (result.searchMs) {
+              if (aiModel && aiModel !== 'random_weights') {
+                recordSearchSpeed(aiModel, aiWorkerRef.current.backend ?? 'unknown', result.simsDone, result.searchMs);
+              }
               const secs = (result.searchMs / 1000).toFixed(1);
               const msPerSim = (result.searchMs / result.simsDone).toFixed(1);
               const simsPerSec = (1000 * result.simsDone / result.searchMs).toFixed(1);
