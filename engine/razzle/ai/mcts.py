@@ -103,7 +103,7 @@ class Node:
         When turn switches (knight move), we negate because opponent's loss = our gain.
         When turn stays (ball pass), value is already from our perspective.
         """
-        exploration = c_puct * self.prior * math.sqrt(parent_visits) / (1 + self.adjusted_visit_count)
+        exploration = c_puct * float(self.prior) * math.sqrt(parent_visits) / (1 + self.adjusted_visit_count)
         if self.state.current_player != parent_player:
             return -self.value + exploration
         else:
@@ -138,8 +138,8 @@ class Node:
         def get_prior(move: int) -> float:
             if move == -1:  # END_TURN_MOVE
                 # END_TURN is at index END_TURN_ACTION (3136) in policy array
-                return policy[END_TURN_ACTION]
-            return policy[move]
+                return float(policy[END_TURN_ACTION])
+            return float(policy[move])
 
         # Mask and renormalize policy
         policy_sum = sum(get_prior(m) for m in legal_moves)
