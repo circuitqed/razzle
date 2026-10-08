@@ -90,15 +90,24 @@ xcrun simctl bootstatus "$UDID" -b >/dev/null
 
 step "Building app for simulator"
 cd "$IOS_DIR"
+# Pin the exact product path: stale App.app bundles from other configurations
+# (e.g. manual Release builds) must never be picked up. Remove it first so a
+# failed build can't fall back to a previous build's app.
+APP="build/Build/Products/Debug-iphonesimulator/App.app"
+rm -rf "$APP"
+BUILD_LOG="$OUT_DIR/xcodebuild.log"
+set +e
 xcodebuild -project App.xcodeproj -scheme App -configuration Debug \
   -packageAuthorizationProvider netrc \
-  -destination "id=$UDID" -derivedDataPath build build 2>&1 |
-  grep -E "error:|BUILD (SUCCEEDED|FAILED)" || true
-
-# Pin the exact product path: stale App.app bundles from other configurations
-# (e.g. manual Release builds) must never be picked up.
-APP="build/Build/Products/Debug-iphonesimulator/App.app"
-[ -n "$APP" ] || { echo "Build failed: no App.app"; exit 1; }
+  -destination "id=$UDID" -derivedDataPath build build > "$BUILD_LOG" 2>&1
+BUILD_STATUS=$?
+set -e
+grep -E "error:|BUILD (SUCCEEDED|FAILED)" "$BUILD_LOG" || true
+if [ $BUILD_STATUS -ne 0 ] || [ ! -d "$APP" ]; then
+  echo "Build failed (xcodebuild exit $BUILD_STATUS); last lines of $BUILD_LOG:"
+  tail -20 "$BUILD_LOG"
+  exit 1
+fi
 
 step "Installing + launching"
 xcrun simctl install "$UDID" "$APP"
