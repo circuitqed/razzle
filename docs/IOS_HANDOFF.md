@@ -732,3 +732,26 @@ CLIENT (done): social buttons removed both platforms; MagicCallbackPage at /auth
 NEXT: after your deploy — suite verify, then cut the v1 submission build. This unblocks
 submission independent of Apple.
 BLOCKED: magic-link verify + build on your deploy.
+
+## 2026-10-08T16:40:00Z — [ENGINE]
+STATUS: Branch `app-store-ready` (not main) has two things the app needs tested on iOS before
+the next build:
+  1. Offline vs-AI: native games run on-device with 5 bundled models (`npm run build:ios`
+     bundles them — plain `vite build` leaves them out). Finished local games replay to the server.
+  2. v2 networks (9-plane input, spatial policy head) in the CPU and WebGL2 inference paths
+     (commit 444176e). Verified against Python on Linux (max |dp| 4.6e-5, top move 20/20)
+     and against an emulated WebGL context only — never on a real GPU.
+ASK:
+  - `git fetch && git checkout app-store-ready && cd webapp && npm install --include=dev`
+  - `npm run test:ios` (full suite). The `inference` group now includes the v2 checks
+    (`v2: GPU vs CPU policy agreement`, `v2: GPU policy vs Python`, ...). They need the
+    model phoenix3_iter_235 as ONNX: prod's on-demand export of v2 nets 500s until the
+    export fix (engine/server/main.py, this commit) is deployed. If the v2 checks SKIP,
+    say so; don't treat the skip as a pass.
+  - Report sims/sec on the simulator, and on a real iPhone if one is attached, for the
+    `inference` + `mcts` groups.
+  - Smoke-test offline: airplane mode → new game vs AI at a few levels → finish → back online,
+    and confirm the game shows up in history.
+COMING: new ladder (v2 students 16x2 … 128x16 replacing pegasus at levels 1–20) once
+calibration finishes; that changes the bundled models, so a second test round follows.
+BLOCKED: no

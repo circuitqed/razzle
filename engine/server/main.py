@@ -2344,7 +2344,7 @@ def _export_onnx_sync(pt_path: Path, onnx_path: Path) -> None:
         logging.info(f"Exporting ONNX: {pt_path} -> {onnx_path}")
         net = RazzleNet.load(pt_path, device="cpu")
         net.eval()
-        dummy = torch.randn(1, 7, ROWS, COLS)
+        dummy = torch.randn(1, net.config.num_input_planes, ROWS, COLS)
         torch.onnx.export(
             net,
             dummy,
