@@ -1,9 +1,9 @@
 #!/bin/bash
 #SBATCH --job-name=kb-build
-#SBATCH --partition=normal
+#SBATCH --partition=normal,owners
 #SBATCH --time=01:30:00
-#SBATCH --cpus-per-task=32
-#SBATCH --mem=96G
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=64G
 #SBATCH --output=%x-%j.out
 # Replay exported games into training shards.
 source "$KB_CODE/engine/scripts/distill/sherlock/common.sh"
