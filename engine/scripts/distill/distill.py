@@ -239,7 +239,7 @@ def main():
     t0 = time.time()
     ds = GpuDataset(args.data, dev, args.val_mod)
     print(f'data: {ds.n:,} positions ({len(ds.train_rows):,} train / {len(ds.val_rows):,} val) '
-          f'loaded in {time.time() - t0:.0f}s; device {torch.cuda.get_device_name() if cuda else 'cpu'}', flush=True)
+          f'loaded in {time.time() - t0:.0f}s; device {torch.cuda.get_device_name() if cuda else "cpu"}', flush=True)
 
     teacher = RazzleNet.load(args.teacher, device=str(dev)).to(dev).eval()
     for prm in teacher.parameters():
