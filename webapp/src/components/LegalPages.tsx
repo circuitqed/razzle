@@ -2,7 +2,7 @@ import { Link } from 'react-router-dom';
 
 // TODO(Dave): set the real support/privacy contact address before App Store submission.
 // Shown on the privacy policy, terms, and About page (the App Store support URL).
-export const CONTACT_EMAIL = 'CONTACT_EMAIL_TBD';
+export const CONTACT_EMAIL = 'support@lazybrains.com';
 
 function ContactEmail() {
   return (
