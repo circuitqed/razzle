@@ -58,11 +58,13 @@ export const TIERS: TierSettings[] = [
   { model: 'distill_v2_64x8.pt',  sims: 512,  rating: 2080, label: 'Level 18 — Expert' },
   { model: 'distill_v2_96x12.pt', sims: 640,  rating: 2165, label: 'Level 19 — Master' },       // interp.
   { model: 'distill_v2_96x12.pt', sims: 1024, rating: 2225, label: 'Level 20 — Master' },
-  // Desktop browsers only: deep searches that would take minutes per move on a phone.
-  { model: 'distill_v2_96x12.pt',  sims: 2048, rating: 2320, label: 'Level 21 — Grandmaster', desktopOnly: true },
-  { model: 'distill_v2_128x16.pt', sims: 2048, rating: 2345, label: 'Level 22 — Grandmaster', desktopOnly: true },
-  { model: 'distill_v2_128x16.pt', sims: 4096, rating: 2430, label: 'Level 23 — Grandmaster', desktopOnly: true },
-  { model: 'distill_v2_128x16.pt', sims: 8192, rating: 2500, label: 'Level 24 — Grandmaster', desktopOnly: true },
+  // Desktop browsers only: deep searches that would take minutes per move on a
+  // phone. Measured with ~7k extra games at 2048-8192 sims: strength levels off
+  // here (1024 -> 8192 sims is only ~+100), and 128x16 is within noise of 96x12
+  // at equal sims, so it is used only for the top level.
+  { model: 'distill_v2_96x12.pt',  sims: 2048, rating: 2270, label: 'Level 21 — Grandmaster', desktopOnly: true },
+  { model: 'distill_v2_96x12.pt',  sims: 4096, rating: 2305, label: 'Level 22 — Grandmaster', desktopOnly: true },
+  { model: 'distill_v2_128x16.pt', sims: 8192, rating: 2340, label: 'Level 23 — Grandmaster', desktopOnly: true },
 ];
 
 export const MAX_LEVEL = TIERS.length;

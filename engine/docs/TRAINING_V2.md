@@ -223,3 +223,26 @@ the 111 earlier matches (Bradley-Terry; `scripts/distill/calibration.py fit`). T
 - The app ladder (`webapp/src/utils/autoMatch.ts` TIERS) uses the smallest network that
   reaches each level's rating, spanning 815 (16x2 @ 1 sim) to 2225 (96x12 @ 1024 sims), with
   steps of 56-98 Elo. Levels 1-5 cost 50-100x less per evaluation than the old pegasus_iter_050 levels.
+
+### High-sim calibration and desktop levels (Oct 8 2026)
+
+13 more 200-game matches compared v2 96x12, v2 128x16 and the teacher phoenix3_iter_000 at
+2048, 4096 and 8192 sims, anchored to the 1024-sim configs. They were fitted jointly with
+everything above (`docs/calibration/*_highsims.*`). The refit moved 96x12 @1024 by -11, so the
+numbers below are shifted +11 to match the ladder.
+
+| Config | 1024 | 2048 | 4096 | 8192 |
+|---|---|---|---|---|
+| v2 96x12 | 2225 | 2270 | 2306 | 2321 |
+| v2 128x16 | 2242 | 2275 | 2310 | 2339 |
+| teacher p3 | — | 2222 | — | 2295 |
+
+- **Search depth levels off.** The gain is ~+45 for each doubling from 1024 sims, then ~+15
+  from 4096 to 8192. About 80% of game pairs are decided by colour (P0 wins ~82%), so skill
+  differences compress at the top.
+- **128x16 ≈ 96x12** at equal sims (+5 to +18, within noise), for twice the compute.
+- **The students out-search their teacher.** p3 @2048 loses to both students @2048 (by -42
+  and -60). This is probably because the students' value heads are distilled from both
+  outcomes and teacher values.
+- The desktop-only levels (`desktopOnly` TIERS) are L21 96x12 @2048 (2270), L22 96x12 @4096
+  (2305) and L23 128x16 @8192 (2340). Phones stop at L20.
