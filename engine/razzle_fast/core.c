@@ -74,6 +74,10 @@ typedef struct {
     int32_t   history_len;
     int32_t   history_cap;
     int32_t   repetition_draw;
+    /* Search options (see core.h) */
+    int32_t   vloss_q;
+    int32_t   fpu_mode;
+    double    fpu_reduction;
 } MCTSTree;
 
 /* ============================================================
@@ -512,7 +516,16 @@ MCTSTree *razzle_mcts_create(const RazzleState *root_state, int max_nodes,
     tree->history_len = 0;
     tree->history_cap = 0;
     tree->repetition_draw = 0;
+    tree->vloss_q = 0;
+    tree->fpu_mode = 0;
+    tree->fpu_reduction = 0.0;
     return tree;
+}
+
+void razzle_mcts_set_search_options(MCTSTree *tree, int vloss_q, int fpu_mode, float fpu_reduction) {
+    tree->vloss_q = vloss_q;
+    tree->fpu_mode = fpu_mode;
+    tree->fpu_reduction = (double)fpu_reduction;
 }
 
 int razzle_mcts_set_history(MCTSTree *tree, const uint64_t *hashes, int n, int repetition_draw) {
@@ -640,6 +653,20 @@ static int select_child(MCTSTree *tree, int node_idx, float c_puct) {
     double best_score = -1e30;
     int best_child = -1;
 
+    /* First-play urgency: the Q given to unvisited children. */
+    double fpu_q = 0.0;
+    if (tree->fpu_mode == 1 && node->visit_count > 0) {
+        double visited_mass = 0.0;
+        int c = node->first_child;
+        while (c >= 0) {
+            MCTSNode *ch = node_at(tree, c);
+            if (ch->visit_count > 0) visited_mass += ch->prior;
+            c = ch->next_sibling;
+        }
+        fpu_q = node->value_sum / (double)node->visit_count
+                - tree->fpu_reduction * sqrt(visited_mass);
+    }
+
     int child_idx = node->first_child;
     while (child_idx >= 0) {
         MCTSNode *child = node_at(tree, child_idx);
@@ -648,11 +675,17 @@ static int select_child(MCTSTree *tree, int node_idx, float c_puct) {
         double q = 0.0;
         if (child->visit_count > 0) {
             q = child->value_sum / (double)child->visit_count;
+            /* Negate Q if player changed (opponent's loss = our gain) */
+            if (child->state.current_player != parent_player) {
+                q = -q;
+            }
+        } else {
+            q = fpu_q;
         }
 
-        /* Negate Q if player changed (opponent's loss = our gain) */
-        if (child->state.current_player != parent_player) {
-            q = -q;
+        /* Pending evaluations count as losses for the side choosing. */
+        if (tree->vloss_q && child->virtual_loss > 0) {
+            q = (q * (double)child->visit_count - (double)child->virtual_loss) / (double)adj_visits;
         }
 
         double exploration = d_cpuct * child->prior * sqrt_parent / (1.0 + adj_visits);

@@ -83,6 +83,23 @@ def set_tree_history(tree, hist: list[int], root_is_turn_start: bool = True) -> 
     prior = hist[:-1] if root_is_turn_start else hist
     arr = (ctypes.c_uint64 * max(1, len(prior)))(*prior)
     _lib.razzle_mcts_set_history(ctypes.cast(tree, ctypes.c_void_p), arr, len(prior), 1)
+_HAS_SEARCH_OPTIONS = hasattr(_lib, 'razzle_mcts_set_search_options')
+if _HAS_SEARCH_OPTIONS:
+    _lib.razzle_mcts_set_search_options.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_float]
+    _lib.razzle_mcts_set_search_options.restype = None
+
+
+def set_search_options(tree, vloss_q: bool, fpu: float):
+    """vloss_q: virtual loss counts as losses in Q. fpu >= 0: unvisited children get the
+    parent's Q minus fpu * sqrt(visited prior mass); fpu < 0: Q = 0 (the original)."""
+    if not (vloss_q or fpu >= 0):
+        return
+    if not _HAS_SEARCH_OPTIONS:
+        raise RuntimeError('libcore.so predates search options; rebuild razzle_fast')
+    _lib.razzle_mcts_set_search_options(ctypes.cast(tree, ctypes.c_void_p), int(vloss_q),
+                                        1 if fpu >= 0 else 0, max(fpu, 0.0))
+
+
 _HAS_LEAF_INFO = hasattr(_lib, 'razzle_mcts_leaf_info')   # absent in stale prebuilt .so files
 if _HAS_LEAF_INFO:
     _lib.razzle_mcts_leaf_info.argtypes = [ctypes.c_void_p, ctypes.c_int,
@@ -613,6 +630,12 @@ def main():
     ap.add_argument('--gumbel-b', type=int, default=0)
     ap.add_argument('--leaf-batch-a', type=int, default=0, help='per-side override (search-quality tests)')
     ap.add_argument('--leaf-batch-b', type=int, default=0)
+    ap.add_argument('--vloss-q-a', action='store_true',
+                    help='search-quality test: virtual loss also lowers Q (A side)')
+    ap.add_argument('--vloss-q-b', action='store_true')
+    ap.add_argument('--fpu-a', type=float, default=-1.0,
+                    help='first-play urgency reduction for A (parent Q - fpu*sqrt(visited prior)); <0 = Q 0')
+    ap.add_argument('--fpu-b', type=float, default=-1.0)
     ap.add_argument('--opening-moves', type=int, default=4)
     ap.add_argument('--seed', type=int, default=0)
     ap.add_argument('--device', default='cuda')
@@ -669,6 +692,10 @@ def main():
                 hist = g.rep.hist if REPETITION_DRAW else None
                 g.search = (GumbelSearch(g.cs, sims, lb, m=gm, history=hist) if gm
                             else Search(g.cs, sims, lb, hist))
+                if g.mover_is_a():
+                    set_search_options(g.search.tree, args.vloss_q_a, args.fpu_a)
+                else:
+                    set_search_options(g.search.tree, args.vloss_q_b, args.fpu_b)
             still.append(g)
         active = still
 
@@ -711,6 +738,7 @@ def main():
                repetition_draw=args.repetition_draw, gumbel_a=args.gumbel_a, gumbel_b=args.gumbel_b,
                leaf_batch_a=args.leaf_batch_a or args.leaf_batch, leaf_batch_b=args.leaf_batch_b or args.leaf_batch,
                value_scale_a=args.value_scale_a, value_scale_b=args.value_scale_b,
+               vloss_q_a=args.vloss_q_a, vloss_q_b=args.vloss_q_b, fpu_a=args.fpu_a, fpu_b=args.fpu_b,
                score_a=round(s, 4), ci95=round(1.96 * se, 4),
                elo_a_minus_b=round(elo(s)), elo_ci95=[round(elo(s - 1.96 * se)), round(elo(s + 1.96 * se))],
                median_ply=int(np.median(plies)), secs=round(time.time() - t0),

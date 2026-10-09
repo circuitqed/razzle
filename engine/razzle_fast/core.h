@@ -72,12 +72,22 @@ typedef struct {
     int32_t   history_len;
     int32_t   history_cap;
     int32_t   repetition_draw;
+    /* Search options (appended; razzle_mcts_set_search_options; all 0 = original search).
+     * vloss_q: virtual loss also counts as losses in Q, not only as visits in U, so a
+     *   batch of leaves spreads over more children.
+     * fpu_mode / fpu_reduction: Q of an unvisited child. 0 = 0 (draw); 1 = the parent's
+     *   Q minus fpu_reduction * sqrt(prior mass of its visited children) (Lc0 style). */
+    int32_t   vloss_q;
+    int32_t   fpu_mode;
+    double    fpu_reduction;
 } MCTSTree;
 
 MCTSTree *razzle_mcts_create(const RazzleState *root_state, int max_nodes, int max_batch, int max_depth);
 /* Set the game history (hashes of positions before the root) and the repetition rule
  * (0 = none, 1 = threefold repetition is a draw). Call again after razzle_mcts_reroot. */
 int       razzle_mcts_set_history(MCTSTree *tree, const uint64_t *hashes, int n, int repetition_draw);
+/* Search options (see MCTSTree). Defaults: 0, 0, 0.0. Kept across razzle_mcts_reroot. */
+void      razzle_mcts_set_search_options(MCTSTree *tree, int vloss_q, int fpu_mode, float fpu_reduction);
 void      razzle_mcts_free(MCTSTree *tree);
 
 void razzle_mcts_expand_root(MCTSTree *tree, const float *policy);
