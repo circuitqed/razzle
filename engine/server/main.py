@@ -2800,7 +2800,7 @@ async def download_training_model(version: str, _=Depends(require_training_key))
 
 
 @app.get("/training/dashboard", response_model=TrainingDashboardResponse)
-async def get_training_dashboard(
+def get_training_dashboard(  # sync: FastAPI runs it in a thread, so the DB scans never block the event loop
     request: Request,
     auth_cookie: Optional[str] = Cookie(None, alias=AUTH_COOKIE_NAME),
     x_api_key: Optional[str] = Header(None, alias="X-API-Key"),

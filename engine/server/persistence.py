@@ -69,6 +69,8 @@ def _ensure_selfplay_schema(conn) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_selfplay_status ON selfplay_games(status, id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_selfplay_run ON selfplay_games(run_name)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_selfplay_worker ON selfplay_games(worker_id)")
+    # Covers the dashboard's per-worker count + last-seen (without it: a full 3 GB scan).
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_selfplay_worker_created ON selfplay_games(worker_id, created_at)")
 
 
 def _run_name(model_version: Optional[str]) -> str:
