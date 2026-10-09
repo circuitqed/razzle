@@ -185,7 +185,7 @@ export const TUTORIAL_STEPS: TutorialStep[] = [
   {
     id: 'chain-passes',
     title: 'Chain Passes',
-    instruction: 'You can pass multiple times in one turn! Pieces that already touched the ball (striped) can\'t receive again. Pass north to c5, then diagonally to e7, then tap "Complete Pass."',
+    instruction: 'You can pass multiple times in one turn! Pieces that already touched the ball (lined) can\'t receive again. Pass north to c5, then diagonally to e7, then tap "Complete Pass."',
     hint: 'Plan your pass chains to move the ball across the board quickly.',
     completionMessage: 'Excellent chain!',
     boardState: step3State,
@@ -212,8 +212,8 @@ export const TUTORIAL_STEPS: TutorialStep[] = [
   {
     id: 'eligible-receivers',
     title: 'Eligible Receivers',
-    instruction: 'Pieces that touched the ball can\'t receive again until they make a knight move. Your nearby teammates are all striped, so they can\'t receive. Move the knight at e5 to make it eligible, then pass to it!',
-    hint: 'A knight move turns a striped piece solid again.',
+    instruction: 'Pieces that touched the ball can\'t receive again until they make a knight move. Your nearby teammates are all lined, so they can\'t receive. Move the knight at e5 to make it eligible, then pass to it!',
+    hint: 'A knight move clears a piece\'s lines.',
     completionMessage: 'Well done! You cleared the piece and passed to it.',
     boardState: step5State,
     playerColor: 0,

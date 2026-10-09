@@ -9,15 +9,15 @@ interface PieceProps {
 }
 
 const COLORS = {
-  0: { base: '#3b82f6', stripe: '#2563eb', pale: '#dbeafe' },
-  1: { base: '#ef4444', stripe: '#dc2626', pale: '#fee2e2' },
+  0: { base: '#3b82f6', line: '#1d4ed8' },
+  1: { base: '#ef4444', line: '#b91c1c' },
 } as const;
 
 /**
  * A knight: a diamond. Solid with a light top facet when it can receive a
- * pass; hatched (diagonal stripes on a pale fill, the usual "unavailable"
- * look) when it can't yet, i.e. it touched the ball and hasn't made a knight
- * move since (all pieces at the start).
+ * pass; lined (thin darker diagonal lines, no facet) when it can't yet,
+ * i.e. it touched the ball and hasn't made a knight move since (all pieces
+ * at the start).
  */
 export default function Piece({ player, hasBall, isSelected, isIneligible, mustPass }: PieceProps) {
   const c = COLORS[player];
@@ -30,9 +30,9 @@ export default function Piece({ player, hasBall, isSelected, isIneligible, mustP
     <g>
       {isIneligible && (
         <defs>
-          <pattern id={hatchId} width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
-            <rect width="6" height="6" fill={c.pale} />
-            <rect width="3" height="6" fill={c.stripe} />
+          <pattern id={hatchId} width="7" height="7" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+            <rect width="7" height="7" fill={c.base} />
+            <rect width="1.6" height="7" fill={c.line} />
           </pattern>
         </defs>
       )}

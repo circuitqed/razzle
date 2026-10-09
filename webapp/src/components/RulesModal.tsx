@@ -70,8 +70,8 @@ export default function RulesModal({ isOpen, onClose, onStartTutorial }: RulesMo
             <ul className="list-disc list-inside space-y-1 ml-2">
               <li>The ball cannot pass through other pieces</li>
               <li>
-                A piece that has touched the ball is drawn striped: it cannot receive
-                a pass until it makes a knight move. Pieces start striped.
+                A piece that has touched the ball is drawn with diagonal lines: it cannot receive
+                a pass until it makes a knight move. All pieces start this way.
               </li>
               <li>After passing, you can pass again or end your turn</li>
               <li>You cannot move a piece after passing</li>
