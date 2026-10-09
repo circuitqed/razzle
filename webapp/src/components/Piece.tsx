@@ -9,40 +9,42 @@ interface PieceProps {
 }
 
 const COLORS = {
-  0: { base: '#3b82f6', ring: '#2563eb', tint: 'rgba(59, 130, 246, 0.1)' },
-  1: { base: '#ef4444', ring: '#dc2626', tint: 'rgba(239, 68, 68, 0.1)' },
+  0: { base: '#3b82f6', stripe: '#2563eb', pale: '#dbeafe' },
+  1: { base: '#ef4444', stripe: '#dc2626', pale: '#fee2e2' },
 } as const;
 
 /**
  * A knight: a diamond. Solid with a light top facet when it can receive a
- * pass; hollow (a coloured ring over a faint tint) when it can't yet, i.e. it
- * was touched by a pass and hasn't moved since (all pieces at the start).
+ * pass; hatched (diagonal stripes on a pale fill, the usual "unavailable"
+ * look) when it can't yet, i.e. it touched the ball and hasn't made a knight
+ * move since (all pieces at the start).
  */
 export default function Piece({ player, hasBall, isSelected, isIneligible, mustPass }: PieceProps) {
   const c = COLORS[player];
   const strokeColor = isSelected ? '#fbbf24' : '#1f2937';
   const strokeWidth = isSelected ? 3 : 1.5;
+  // Identical per player, so repeating the id across pieces is harmless.
+  const hatchId = `kb-hatch-${player}`;
 
   return (
     <g>
+      {isIneligible && (
+        <defs>
+          <pattern id={hatchId} width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+            <rect width="6" height="6" fill={c.pale} />
+            <rect width="3" height="6" fill={c.stripe} />
+          </pattern>
+        </defs>
+      )}
       {/* Silhouette: same outline for both states, so pieces line up */}
       <polygon
         points="25,8 42,25 25,42 8,25"
-        fill={isIneligible ? c.tint : c.base}
+        fill={isIneligible ? `url(#${hatchId})` : c.base}
         stroke={strokeColor}
         strokeWidth={strokeWidth}
         strokeLinejoin="round"
       />
-      {isIneligible ? (
-        // Hollow: a thick ring in the player's colour just inside the outline
-        <polygon
-          points="25,11.5 38.5,25 25,38.5 11.5,25"
-          fill="none"
-          stroke={c.ring}
-          strokeWidth={4}
-          strokeLinejoin="round"
-        />
-      ) : (
+      {!isIneligible && (
         // Solid: a light facet on the upper half gives it some depth
         <polygon points="25,10.5 39.5,25 10.5,25" fill="#ffffff" opacity={0.22} />
       )}
