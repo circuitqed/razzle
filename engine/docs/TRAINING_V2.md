@@ -253,3 +253,24 @@ numbers below are shifted +11 to match the ladder.
   outcomes and teacher values.
 - The desktop-only levels (`desktopOnly` TIERS) are L21 96x12 @2048 (2270), L22 96x12 @4096
   (2305) and L23 128x16 @8192 (2340). Phones stop at L20.
+
+## 12. Search options: virtual loss in Q, first-play urgency (Oct 9 2026)
+
+`razzle_mcts_set_search_options` (C; off by default, so the original search is unchanged).
+Arena, same net both sides (`phoenix3_iter_000`), leaf batch 8, A = option on, B = original:
+
+| Option | Sims | Games | Elo A - B [95%] |
+|---|---|---|---|
+| virtual loss also lowers Q (`--vloss-q-a`) | 64 | 2000 | -97 [-113, -81] |
+| virtual loss also lowers Q | 256 | 1000 | -70 [-93, -49] |
+| FPU: unvisited Q = parent Q - 0.2·sqrt(visited prior) (`--fpu-a 0.2`) | 64 | 2000 | +43 [27, 58] |
+| FPU 0.5 | 64 | 2000 | +51 [36, 67] |
+| FPU 0.2 | 256 | 1000 | **+68 [47, 91]** |
+| FPU 0.5 | 256 | 1000 | +58 [37, 80] |
+
+Virtual loss in Q over-spreads each 8-leaf batch (duplicates were already rare). Unvisited
+children at Q = 0 (a draw) were too optimistic in a decisive game: the search wasted visits on
+low-prior moves. **selfplay_v2 now defaults to `--fpu 0.2`** (`--fpu -1` = old search). The
+arena keeps the original search by default so earlier ratings stay comparable. The app's TS/
+native search is separate and unchanged; porting FPU there would raise every ladder level and
+needs a recalibration.

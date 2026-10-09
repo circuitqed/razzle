@@ -47,6 +47,10 @@ from razzle_fast.wrapper import _lib, CRazzleState, CMCTSTree, _np_to_cfloat_ptr
 
 _lib.razzle_mcts_reroot.argtypes = [ctypes.POINTER(CMCTSTree), ctypes.c_int]
 _lib.razzle_mcts_reroot.restype = ctypes.c_int
+if hasattr(_lib, 'razzle_mcts_set_search_options'):
+    _lib.razzle_mcts_set_search_options.argtypes = [ctypes.POINTER(CMCTSTree), ctypes.c_int, ctypes.c_int,
+                                                    ctypes.c_float]
+    _lib.razzle_mcts_set_search_options.restype = None
 
 NUM_ACTIONS = 3137
 C_PUCT = 1.5
@@ -105,6 +109,8 @@ class SelfPlayGame:
             self.tree = _lib.razzle_mcts_create(ctypes.byref(self.cs), self.capacity, a.leaf_batch, 256)
             if not self.tree:
                 raise MemoryError('tree alloc failed')
+            if a.fpu >= 0:
+                _lib.razzle_mcts_set_search_options(self.tree, 0, 1, a.fpu)
         root_visits = _lib.razzle_mcts_root_visits(self.tree)
         self.start_visits = root_visits
         # top up to the budget, but always add some fresh simulations
@@ -389,6 +395,9 @@ def main():
     ap.add_argument('--leaf-batch', type=int, default=8)
     ap.add_argument('--sims', type=int, default=800, help='full-search simulations')
     ap.add_argument('--fast-sims', type=int, default=160, help='quick-search simulations')
+    ap.add_argument('--fpu', type=float, default=0.2,
+                    help='unvisited children: parent Q - fpu*sqrt(visited prior); <0 = Q 0 (the old search). '
+                         '+43 Elo at 64 sims, +68 at 256 (arena, Oct 9 2026)')
     ap.add_argument('--full-prob', type=float, default=0.25)
     ap.add_argument('--temperature-moves', type=int, default=15)
     ap.add_argument('--dirichlet-alpha', type=float, default=0.3)
@@ -405,6 +414,8 @@ def main():
     ap.add_argument('--cuda-graphs', action=argparse.BooleanOptionalAction, default=False,
                     help='replay the forward pass as captured CUDA graphs (padded batch buckets)')
     args = ap.parse_args()
+    if args.fpu >= 0 and not hasattr(_lib, 'razzle_mcts_set_search_options'):
+        raise SystemExit('libcore.so predates search options: rebuild razzle_fast (or pass --fpu -1)')
     if not args.api_url and not args.model:
         raise SystemExit('need --api-url or --model')
 
