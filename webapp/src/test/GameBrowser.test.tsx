@@ -4,6 +4,7 @@ import GameBrowser from '../components/GameBrowser'
 import { AuthProvider } from '../contexts/AuthContext'
 import * as gamesApi from '../api/games'
 import * as authApi from '../api/auth'
+import * as leaderboardApi from '../api/leaderboard'
 
 // Mock the APIs
 vi.mock('../api/games', () => ({
@@ -11,6 +12,10 @@ vi.mock('../api/games', () => ({
   getGameFull: vi.fn(),
   analyzePosition: vi.fn(),
   analyzeGame: vi.fn(),
+}))
+
+vi.mock('../api/leaderboard', () => ({
+  getPlayers: vi.fn(),
 }))
 
 vi.mock('../api/auth', () => ({
@@ -67,157 +72,88 @@ function renderWithAuth(ui: React.ReactElement) {
   return render(<AuthProvider>{ui}</AuthProvider>)
 }
 
+const ALICE = { player_id: 'human_u1', user_id: 'u1', username: 'Alice', display_name: 'Alice', elo_rating: 1200 }
+
+function renderBrowser(onClose = vi.fn(), onSelectGame = vi.fn()) {
+  renderWithAuth(<GameBrowser isOpen={true} onClose={onClose} onSelectGame={onSelectGame} />)
+  return { onClose, onSelectGame }
+}
+
+/** Search for Alice and pick her from the dropdown. */
+async function pickAlice() {
+  await waitFor(() => expect(leaderboardApi.getPlayers).toHaveBeenCalled())
+  fireEvent.change(screen.getByPlaceholderText('Search...'), { target: { value: 'ali' } })
+  fireEvent.click(await screen.findByText('Alice', { selector: 'button span' }))
+}
+
 describe('GameBrowser', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     vi.mocked(authApi.getCurrentUser).mockResolvedValue(null)
     vi.mocked(gamesApi.listGames).mockResolvedValue(mockGames)
+    vi.mocked(leaderboardApi.getPlayers).mockResolvedValue([ALICE] as never)
   })
 
   it('renders nothing when not open', () => {
-    const onClose = vi.fn()
-    const onSelectGame = vi.fn()
-
-    renderWithAuth(
-      <GameBrowser isOpen={false} onClose={onClose} onSelectGame={onSelectGame} />
-    )
-
-    expect(screen.queryByText('Game History')).not.toBeInTheDocument()
+    renderWithAuth(<GameBrowser isOpen={false} onClose={vi.fn()} onSelectGame={vi.fn()} />)
+    expect(screen.queryByText('Players’ games')).not.toBeInTheDocument()
   })
 
-  it('renders game list when open', async () => {
-    const onClose = vi.fn()
-    const onSelectGame = vi.fn()
-
-    renderWithAuth(
-      <GameBrowser isOpen={true} onClose={onClose} onSelectGame={onSelectGame} />
-    )
-
-    expect(screen.getByText('Game History')).toBeInTheDocument()
-
-    await waitFor(() => {
-      expect(gamesApi.listGames).toHaveBeenCalled()
-    })
+  it('has no global game list: asks for a player first', async () => {
+    renderBrowser()
+    expect(screen.getByText('Players’ games')).toBeInTheDocument()
+    expect(await screen.findByText('Search for a player to see their games.')).toBeInTheDocument()
+    expect(gamesApi.listGames).not.toHaveBeenCalled()
   })
 
-  it('displays games in the list', async () => {
-    const onClose = vi.fn()
-    const onSelectGame = vi.fn()
-
-    renderWithAuth(
-      <GameBrowser isOpen={true} onClose={onClose} onSelectGame={onSelectGame} />
-    )
-
+  it("lists a player's games once picked", async () => {
+    renderBrowser()
+    await pickAlice()
     await waitFor(() => {
-      // Shows model filename (not full path) for AI games
-      expect(screen.getByText('Human vs model_v1 · 800 sims')).toBeInTheDocument()
+      expect(gamesApi.listGames).toHaveBeenCalledWith(expect.objectContaining({ player_id: 'u1' }))
     })
-
-    // Shows usernames for human vs human games
+    expect(await screen.findByText('Human vs model_v1 · 800 sims')).toBeInTheDocument()
     expect(screen.getByText('Alice vs Bob')).toBeInTheDocument()
-    // Use getAllByText since these may appear in filter dropdowns too
     expect(screen.getAllByText('Blue Won').length).toBeGreaterThan(0)
-    expect(screen.getAllByText('In Progress').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('In progress').length).toBeGreaterThan(0)
   })
 
-  it('calls onSelectGame when replay button is clicked', async () => {
-    const onClose = vi.fn()
-    const onSelectGame = vi.fn()
-
-    renderWithAuth(
-      <GameBrowser isOpen={true} onClose={onClose} onSelectGame={onSelectGame} />
-    )
-
-    await waitFor(() => {
-      expect(screen.getAllByText('View').length).toBeGreaterThan(0)
-    })
-
-    const replayButtons = screen.getAllByText('View')
-    fireEvent.click(replayButtons[0])
-
+  it('opens a game when its row is clicked', async () => {
+    const { onSelectGame } = renderBrowser()
+    await pickAlice()
+    fireEvent.click(await screen.findByText('Human vs model_v1 · 800 sims'))
     expect(onSelectGame).toHaveBeenCalledWith('game1')
   })
 
   it('calls onClose when close button is clicked', async () => {
-    const onClose = vi.fn()
-    const onSelectGame = vi.fn()
-
-    renderWithAuth(
-      <GameBrowser isOpen={true} onClose={onClose} onSelectGame={onSelectGame} />
-    )
-
-    await waitFor(() => {
-      expect(screen.getByText('Game History')).toBeInTheDocument()
-    })
-
-    // Find the close button by its SVG content (the X icon)
-    const closeButtons = screen.getAllByRole('button')
-    // The close button is the one without text content
-    const closeButton = closeButtons.find(btn => btn.querySelector('svg path'))
-    if (closeButton) {
-      fireEvent.click(closeButton)
-      expect(onClose).toHaveBeenCalled()
-    }
+    const { onClose } = renderBrowser()
+    const closeButton = screen.getAllByRole('button').find(btn => btn.querySelector('svg path'))
+    expect(closeButton).toBeDefined()
+    fireEvent.click(closeButton!)
+    expect(onClose).toHaveBeenCalled()
   })
 
-  it('shows empty state when no games', async () => {
-    vi.mocked(gamesApi.listGames).mockResolvedValue({
-      games: [],
-      total: 0,
-      page: 1,
-      per_page: 15,
-      total_pages: 0,
-    })
-
-    const onClose = vi.fn()
-    const onSelectGame = vi.fn()
-
-    renderWithAuth(
-      <GameBrowser isOpen={true} onClose={onClose} onSelectGame={onSelectGame} />
-    )
-
-    await waitFor(() => {
-      expect(screen.getByText('No games found')).toBeInTheDocument()
-    })
+  it('shows empty state when the player has no games', async () => {
+    vi.mocked(gamesApi.listGames).mockResolvedValue({ games: [], total: 0, page: 1, per_page: 15, total_pages: 0 })
+    renderBrowser()
+    await pickAlice()
+    expect(await screen.findByText('No games found')).toBeInTheDocument()
   })
 
   it('shows error when API fails', async () => {
     vi.mocked(gamesApi.listGames).mockRejectedValue(new Error('API Error'))
-
-    const onClose = vi.fn()
-    const onSelectGame = vi.fn()
-
-    renderWithAuth(
-      <GameBrowser isOpen={true} onClose={onClose} onSelectGame={onSelectGame} />
-    )
-
-    await waitFor(() => {
-      expect(screen.getByText('API Error')).toBeInTheDocument()
-    })
+    renderBrowser()
+    await pickAlice()
+    expect(await screen.findByText('API Error')).toBeInTheDocument()
   })
 
   it('applies status filter', async () => {
-    const onClose = vi.fn()
-    const onSelectGame = vi.fn()
-
-    renderWithAuth(
-      <GameBrowser isOpen={true} onClose={onClose} onSelectGame={onSelectGame} />
-    )
-
+    renderBrowser()
+    await pickAlice()
+    await waitFor(() => expect(gamesApi.listGames).toHaveBeenCalled())
+    fireEvent.change(screen.getAllByRole('combobox')[0], { target: { value: 'abandoned' } })
     await waitFor(() => {
-      expect(gamesApi.listGames).toHaveBeenCalled()
-    })
-
-    // Find all select elements (comboboxes)
-    const selects = screen.getAllByRole('combobox')
-    // Status filter is the first select
-    const statusSelect = selects[0]
-    fireEvent.change(statusSelect, { target: { value: 'finished' } })
-
-    await waitFor(() => {
-      expect(gamesApi.listGames).toHaveBeenCalledWith(
-        expect.objectContaining({ status: 'finished' })
-      )
+      expect(gamesApi.listGames).toHaveBeenCalledWith(expect.objectContaining({ status: 'abandoned', player_id: 'u1' }))
     })
   })
 })

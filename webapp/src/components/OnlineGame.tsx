@@ -15,6 +15,7 @@ import { PlayerClock, CorrespondenceClock } from './GameClock';
 import { useOnlineGame } from '../hooks/useOnlineGame';
 import { setSoundEnabled, isSoundEnabled } from '../utils/sounds';
 import type { OnlineOpponentInfo } from '../api/online';
+import { BugIcon, FlipIcon, RulesIcon, SoundOnIcon, SoundOffIcon } from './icons';
 
 const FIRST_MOVE_TIMEOUT = 30;
 
@@ -337,7 +338,7 @@ export default function OnlineGame({ gameId, onGameEnd }: OnlineGameProps) {
             className="p-1.5 text-gray-400 hover:text-white transition-colors"
             title="Report a bug"
           >
-{'\u{1F41B}'}
+<BugIcon />
           </button>
         </div>
       </header>
@@ -462,7 +463,7 @@ export default function OnlineGame({ gameId, onGameEnd }: OnlineGameProps) {
                 className="px-3 py-2 bg-gray-600 hover:bg-gray-700 rounded font-medium transition-colors text-sm"
                 title={soundOn ? 'Mute' : 'Unmute'}
               >
-                {soundOn ? '\u{1F50A}' : '\u{1F507}'}
+                {soundOn ? <SoundOnIcon size={18} /> : <SoundOffIcon size={18} />}
               </button>
 
               {/* Flip board */}
@@ -471,7 +472,7 @@ export default function OnlineGame({ gameId, onGameEnd }: OnlineGameProps) {
                 className="px-3 py-2 bg-gray-600 hover:bg-gray-700 rounded font-medium transition-colors text-sm"
                 title="Flip board"
               >
-                {'\u{21C5}'}
+                <FlipIcon size={18} />
               </button>
 
               {/* Rules */}
@@ -479,8 +480,9 @@ export default function OnlineGame({ gameId, onGameEnd }: OnlineGameProps) {
                 onClick={() => setShowRules(true)}
                 className="px-3 py-2 bg-gray-600 hover:bg-gray-700 rounded font-medium transition-colors text-sm"
                 title="Rules"
+                aria-label="Rules"
               >
-                ?
+                <RulesIcon size={18} />
               </button>
 
             </>

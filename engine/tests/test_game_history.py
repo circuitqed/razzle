@@ -134,6 +134,28 @@ class TestResultAndHistory:
         row = db_row(temp_db, "g1")
         assert row['winner'] == 0 and row['finished_at'] is not None
 
+    def test_stale_unfinished_game_is_abandoned(self, client, temp_db):
+        register(client)
+        gid = client.post('/games', json={'player2_type': 'ai', 'ai_level': 2}).json()['game_id']
+        play_first_turn(client, gid)
+        assert client.get('/me/games').json()['games'][0]['result'] == 'in_progress'
+        with sqlite3.connect(temp_db) as c:
+            c.execute("UPDATE games SET updated_at = '2020-01-01T00:00:00Z' WHERE game_id = ?", (gid,))
+        assert client.get('/me/games').json()['games'][0]['result'] == 'abandoned'
+        listed = client.get('/games').json()['games']
+        assert [g['status'] for g in listed if g['game_id'] == gid] == ['abandoned']
+        # Correspondence games are never auto-abandoned
+        with sqlite3.connect(temp_db) as c:
+            c.execute("UPDATE games SET game_mode = 'correspondence' WHERE game_id = ?", (gid,))
+        assert client.get('/me/games').json()['games'][0]['result'] == 'in_progress'
+
+    def test_admin_flag_in_auth_me(self, client, temp_db):
+        uid = register(client)
+        assert client.get('/auth/me').json()['is_admin'] is False
+        with sqlite3.connect(temp_db) as c:
+            c.execute("UPDATE users SET is_admin = 1 WHERE user_id = ?", (uid,))
+        assert client.get('/auth/me').json()['is_admin'] is True
+
     def test_online_game_vs_human(self, temp_db, monkeypatch):
         monkeypatch.setattr(persistence, 'DEFAULT_DB_PATH', temp_db)
         a = persistence.create_user("alice", "password123")

@@ -14,7 +14,7 @@ export interface HistoryOpponent {
   ai_simulations?: number | null;
 }
 
-export type HistoryResult = 'win' | 'loss' | 'draw' | 'in_progress' | 'aborted' | null;
+export type HistoryResult = 'win' | 'loss' | 'draw' | 'in_progress' | 'abandoned' | 'aborted' | null;
 
 export interface HistoryGame {
   game_id: string;

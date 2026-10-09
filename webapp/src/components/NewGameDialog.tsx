@@ -3,7 +3,7 @@ import { useAuth } from '../contexts/AuthContext';
 import { useOnlineStatus } from '../hooks/useOnlineStatus';
 import * as onlineApi from '../api/online';
 import type { ModelInfo } from '../api/engine';
-import { getAutoMatchLevel, setAutoMatchLevel, getTierSettings, getLevelLabel, TIERS, maxLevelForDevice } from '../utils/autoMatch';
+import { getAutoMatchLevel, setAutoMatchLevel, getTierSettings, TIERS, maxLevelForDevice, LOSS_STREAK_TO_DEMOTE } from '../utils/autoMatch';
 import { estimateMoveSeconds, formatSeconds } from '../utils/searchSpeed';
 import { isNativeApp } from '../api/base';
 import { useDialogA11y } from '../hooks/useDialogA11y';
@@ -141,12 +141,15 @@ export default function NewGameDialog({
 }: NewGameDialogProps) {
   const dialogRef = useDialogA11y(onClose);
   const { user } = useAuth();
+  // Custom model/sims is a developer option; everyone else plays the ladder.
+  const isAdmin = !!user?.is_admin;
 
   // Shared state
   const [mode, setMode] = useState<GameMode>(currentSettings.mode);
   const [model, setModel] = useState<string | undefined>(currentSettings.model);
   const [simulations, setSimulations] = useState(currentSettings.simulations);
-  const [difficulty, setDifficulty] = useState<BotDifficulty>(currentSettings.difficulty ?? 'auto');
+  const [difficulty, setDifficulty] = useState<BotDifficulty>(
+    isAdmin ? (currentSettings.difficulty ?? 'auto') : 'auto');
   const [selectedLevel, setSelectedLevel] = useState(getAutoMatchLevel);
   const [colorChoice, setColorChoice] = useState<ColorChoice>(currentSettings.colorChoice);
   const [timeControl, setTimeControl] = useState<number | null>(currentSettings.timeControl ?? null);
@@ -225,7 +228,7 @@ export default function NewGameDialog({
       setMode(currentSettings.mode);
       setModel(currentSettings.model);
       setSimulations(currentSettings.simulations);
-      setDifficulty(currentSettings.difficulty ?? 'auto');
+      setDifficulty(isAdmin ? (currentSettings.difficulty ?? 'auto') : 'auto');
       setColorChoice(currentSettings.colorChoice);
       setTimeControl(currentSettings.timeControl ?? null);
       setIncrement(currentSettings.increment ?? 0);
@@ -461,34 +464,34 @@ export default function NewGameDialog({
           <>
             <div className="mb-3">
               <label className="block text-xs text-gray-400 mb-2">Difficulty</label>
-              {/* Auto-match toggle */}
-              <div className="flex items-center gap-2 mb-2">
-                <button
-                  onClick={() => setDifficulty('auto')}
-                  className={`flex-1 px-2 py-2 rounded text-sm font-medium transition-colors ${
-                    difficulty === 'auto'
-                      ? 'bg-green-600 text-white ring-2 ring-green-400'
-                      : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
-                  }`}
-                >
-                  Auto · {getLevelLabel(selectedLevel)}
-                </button>
-                <button
-                  onClick={() => setDifficulty('custom')}
-                  className={`px-3 py-2 rounded text-sm font-medium transition-colors ${
-                    difficulty === 'custom'
-                      ? 'bg-gray-500 text-white ring-2 ring-gray-400'
-                      : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
-                  }`}
-                >
-                  Custom
-                </button>
-              </div>
+              {/* Admins can switch to a custom model/sims; everyone else just has the ladder. */}
+              {isAdmin && (
+                <div className="flex items-center gap-2 mb-2">
+                  <button
+                    onClick={() => setDifficulty('auto')}
+                    className={`flex-1 px-2 py-2 rounded text-sm font-medium transition-colors ${
+                      difficulty === 'auto'
+                        ? 'bg-green-600 text-white ring-2 ring-green-400'
+                        : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+                    }`}
+                  >
+                    Ladder
+                  </button>
+                  <button
+                    onClick={() => setDifficulty('custom')}
+                    className={`flex-1 px-2 py-2 rounded text-sm font-medium transition-colors ${
+                      difficulty === 'custom'
+                        ? 'bg-gray-500 text-white ring-2 ring-gray-400'
+                        : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+                    }`}
+                  >
+                    Custom
+                  </button>
+                </div>
+              )}
               {difficulty === 'auto' && (
                 <>
-                  <p className="text-xs text-gray-500 mb-2">
-                    Adjusts after each game. Or pick a level:
-                  </p>
+                  <LevelSummary level={selectedLevel} />
                   <div className="grid grid-cols-5 gap-1">
                     {TIERS.slice(0, maxLevelForDevice()).map((tier, i) => {
                       const level = i + 1;
@@ -1108,6 +1111,28 @@ export default function NewGameDialog({
         )}
       </div>
     </div>
+  );
+}
+
+/** The selected ladder level: name and rating on the calibrated scale. */
+function LevelSummary({ level }: { level: number }) {
+  const tier = getTierSettings(level);
+  const name = tier.label.split('—')[1]?.trim() ?? '';
+  return (
+    <>
+      <div className="mb-1 flex items-baseline justify-between rounded bg-gray-900/60 px-3 py-2">
+        <span>
+          <span className="font-semibold text-white">Level {level}</span>
+          {name && <span className="ml-2 text-gray-300">{name}</span>}
+        </span>
+        <span className="text-xs text-gray-400 tabular-nums" title="Approximate playing strength on KnightBall's rating scale">
+          rated ~{tier.rating}
+        </span>
+      </div>
+      <p className="text-xs text-gray-500 mb-2">
+        Goes up a level when you win, down after {LOSS_STREAK_TO_DEMOTE} losses in a row. Or pick one:
+      </p>
+    </>
   );
 }
 

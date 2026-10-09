@@ -10,6 +10,20 @@ import Board from './Board';
 import MoveHistory from './MoveHistory';
 import EvaluationMeter from './EvaluationMeter';
 import { formatMovesForDisplay } from '../utils/replay';
+import { newGame } from '../engine/state';
+
+const STARTING_POSITION = (() => {
+  const s = newGame();
+  return {
+    board: {
+      p1_pieces: s.pieces[0].toString(),
+      p1_ball: s.balls[0].toString(),
+      p2_pieces: s.pieces[1].toString(),
+      p2_ball: s.balls[1].toString(),
+    },
+    touched: s.touchedMask.toString(),
+  };
+})();
 
 interface LastMove {
   from: number;
@@ -122,8 +136,35 @@ export default function GameView({
         </div>
       )}
 
-      {isLoading && !gameState && (
-        <div className="text-gray-400">Loading...</div>
+      {/* While the first game is being created, show the starting position
+          (not interactive) so the page doesn't flash a blank "Loading". */}
+      {!gameState && (
+        <>
+          <div className="mb-2 text-center h-7 flex items-center justify-center">
+            <span className="text-sm text-gray-500 animate-pulse">{isLoading ? 'Setting up the board…' : ''}</span>
+          </div>
+          <div className="flex gap-2 items-start justify-center w-full sm:w-auto opacity-80 pointer-events-none" aria-hidden="true">
+           <div className="kb-board-col flex-1 sm:flex-none min-w-0">
+            {/* Same height as the opponent-name row, so the board doesn't jump */}
+            <div className="mb-1 text-xs sm:text-sm">&nbsp;</div>
+            <Board
+              board={STARTING_POSITION.board}
+              currentPlayer={0}
+              legalMoves={[]}
+              selectedSquare={null}
+              onSquareClick={() => {}}
+              touchedMask={STARTING_POSITION.touched}
+              flipped={flipped}
+              animate={false}
+              fluid
+            />
+           </div>
+           {/* Empty move list where the real one goes (desktop), so the board stays put */}
+           <div className="hidden sm:flex sm:flex-col sm:gap-2">
+             <MoveHistory moves={[]} viewPly={0} heightClass="kb-history-h" />
+           </div>
+          </div>
+        </>
       )}
 
       {gameState && (

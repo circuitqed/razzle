@@ -10,6 +10,8 @@ interface MyGamesProps {
   onClose: () => void;
   onSelectGame: (gameId: string) => void;
   onBrowseAll: () => void;
+  onOpenLogin: () => void;
+  onOpenRegister: () => void;
 }
 
 const PER_PAGE = 15;
@@ -29,6 +31,7 @@ const RESULT_STYLE: Record<string, { text: string; className: string }> = {
   loss: { text: 'Lost', className: 'text-red-400' },
   draw: { text: 'Draw', className: 'text-gray-400' },
   in_progress: { text: 'In progress', className: 'text-yellow-400' },
+  abandoned: { text: 'Abandoned', className: 'text-gray-500' },
   aborted: { text: 'Aborted', className: 'text-gray-500' },
 };
 
@@ -52,7 +55,7 @@ function StatTile({ label, value, sub }: { label: string; value: string; sub?: s
   );
 }
 
-export default function MyGames({ isOpen, onClose, onSelectGame, onBrowseAll }: MyGamesProps) {
+export default function MyGames({ isOpen, onClose, onSelectGame, onBrowseAll, onOpenLogin, onOpenRegister }: MyGamesProps) {
   const dialogRef = useDialogA11y(onClose);
   const { user } = useAuth();
   const [summary, setSummary] = useState<GameSummaryStats | null>(null);
@@ -106,7 +109,23 @@ export default function MyGames({ isOpen, onClose, onSelectGame, onBrowseAll }: 
         </div>
 
         {!user ? (
-          <div className="text-center text-gray-400 py-8">Sign in to keep a history of your games.</div>
+          <div className="text-center py-8 px-2">
+            <p className="text-gray-200 mb-1">Keep your games and track your progress.</p>
+            <p className="text-sm text-gray-400 mb-5">
+              With a free account, every game you play is saved here with your record against each AI level.
+            </p>
+            <div className="flex justify-center gap-3">
+              <button onClick={onOpenRegister} className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded font-medium transition-colors">
+                Sign up
+              </button>
+              <button onClick={onOpenLogin} className="px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded font-medium transition-colors">
+                Log in
+              </button>
+            </div>
+            <button onClick={onBrowseAll} className="mt-6 text-sm text-gray-400 hover:text-white transition-colors">
+              Find a player
+            </button>
+          </div>
         ) : (
           <>
             {/* Summary */}
@@ -140,7 +159,8 @@ export default function MyGames({ isOpen, onClose, onSelectGame, onBrowseAll }: 
                   {games.map(g => {
                     const style = g.result ? RESULT_STYLE[g.result] : null;
                     return (
-                      <li key={g.game_id} className="flex items-center gap-3 py-2">
+                      <li key={g.game_id} onClick={() => onSelectGame(g.game_id)}
+                        className="flex items-center gap-3 py-2 px-1 -mx-1 rounded cursor-pointer hover:bg-gray-700/50">
                         <span className={`w-3 h-3 rounded-full shrink-0 ${g.your_color === 0 ? 'bg-blue-500' : 'bg-red-500'}`}
                           title={g.your_color === 0 ? 'You played blue' : 'You played red'} />
                         <div className="flex-1 min-w-0">
@@ -150,12 +170,6 @@ export default function MyGames({ isOpen, onClose, onSelectGame, onBrowseAll }: 
                           </div>
                         </div>
                         {style && <span className={`text-sm font-medium ${style.className}`}>{style.text}</span>}
-                        <button
-                          onClick={() => onSelectGame(g.game_id)}
-                          className="px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-xs transition-colors"
-                        >
-                          View
-                        </button>
                       </li>
                     );
                   })}
@@ -165,7 +179,7 @@ export default function MyGames({ isOpen, onClose, onSelectGame, onBrowseAll }: 
 
             <div className="flex flex-wrap justify-between items-center gap-2 mt-3 pt-3 border-t border-gray-700">
               <button onClick={onBrowseAll} className="text-sm text-gray-400 hover:text-white transition-colors">
-                Browse all games
+                Find a player
               </button>
               {totalPages > 1 && (
                 <div className="flex items-center gap-3">

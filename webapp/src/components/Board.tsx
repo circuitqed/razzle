@@ -466,7 +466,7 @@ export default function Board({
         aria-label={`${squareToAlgebraic(square)}${
           hasP1Piece ? (hasP1Ball ? ', blue piece with ball' : ', blue piece')
           : hasP2Piece ? (hasP2Ball ? ', red piece with ball' : ', red piece')
-          : ''}${isLegalDest ? ', legal move' : ''}`}
+          : ''}${(hasP1Piece || hasP2Piece) && isIneligible ? ", can't receive a pass" : ''}${isLegalDest ? ', legal move' : ''}`}
         onClick={() => {
           // Suppress the click that fires immediately after a drag completes
           if (performance.now() - dragCompletedAtRef.current < CLICK_SUPPRESS_MS) {

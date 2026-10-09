@@ -70,8 +70,8 @@ export default function RulesModal({ isOpen, onClose, onStartTutorial }: RulesMo
             <ul className="list-disc list-inside space-y-1 ml-2">
               <li>The ball cannot pass through other pieces</li>
               <li>
-                A piece that has already touched the ball this turn cannot receive
-                it again (shown with a red X)
+                A piece that has touched the ball is drawn hollow: it cannot receive
+                a pass until it makes a knight move. Pieces start hollow.
               </li>
               <li>After passing, you can pass again or end your turn</li>
               <li>You cannot move a piece after passing</li>

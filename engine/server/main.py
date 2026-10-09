@@ -196,6 +196,7 @@ class UserResponse(BaseModel):
     email: Optional[str] = None
     email_verified: bool = False
     auth_provider: str = "local"
+    is_admin: bool = False
 
 
 class AuthResponse(BaseModel):
@@ -4789,7 +4790,7 @@ class HistoryGame(BaseModel):
     game_mode: str = "realtime"
     your_color: int
     opponent: HistoryOpponent
-    result: Optional[str]  # 'win', 'loss', 'draw', 'in_progress', 'aborted'; None for pass-and-play
+    result: Optional[str]  # 'win', 'loss', 'draw', 'in_progress', 'abandoned', 'aborted'; None for pass-and-play
     winner: Optional[int]
     resigned: bool = False
     move_count: int

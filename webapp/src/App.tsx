@@ -36,6 +36,7 @@ import { listModels, type ModelInfo } from './api/engine';
 import * as onlineApi from './api/online';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { useOnlineStatus } from './hooks/useOnlineStatus';
+import { HistoryIcon, BugIcon, LearnIcon, RulesIcon, SoundOnIcon, SoundOffIcon, FlipIcon } from './components/icons';
 import LandingPage from './components/LandingPage';
 import Tutorial from './components/Tutorial';
 
@@ -486,7 +487,7 @@ function AppContent() {
         setShowRules(true);
         break;
       case 'b':
-        setShowGameBrowser(prev => !prev);
+        setShowMyGames(prev => !prev);
         break;
       case 't':
         // Developer training dashboard — not exposed in the App Store build.
@@ -662,12 +663,12 @@ function AppContent() {
             </span>
           )}
           <button
-            onClick={() => setShowGameBrowser(true)}
+            onClick={() => setShowMyGames(true)}
             className="w-11 h-11 flex items-center justify-center text-xl text-gray-400 hover:text-white transition-colors"
-            title="Game history (B)"
-            aria-label="Game history"
+            title="My games (B)"
+            aria-label="My games"
           >
-{'\u{1F4CB}'}
+<HistoryIcon />
           </button>
           <button
             onClick={() => setShowBugReport(true)}
@@ -675,7 +676,7 @@ function AppContent() {
             title="Report a bug"
             aria-label="Report a bug"
           >
-{'\u{1F41B}'}
+<BugIcon />
           </button>
           <button
             onClick={() => setShowTutorial(true)}
@@ -683,7 +684,7 @@ function AppContent() {
             title="How to Play"
             aria-label="How to play"
           >
-{'\u{1F393}'}
+<LearnIcon />
           </button>
           <UserMenu
             onOpenLogin={() => setShowLoginModal(true)}
@@ -817,7 +818,7 @@ function AppContent() {
                 title={soundOn ? 'Mute (M)' : 'Unmute (M)'}
                 aria-label={soundOn ? 'Mute sound' : 'Turn sound on'}
               >
-                {soundOn ? '\u{1F50A}' : '\u{1F507}'}
+                {soundOn ? <SoundOnIcon size={18} /> : <SoundOffIcon size={18} />}
               </button>
 
               {/* Flip board */}
@@ -827,7 +828,7 @@ function AppContent() {
                 title="Flip board (F)"
                 aria-label="Flip board"
               >
-                {'\u{21C5}'}
+                <FlipIcon size={18} />
               </button>
 
               {/* Rules */}
@@ -837,7 +838,7 @@ function AppContent() {
                 title="Rules (?)"
                 aria-label="Rules"
               >
-                ?
+                <RulesIcon size={18} />
               </button>
 
             </>
@@ -935,6 +936,8 @@ function AppContent() {
         onClose={() => setShowMyGames(false)}
         onSelectGame={handleSelectGameForReplay}
         onBrowseAll={() => { setShowMyGames(false); setShowGameBrowser(true); }}
+        onOpenLogin={() => { setShowMyGames(false); setShowLoginModal(true); }}
+        onOpenRegister={() => { setShowMyGames(false); setShowRegisterModal(true); }}
       />
 
       {/* Replay Viewer */}

@@ -46,4 +46,20 @@ describe('Piece component', () => {
     expect(polygon).toHaveAttribute('stroke', '#1f2937')
     expect(polygon).toHaveAttribute('stroke-width', '1.5')
   })
+
+  it('draws an ineligible piece hollow: tinted fill plus a coloured ring, no facet', () => {
+    const { container } = renderSvg(<Piece player={0} hasBall={false} isIneligible={true} />)
+    const polygons = container.querySelectorAll('polygon')
+    expect(polygons).toHaveLength(2)
+    expect(polygons[0].getAttribute('fill')).toMatch(/^rgba\(59, 130, 246/)
+    expect(polygons[1]).toHaveAttribute('fill', 'none')
+    expect(polygons[1]).toHaveAttribute('stroke', '#2563eb')
+  })
+
+  it('draws an eligible piece solid with a facet', () => {
+    const { container } = renderSvg(<Piece player={1} hasBall={false} isIneligible={false} />)
+    const polygons = container.querySelectorAll('polygon')
+    expect(polygons[0]).toHaveAttribute('fill', '#ef4444')
+    expect(polygons[1]).toHaveAttribute('fill', '#ffffff')
+  })
 })

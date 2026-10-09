@@ -1,7 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import * as gamesApi from '../api/games';
 import type { GameSummary } from '../api/games';
-import { useAuth } from '../contexts/AuthContext';
 import { getPlayers } from '../api/leaderboard';
 import type { PlayerProfile } from '../types';
 import { useDialogA11y } from '../hooks/useDialogA11y';
@@ -15,7 +14,6 @@ interface GameBrowserProps {
 
 export default function GameBrowser({ isOpen, onClose, onSelectGame }: GameBrowserProps) {
   const dialogRef = useDialogA11y(onClose);
-  const { user } = useAuth();
   const [games, setGames] = useState<GameSummary[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -25,7 +23,6 @@ export default function GameBrowser({ isOpen, onClose, onSelectGame }: GameBrows
   // Filters
   const [statusFilter, setStatusFilter] = useState<string>('');
   const [resultFilter, setResultFilter] = useState<string>('');
-  const [myGamesOnly, setMyGamesOnly] = useState(!!user);
 
   // Player search
   const [allPlayers, setAllPlayers] = useState<PlayerProfile[]>([]);
@@ -64,7 +61,6 @@ export default function GameBrowser({ isOpen, onClose, onSelectGame }: GameBrows
     setSelectedPlayer(player);
     setPlayerQuery(player.username || player.display_name);
     setShowDropdown(false);
-    setMyGamesOnly(false);
   };
 
   const handleClearPlayer = () => {
@@ -77,6 +73,14 @@ export default function GameBrowser({ isOpen, onClose, onSelectGame }: GameBrows
     setError(null);
 
     try {
+      // Like lichess, there is no global list of everyone's games: you look
+      // at a player's games (yours are in My Games).
+      const playerId = selectedPlayer ? (selectedPlayer.user_id || selectedPlayer.player_id) : null;
+      if (!playerId) {
+        setGames([]);
+        setTotalPages(1);
+        return;
+      }
       const params: Parameters<typeof gamesApi.listGames>[0] = {
         page,
         per_page: 15,
@@ -88,12 +92,8 @@ export default function GameBrowser({ isOpen, onClose, onSelectGame }: GameBrows
       if (resultFilter) {
         params.winner = parseInt(resultFilter);
       }
-      if (selectedPlayer) {
-        // Use player_id for filtering (works for both human and AI players)
-        params.player_id = selectedPlayer.user_id || selectedPlayer.player_id;
-      } else if (myGamesOnly && user) {
-        params.player_id = user.user_id;
-      }
+      // player_id works for both human and AI players
+      params.player_id = playerId;
 
       const response = await gamesApi.listGames(params);
       setGames(response.games);
@@ -103,7 +103,7 @@ export default function GameBrowser({ isOpen, onClose, onSelectGame }: GameBrows
     } finally {
       setIsLoading(false);
     }
-  }, [page, statusFilter, resultFilter, myGamesOnly, user, selectedPlayer]);
+  }, [page, statusFilter, resultFilter, selectedPlayer]);
 
   // Load games when filters change
   useEffect(() => {
@@ -115,7 +115,7 @@ export default function GameBrowser({ isOpen, onClose, onSelectGame }: GameBrows
   // Reset page when filters change
   useEffect(() => {
     setPage(1);
-  }, [statusFilter, resultFilter, myGamesOnly, selectedPlayer]);
+  }, [statusFilter, resultFilter, selectedPlayer]);
 
   if (!isOpen) return null;
 
@@ -132,12 +132,14 @@ export default function GameBrowser({ isOpen, onClose, onSelectGame }: GameBrows
 
   const getResultText = (game: GameSummary) => {
     if (game.status === 'playing') return 'In progress';
+    if (game.status === 'abandoned') return 'Abandoned';
     if (game.winner === null) return 'Draw';
     return game.winner === 0 ? 'Blue Won' : 'Red Won';
   };
 
   const getResultColor = (game: GameSummary) => {
     if (game.status === 'playing') return 'text-yellow-400';
+    if (game.status === 'abandoned') return 'text-gray-500';
     if (game.winner === null) return 'text-gray-400';
     return game.winner === 0 ? 'text-blue-400' : 'text-red-400';
   };
@@ -171,7 +173,7 @@ export default function GameBrowser({ isOpen, onClose, onSelectGame }: GameBrows
     <div ref={dialogRef} role="dialog" aria-modal="true" className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
       <div className="bg-gray-800 rounded-lg p-6 max-w-4xl w-full mx-4 max-h-[90vh] flex flex-col">
         <div className="flex justify-between items-center mb-4">
-          <h2 className="text-xl font-bold text-white">Game History</h2>
+          <h2 className="text-xl font-bold text-white">Players’ games</h2>
           <button
             onClick={onClose}
             className="text-gray-400 hover:text-white transition-colors"
@@ -194,6 +196,7 @@ export default function GameBrowser({ isOpen, onClose, onSelectGame }: GameBrows
               <option value="">All</option>
               <option value="playing">In Progress</option>
               <option value="finished">Finished</option>
+              <option value="abandoned">Abandoned</option>
             </select>
           </div>
 
@@ -255,22 +258,6 @@ export default function GameBrowser({ isOpen, onClose, onSelectGame }: GameBrows
             )}
           </div>
 
-          {user && (
-            <div className="flex items-end">
-              <label className="flex items-center gap-2 text-sm text-gray-300 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={myGamesOnly}
-                  onChange={(e) => {
-                    setMyGamesOnly(e.target.checked);
-                    if (e.target.checked) handleClearPlayer();
-                  }}
-                  className="rounded"
-                />
-                My Games Only
-              </label>
-            </div>
-          )}
 
           <div className="flex-1"></div>
 
@@ -296,7 +283,9 @@ export default function GameBrowser({ isOpen, onClose, onSelectGame }: GameBrows
           {isLoading && games.length === 0 ? (
             <div className="text-center text-gray-400 py-8">Loading...</div>
           ) : games.length === 0 ? (
-            <div className="text-center text-gray-400 py-8">No games found</div>
+            <div className="text-center text-gray-400 py-8">
+              {selectedPlayer ? 'No games found' : 'Search for a player to see their games.'}
+            </div>
           ) : (
             <table className="w-full text-sm">
               <thead className="text-gray-400 border-b border-gray-700">

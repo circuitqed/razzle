@@ -406,6 +406,9 @@ def init_db(db_path: Path = None) -> None:
             "ALTER TABLE users ADD COLUMN google_id TEXT",
             "ALTER TABLE users ADD COLUMN auth_provider TEXT DEFAULT 'local'",
             "ALTER TABLE users ADD COLUMN apple_id TEXT",
+            # Admins see developer options (custom AI model/sims) in the app.
+            # Set by hand: UPDATE users SET is_admin = 1 WHERE username = '...'
+            "ALTER TABLE users ADD COLUMN is_admin INTEGER DEFAULT 0",
         ]
         for sql in auth_migrations:
             try:
@@ -1060,6 +1063,7 @@ def _user_dict_from_row(row) -> dict:
         d["google_id"] = row["google_id"]
     if "apple_id" in keys:
         d["apple_id"] = row["apple_id"]
+    d["is_admin"] = bool(row["is_admin"]) if "is_admin" in keys else False
     return d
 
 
@@ -1540,7 +1544,7 @@ def list_games(
         rows = conn.execute(
             f"""SELECT g.game_id, g.player1_type, g.player2_type, g.player1_user_id, g.player2_user_id,
                        g.state_json, g.moves_json, g.created_at, g.updated_at, g.ai_model_version,
-                       g.ai_simulations, g.resigned_by,
+                       g.ai_simulations, g.resigned_by, g.game_mode,
                        u1.username as player1_username, u2.username as player2_username
                 FROM games g
                 LEFT JOIN users u1 ON g.player1_user_id = u1.user_id
@@ -1561,6 +1565,8 @@ def list_games(
             # the game without a terminal position, as in get_game_record)
             resigned_by = row["resigned_by"]
             game_status = "finished" if (state.is_terminal() or resigned_by is not None) else "playing"
+            if game_status == "playing" and _is_stale(row["updated_at"], row["game_mode"]):
+                game_status = "abandoned"
             game_winner = (1 - resigned_by) if resigned_by is not None else state.get_winner()
 
             # Skip games with no moves (never started) - backup check
@@ -3641,6 +3647,22 @@ def apply_elo_update(
 
 # --- Account game history ---
 
+# A real-time game with no move for this long is shown as abandoned
+# (correspondence games can legitimately sit for days).
+ABANDONED_AFTER = timedelta(hours=24)
+
+
+def _is_stale(updated_at: Optional[str], game_mode: Optional[str]) -> bool:
+    """True if an unfinished real-time game hasn't been touched in ABANDONED_AFTER."""
+    if not updated_at or (game_mode or "realtime") == "correspondence":
+        return False
+    try:
+        last = datetime.fromisoformat(updated_at.rstrip("Z"))
+    except ValueError:
+        return False
+    return datetime.utcnow() - last > ABANDONED_AFTER
+
+
 def _history_entry(row, user_id: str) -> Optional[dict]:
     """Describe one game row from user_id's perspective (None = skip it)."""
     moves = json.loads(row["moves_json"]) if row["moves_json"] else []
@@ -3697,7 +3719,7 @@ def _history_entry(row, user_id: str) -> Optional[dict]:
     if online_status == "abandoned" and winner is None:
         result = "aborted"
     elif not finished:
-        result = "in_progress"
+        result = "abandoned" if _is_stale(row["updated_at"], row["game_mode"]) else "in_progress"
     elif mode == "local":
         result = None
     elif winner is None:

@@ -13,6 +13,8 @@ export interface User {
   email: string | null;
   email_verified: boolean;
   auth_provider: 'local' | 'google';
+  /** Sees developer options (custom AI model/sims). */
+  is_admin?: boolean;
 }
 
 export interface AuthResponse {
