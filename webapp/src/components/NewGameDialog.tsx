@@ -1124,11 +1124,12 @@ function MoveTimeHint({ level }: { level: number }) {
         </p>
       );
     }
-    // Phones run the 96x12 network at roughly 70 sims/sec.
+    // iOS simulator, uncapped (Oct 2026): L18-L19 average 1.5-5 s per move;
+    // L20 averages 7-11 s, with occasional moves up to ~30 s.
     if (isNativeApp && tier.sims >= 512) {
       return (
         <p className="text-xs text-gray-400 mt-2">
-          At this level the AI can take {tier.sims >= 1024 ? 'about 15 seconds' : 'several seconds'} per move.
+          At this level the AI can take {tier.sims >= 1024 ? '10 seconds or more' : 'several seconds'} per move.
         </p>
       );
     }
