@@ -2,10 +2,11 @@ default_platform(:ios)
 
 # Load MATCH_PASSWORD from the macOS login Keychain if not already in env.
 # The ios-certificates repo has a single encryption passphrase shared by all
-# com.lazybrains apps; fall back through the known keychain entry names.
+# com.lazybrains apps (InkGlass, Roster, Cypherly); fall back through the
+# known keychain entry names.
 if ENV["MATCH_PASSWORD"].nil?
   require "open3"
-  ["match_knightball_passphrase", "match_inkglass_passphrase"].each do |entry|
+  ["match_knightball_passphrase", "match_inkglass_passphrase", "match_roster_passphrase"].each do |entry|
     out, status = Open3.capture2("security", "find-generic-password", "-s", entry, "-w")
     if status.success? && !out.strip.empty?
       ENV["MATCH_PASSWORD"] = out.strip
