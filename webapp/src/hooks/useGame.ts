@@ -80,14 +80,6 @@ function shouldCreateLocalGame(): boolean {
   return isNativeApp || (typeof navigator !== 'undefined' && navigator.onLine === false);
 }
 
-/**
- * Per-search wall-clock cap on native. Phones run ~30-110 sims/sec, so the top
- * levels' 4096-8192 sims would take a minute or more per move; cap it so the
- * AI stays responsive (and the phone stays cool). 0 = no cap.
- */
-export const NATIVE_SEARCH_BUDGET_MS = 10_000;
-/** Mid-pass-chain continuations of the same turn get less: the line was mostly searched already. */
-const NATIVE_CONTINUATION_BUDGET_MS = 4_000;
 
 function backendFor(gameId: string): typeof localApi | typeof serverApi {
   return isLocalGameId(gameId) ? localApi : serverApi;
@@ -319,9 +311,9 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
           try {
             const engineState = apiStateToEngineState(currentState);
             const result = await aiWorkerRef.current.search(engineState, {
+              // No time cap: every level searches its full sims, so its strength
+              // matches the calibration; the UI shows how long a move will take.
               numSimulations: aiSimulations,
-              maxTimeMs: !isNativeApp ? 0
-                : engineState.hasPassed ? NATIVE_CONTINUATION_BUDGET_MS : NATIVE_SEARCH_BUDGET_MS,
             });
             if (isStale()) return;
             aiMove = result.bestMove;

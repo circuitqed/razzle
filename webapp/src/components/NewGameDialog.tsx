@@ -6,7 +6,6 @@ import type { ModelInfo } from '../api/engine';
 import { getAutoMatchLevel, setAutoMatchLevel, getTierSettings, getLevelLabel, TIERS, maxLevelForDevice } from '../utils/autoMatch';
 import { estimateMoveSeconds, formatSeconds } from '../utils/searchSpeed';
 import { isNativeApp } from '../api/base';
-import { NATIVE_SEARCH_BUDGET_MS } from '../hooks/useGame';
 import { useDialogA11y } from '../hooks/useDialogA11y';
 
 type GameMode = 'ai' | 'pvp' | 'online';
@@ -1115,13 +1114,25 @@ export default function NewGameDialog({
 /** Expected AI time per move at a level, shown once it is more than a few seconds. */
 function MoveTimeHint({ level }: { level: number }) {
   const tier = getTierSettings(level);
-  const secs = estimateMoveSeconds(tier.model, tier.sims, isNativeApp ? NATIVE_SEARCH_BUDGET_MS : 0);
+  const secs = estimateMoveSeconds(tier.model, tier.sims);
   if (secs == null) {
-    return tier.desktopOnly ? (
-      <p className="text-xs text-gray-400 mt-2">
-        Deep-search level: the AI can take a minute or more per move.
-      </p>
-    ) : null;
+    // Nothing measured on this device yet (first game): rough guidance only.
+    if (tier.desktopOnly) {
+      return (
+        <p className="text-xs text-gray-400 mt-2">
+          Deep-search level: the AI can take a minute or more per move.
+        </p>
+      );
+    }
+    // Phones run the 96x12 network at roughly 70 sims/sec.
+    if (isNativeApp && tier.sims >= 512) {
+      return (
+        <p className="text-xs text-gray-400 mt-2">
+          At this level the AI can take {tier.sims >= 1024 ? 'about 15 seconds' : 'several seconds'} per move.
+        </p>
+      );
+    }
+    return null;
   }
   if (secs < 3) return null;
   return (

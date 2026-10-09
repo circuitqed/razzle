@@ -1,7 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
 import { formatSeconds } from '../utils/searchSpeed';
-import { isNativeApp } from '../api/base';
-import { NATIVE_SEARCH_BUDGET_MS } from '../hooks/useGame';
 
 interface Props {
   progress: { simsDone: number; totalSims: number } | null;
@@ -35,9 +33,7 @@ export default function ThinkingIndicator({ progress }: Props) {
   const elapsed = now - startRef.current;
   let remaining: string | null = null;
   if (total > 0 && done > 0 && elapsed >= SHOW_REMAINING_AFTER_MS) {
-    let secsLeft = ((elapsed / done) * (total - done)) / 1000;
-    // The native app stops searching at its time budget.
-    if (isNativeApp) secsLeft = Math.min(secsLeft, (NATIVE_SEARCH_BUDGET_MS - elapsed) / 1000);
+    const secsLeft = ((elapsed / done) * (total - done)) / 1000;
     if (secsLeft >= 1) remaining = `~${formatSeconds(secsLeft)} left`;
   }
 

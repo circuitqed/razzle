@@ -78,12 +78,11 @@ export function estimateSimsPerSec(model: string): number | null {
   return ref.simsPerSec * Math.min(1, ratio);
 }
 
-/** Estimated seconds per AI move at (model, sims), capped by `capMs` if given; null if unknown. */
-export function estimateMoveSeconds(model: string, sims: number, capMs = 0): number | null {
+/** Estimated seconds per AI move at (model, sims); null if unknown. */
+export function estimateMoveSeconds(model: string, sims: number): number | null {
   const sps = estimateSimsPerSec(model);
   if (sps == null || sps <= 0) return null;
-  const secs = sims / sps;
-  return capMs > 0 ? Math.min(secs, capMs / 1000) : secs;
+  return sims / sps;
 }
 
 /** Short human label for a duration in seconds: "8 s", "45 s", "2 min". */

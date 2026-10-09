@@ -31,8 +31,8 @@
  *              resign, server-AI posture, worker-context CORS, anon identity
  *              (X-Anon-Id) persistence, WSS auth
  *  ladder    — OPT-IN (groups=ladder): app levels (?levels=1,10,20) from the
- *              BUNDLED models with the native 10s/4s time budgets, AI vs
- *              random mover as P0 and P1; reports ms/move and sims/sec
+ *              BUNDLED models (full sims, no time cap, as in the app), AI
+ *              vs random mover as P0 and P1; reports ms/move and sims/sec
  *
  * Query params:
  *   ?groups=env,rules,...   run a subset (default: all)
@@ -1101,21 +1101,21 @@ async function groupBackend() {
 }
 
 
-// ladder (opt-in): app levels vs random mover with BUNDLED models and the
-// app's native time budgets (useGame.ts: 10s search, 4s continuation).
-function ladderSearch(worker: Worker, state: EngineState, numSimulations: number, maxTimeMs: number): Promise<SearchResult & { searchMs?: number }> {
+// ladder (opt-in): app levels vs random mover with BUNDLED models, searching
+// each level's full sims like the app does (no time cap).
+function ladderSearch(worker: Worker, state: EngineState, numSimulations: number): Promise<SearchResult & { searchMs?: number }> {
   return new Promise((resolve) => {
     const onMsg = (event: MessageEvent) => {
       if (event.data.type === 'search_result') { worker.removeEventListener('message', onMsg); resolve(event.data); }
     };
     worker.addEventListener('message', onMsg);
-    worker.postMessage({ type: 'search', state: serializeState(state), config: { numSimulations, maxTimeMs } });
+    worker.postMessage({ type: 'search', state: serializeState(state), config: { numSimulations, maxTimeMs: 0 } });
   });
 }
 
 async function groupLadder() {
   p('', undefined);
-  p('=== ladder: bundled v2 models at app levels (native time budget) ===', 'info');
+  p('=== ladder: bundled v2 models at app levels (full sims) ===', 'info');
   const levels = (params.get('levels') ?? '1,10,20').split(',').map((s) => parseInt(s, 10));
   for (const level of levels) {
     const tier = TIERS[level - 1];
@@ -1135,9 +1135,8 @@ async function groupLadder() {
       while (!isTerminal(state) && plies < 400) {
         let move: number;
         if (state.currentPlayer === aiPlayer) {
-          const budget = state.hasPassed ? 4_000 : 10_000;
           const t = performance.now();
-          const r = await ladderSearch(worker, state, tier.sims, budget);
+          const r = await ladderSearch(worker, state, tier.sims);
           ms.push(performance.now() - t);
           if (!r.success) throw new Error('search failed: ' + r.error);
           sims += r.simsDone;
@@ -1158,7 +1157,6 @@ async function groupLadder() {
         `sims/move=${(sims / ms.length).toFixed(0)} ${(sims / (total / 1000)).toFixed(1)} sims/sec`, 'dim');
       check(`L${level} as P${aiPlayer}: legal moves only`, illegal === 0, `${illegal} illegal`);
       check(`L${level} as P${aiPlayer}: beats random mover`, getWinner(state) === aiPlayer, `winner=${getWinner(state)}`);
-      check(`L${level} as P${aiPlayer}: max move ≤ 11s`, sorted[sorted.length - 1] <= 11_000, `${sorted[sorted.length - 1].toFixed(0)}ms`);
     }
     worker.terminate();
   }

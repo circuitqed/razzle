@@ -83,7 +83,7 @@ The webapp includes a full TypeScript port of the game engine and MCTS, enabling
 - Finished local games are queued and replayed to the server (`POST /games` + `/turn` per turn) when online, so history/training data keep flowing. 4xx drops an entry; network errors keep it queued.
 - Native builds bundle the 6 ladder models (distill_v2_*, all v2 networks): `npm run build:ios` = vite build + `scripts/bundle-models.mjs` (sha256-pinned; sources: `$BUNDLED_MODELS_DIR`, `../engine/output/models`, or downloads from knightball.org into `.model-cache/`) + `scripts/prune-native-dist.mjs` (drops test pages unless `KB_TEST_PAGES=1`, and ~100 MB of unused ONNX Runtime WASM). Fastlane `build` and `test:ios` use it.
 - `src/engine/bundledModels.ts#resolveModelInfo` order: bundled (native) → server → IndexedDB cache (offline web).
-- Native search is time-capped (10 s, 4 s for pass-chain continuations) via `MCTSConfig.maxTimeMs`; searches are cancelled on backgrounding and restarted on resume; a lost WebGL context rebuilds the worker.
+- Searches are not time-capped (every level runs its full sims so it plays at its calibrated strength); instead `utils/searchSpeed.ts` records sims/sec per (model, backend) on the device, and the New Game dialog shows the expected time per move while `ThinkingIndicator` shows "~X left". `MCTSConfig.maxTimeMs` still exists (0 = off). Searches are cancelled on backgrounding and restarted on resume; a lost WebGL context rebuilds the worker.
 
 ### Model loading
 - Models are loaded reactively when `aiModel` changes in useGame

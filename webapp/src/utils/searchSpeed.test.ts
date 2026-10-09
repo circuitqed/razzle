@@ -30,11 +30,6 @@ describe('searchSpeed', () => {
     expect(estimateSimsPerSec('distill_v2_16x2.pt')).toBeCloseTo(250);
   });
 
-  it('caps the estimate at a time budget', () => {
-    recordSearchSpeed('distill_v2_96x12.pt', 'webgl', 1000, 10_000); // 100
-    expect(estimateMoveSeconds('distill_v2_96x12.pt', 1024, 10_000)).toBe(10);
-  });
-
   it('formats durations', () => {
     expect(formatSeconds(4.4)).toBe('4 s');
     expect(formatSeconds(23)).toBe('25 s');
