@@ -434,7 +434,7 @@ class DistributedTrainer:
         self.models_dir.mkdir(exist_ok=True)
 
         # API client
-        self.api_client = TrainingAPIClient(base_url=api_url)
+        self.api_client = TrainingAPIClient(base_url=api_url, run=run_name)
 
         # Network and trainer (created once, reused across iterations)
         self.network: Optional[RazzleNet] = None

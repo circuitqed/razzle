@@ -618,6 +618,10 @@ class DistributedOrchestrator:
         else:
             return self._create_worker_instance(failed_worker)
 
+    def _run_params(self) -> dict:
+        """Scope model lookups to this run (--run-name), not just the latest upload."""
+        return {"run": self.run_name} if self.run_name else {}
+
     def _ensure_initial_model(self):
         """Create and upload initial model if none exists."""
         import requests
@@ -625,7 +629,7 @@ class DistributedOrchestrator:
 
         # Check if a model already exists
         try:
-            response = requests.get(f"{self.api_url}/training/models/latest", timeout=10)
+            response = requests.get(f"{self.api_url}/training/models/latest", params=self._run_params(), timeout=10)
             if response.status_code == 200:
                 data = response.json()
                 if data.get('model') is not None:
@@ -646,7 +650,7 @@ class DistributedOrchestrator:
             with open(model_path, 'rb') as f:
                 files = {'file': ('initial.pt', f, 'application/octet-stream')}
                 data = {
-                    'version': 'initial',
+                    'version': f'{self.run_name}_iter_000' if self.run_name else 'initial',
                     'iteration': '0',
                     'games_trained_on': '0',
                 }
@@ -793,7 +797,7 @@ class DistributedOrchestrator:
             run_started = time.time()
             trainer_last_progress = time.time()
             try:
-                trainer_start_iteration = (requests.get(f"{self.api_url}/training/models/latest", timeout=10)
+                trainer_start_iteration = (requests.get(f"{self.api_url}/training/models/latest", params=self._run_params(), timeout=10)
                                            .json().get('model') or {}).get('iteration', -1)
             except Exception:
                 trainer_start_iteration = -1
@@ -866,7 +870,7 @@ class DistributedOrchestrator:
                     # (e.g. a host stuck pulling the image) -> replace the trainer.
                     if self.trainer and self.with_trainer:
                         try:
-                            lm = requests.get(f"{self.api_url}/training/models/latest", timeout=10).json().get('model') or {}
+                            lm = requests.get(f"{self.api_url}/training/models/latest", params=self._run_params(), timeout=10).json().get('model') or {}
                             it = lm.get('iteration', -1)
                             if it != trainer_last_iteration:
                                 trainer_last_iteration = it

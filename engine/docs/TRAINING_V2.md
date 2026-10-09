@@ -71,8 +71,15 @@ distillation above came entirely from stored games.
 
 ## 6. Starting a run (vast.ai)
 
-1. `POST /training/reset` (keeps games/models; clears run bookkeeping).
+1. Pick a new run name. Runs coexist: models, metrics and self-play games carry the run (the
+   version prefix before `_iter_`), so no reset is needed. `GET /training/runs` lists them.
 2. Upload the bootstrapped starting network as `<run>_iter_000` (`TrainingAPIClient.upload_model`).
+   The latest upload's run is the *current* run: workers (no run given) play its latest model and
+   the dashboard shows it. The trainer (`--run-name <run>`) asks for its own run explicitly: its
+   latest model, only its games (`GET /training/games?run=`), its metrics, and trainer state
+   stored as `<run>.trainer_state` / `<run>.replay_buffer`.
+   `POST /training/reset?run=<run>` restarts one run (drops its model/metric/state records, retires
+   its pending games); a plain reset only retires the pending queue. Files and games are never deleted.
 3. `python scripts/train_distributed.py --worker v2 --branch app-store-ready --network-size medium_v2
    --run-name <run> --simulations 800 --concurrency 96 --threshold 512 --trainer-extra "--reuse 2"`.
 4. Gate checkpoints with `distill/arena.py` against the starting network.

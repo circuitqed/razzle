@@ -483,6 +483,7 @@ class TrainingDashboardResponse(BaseModel):
     latest_model: Optional[ModelInfo] = None
     workers: dict[str, WorkerStats]
     models: list[ModelInfo]
+    run_name: str = ""          # the current run (the latest upload's version prefix)
 
 
 class LogEntry(BaseModel):
@@ -540,6 +541,7 @@ class SubmitMetricsRequest(BaseModel):
     """Request to submit training metrics."""
     iteration: int
     metrics: dict
+    run: Optional[str] = None   # default: from metrics.model_version, else the current run
 
 
 class SubmitMetricsResponse(BaseModel):
@@ -2622,6 +2624,7 @@ async def fetch_training_games(
     status: str = "pending",
     limit: int = 100,
     mark_used: bool = True,
+    run: Optional[str] = None,
     _=Depends(require_training_key),
 ):
     """
@@ -2631,6 +2634,7 @@ async def fetch_training_games(
         status: Filter by status (default: "pending")
         limit: Maximum number of games to return
         mark_used: If true, atomically mark returned games as "used"
+        run: Only games played by this run's models (default: any run)
     """
     if status != "pending":
         raise HTTPException(status_code=400, detail="Only status='pending' is supported")
@@ -2638,6 +2642,7 @@ async def fetch_training_games(
     games_data, total_pending = persistence.get_pending_training_games(
         limit=limit,
         mark_used=mark_used,
+        run=run,
     )
 
     games = [
@@ -2681,9 +2686,9 @@ async def get_all_training_games(
 
 
 @app.get("/training/models/latest", response_model=LatestModelResponse)
-async def get_latest_model():
-    """Get information about the latest training model."""
-    model = persistence.get_latest_training_model()
+async def get_latest_model(run: Optional[str] = None):
+    """Get a run's latest model (default: the current run, i.e. the latest upload's)."""
+    model = persistence.get_latest_training_model(run=run)
 
     if model is None:
         return LatestModelResponse(model=None)
@@ -2709,9 +2714,9 @@ class ModelsListResponse(BaseModel):
 
 
 @app.get("/training/models", response_model=ModelsListResponse)
-async def list_training_models_endpoint(limit: int = 100):
-    """List all available training models."""
-    models = persistence.list_training_models(limit=limit)
+async def list_training_models_endpoint(limit: int = 100, run: Optional[str] = None):
+    """List a run's models (default: every run, newest first)."""
+    models = persistence.list_training_models(limit=limit, run=run)
     model_infos = [
         ModelInfo(
             version=m["version"],
@@ -2799,11 +2804,14 @@ async def get_training_dashboard(
     request: Request,
     auth_cookie: Optional[str] = Cookie(None, alias=AUTH_COOKIE_NAME),
     x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+    run: Optional[str] = None,
 ):
-    """Get training status for the dashboard. Public read access."""
+    """Get training status for a run (default: the current run). Public read access."""
+    if run is None:
+        run = persistence.get_current_training_run()
     stats = persistence.get_training_games_stats()
-    models = persistence.list_training_models(limit=10)
-    latest = persistence.get_latest_training_model()
+    models = persistence.list_training_models(limit=10, run=run)
+    latest = persistence.get_latest_training_model(run=run)
 
     # Build worker stats
     workers = {}
@@ -2841,7 +2849,7 @@ async def get_training_dashboard(
             created_at=latest["created_at"],
         )
 
-    total_games_trained = persistence.get_total_games_trained()
+    total_games_trained = persistence.get_total_games_trained(run=run)
 
     return TrainingDashboardResponse(
         status="active" if workers else "idle",
@@ -2851,6 +2859,7 @@ async def get_training_dashboard(
         latest_model=latest_model,
         workers=workers,
         models=model_infos,
+        run_name=run,
     )
 
 
@@ -2863,9 +2872,9 @@ class ClearTrainingResponse(BaseModel):
 
 
 @app.delete("/training/clear")
-async def clear_training_data(_=Depends(require_training_key)):
-    """Clear all training games, models, and metrics to start fresh."""
-    result = persistence.clear_training_data()
+async def clear_training_data(run: Optional[str] = None, _=Depends(require_training_key)):
+    """Same as POST /training/reset."""
+    result = persistence.clear_training_data(run=run)
     return ClearTrainingResponse(**result)
 
 
@@ -2881,6 +2890,7 @@ async def submit_training_metrics(request: SubmitMetricsRequest, _=Depends(requi
     metrics_id = persistence.save_training_metrics(
         iteration=request.iteration,
         metrics=request.metrics,
+        run=request.run,
     )
     return SubmitMetricsResponse(id=metrics_id, status="accepted")
 
@@ -2889,13 +2899,14 @@ async def submit_training_metrics(request: SubmitMetricsRequest, _=Depends(requi
 async def get_training_metrics(
     limit: int = 100,
     offset: int = 0,
+    run: Optional[str] = None,
 ):
     """
-    Get training metrics history.
+    Get a run's training metrics history (default: the current run).
 
     Returns metrics for all iterations, ordered by iteration number (ascending).
     """
-    metrics, total = persistence.get_training_metrics(limit=limit, offset=offset)
+    metrics, total = persistence.get_training_metrics(limit=limit, offset=offset, run=run)
 
     return TrainingMetricsHistoryResponse(
         metrics=[TrainingMetricsData(**m) for m in metrics],
@@ -2906,13 +2917,13 @@ async def get_training_metrics(
 
 
 @app.get("/training/metrics/latest", response_model=LatestMetricsResponse)
-async def get_latest_training_metrics():
+async def get_latest_training_metrics(run: Optional[str] = None):
     """
-    Get the most recent training metrics.
+    Get a run's most recent training metrics (default: the current run).
 
     Returns null if no metrics have been recorded yet.
     """
-    metrics = persistence.get_latest_training_metrics()
+    metrics = persistence.get_latest_training_metrics(run=run)
 
     if metrics is None:
         return LatestMetricsResponse(metrics=None)
@@ -3007,17 +3018,42 @@ class ResetTrainingResponse(BaseModel):
 
 
 @app.post("/training/reset", response_model=ResetTrainingResponse)
-async def reset_training(_=Depends(require_training_key)):
+async def reset_training(run: Optional[str] = None, _=Depends(require_training_key)):
     """
-    Reset training run state before starting a new run.
+    Reset training state before a run.
 
-    Retires pending self-play games (status 'archived'; games are kept in
-    training.db and the daily archive) and removes model / metric / trainer-
-    state records. Model .pt files and self-play games are NOT deleted.
-    ("games_deleted" in the response counts retired pending games.)
+    Without `run`: retires all pending self-play games and the unscoped
+    trainer state; every run's model and metric history is kept (a new run
+    becomes current when its <run>_iter_000 is uploaded).
+    With `run`: restarts that run, removing its model / metric / trainer-state
+    records and retiring its pending games.
+    Model .pt files and self-play games are never deleted ("games_deleted"
+    counts retired pending games).
     """
-    result = persistence.clear_training_data()
+    result = persistence.clear_training_data(run=run)
     return ResetTrainingResponse(**result)
+
+
+class TrainingRunInfo(BaseModel):
+    run_name: str
+    models: int
+    latest_iteration: int
+    started_at: str
+    updated_at: str
+
+
+class TrainingRunsResponse(BaseModel):
+    current: str
+    runs: list[TrainingRunInfo]
+
+
+@app.get("/training/runs", response_model=TrainingRunsResponse)
+async def list_training_runs():
+    """Every training run with stored models, most recently active first."""
+    return TrainingRunsResponse(
+        current=persistence.get_current_training_run(),
+        runs=[TrainingRunInfo(**r) for r in persistence.list_training_runs()],
+    )
 
 
 # Setup client logging

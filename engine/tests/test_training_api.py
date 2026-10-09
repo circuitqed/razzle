@@ -626,3 +626,86 @@ class TestTrainerState:
         # Download should 404
         response = client.get("/training/state/trainer_state/download")
         assert response.status_code == 404
+
+
+def _upload(client, version, iteration):
+    files = {"file": (f"{version}.pt", io.BytesIO(b"model"), "application/octet-stream")}
+    r = client.post("/training/models", data={"version": version, "iteration": str(iteration)}, files=files)
+    assert r.status_code == 200
+
+
+def _game(client, model_version):
+    r = client.post("/training/games", json={
+        "worker_id": "w", "moves": [1], "result": 1.0, "visit_counts": [{"1": 1}],
+        "model_version": model_version})
+    assert r.status_code == 200
+
+
+class TestTrainingRuns:
+    """Runs (the version prefix before _iter_) coexist without resets."""
+
+    def test_new_run_becomes_current_on_first_upload(self, client, temp_models_dir):
+        for i in range(3):
+            _upload(client, f"old_iter_{i:03d}", i)
+        _upload(client, "new_iter_000", 0)
+
+        # Workers (no run) follow the latest upload's run, not the highest iteration.
+        assert client.get("/training/models/latest").json()["model"]["version"] == "new_iter_000"
+        # The old run's history is still there.
+        assert client.get("/training/models/latest", params={"run": "old"}).json()["model"]["version"] == "old_iter_002"
+        runs = client.get("/training/runs").json()
+        assert runs["current"] == "new"
+        assert [r["run_name"] for r in runs["runs"]] == ["new", "old"]
+        dash = client.get("/training/dashboard").json()
+        assert dash["run_name"] == "new"
+        assert [m["version"] for m in dash["models"]] == ["new_iter_000"]
+
+    def test_trainer_fetches_only_its_runs_games(self, client, temp_models_dir):
+        _game(client, "old_iter_002")
+        _game(client, "new_iter_000")
+        _game(client, "new_iter_000")
+
+        r = client.get("/training/games", params={"run": "new", "mark_used": "false"}).json()
+        assert r["count"] == 2 and r["total_pending"] == 2
+        assert {g["model_version"] for g in r["games"]} == {"new_iter_000"}
+        # Unscoped fetch still sees everything.
+        assert client.get("/training/games", params={"mark_used": "false"}).json()["count"] == 3
+
+    def test_metrics_and_games_trained_are_per_run(self, client, temp_models_dir):
+        _upload(client, "old_iter_001", 1)
+        client.post("/training/metrics", json={"iteration": 1, "metrics": {"num_games": 500, "model_version": "old_iter_001"}})
+        _upload(client, "new_iter_000", 0)
+        client.post("/training/metrics", json={"iteration": 1, "metrics": {"num_games": 40, "model_version": "new_iter_001"}})
+
+        assert client.get("/training/dashboard").json()["total_games_trained"] == 40
+        assert client.get("/training/dashboard", params={"run": "old"}).json()["total_games_trained"] == 500
+        assert client.get("/training/metrics").json()["total"] == 1
+        assert client.get("/training/metrics/latest", params={"run": "old"}).json()["metrics"]["num_games"] == 500
+
+    def test_reset_keeps_history_and_run_reset_is_scoped(self, client, temp_models_dir, temp_state_dir):
+        _upload(client, "old_iter_001", 1)
+        _upload(client, "new_iter_001", 1)
+        for key in ("old.trainer_state", "new.trainer_state"):
+            files = {"file": ("s.dat", io.BytesIO(b"s"), "application/octet-stream")}
+            client.post(f"/training/state/{key}", data={"iteration": "1"}, files=files)
+        _game(client, "old_iter_001")
+        _game(client, "new_iter_001")
+
+        r = client.post("/training/reset", params={"run": "new"}).json()
+        assert r["models_deleted"] == 1 and r["games_deleted"] == 1 and r["trainer_states_deleted"] == 1
+        assert client.get("/training/state/old.trainer_state").json()["state"] is not None
+        assert client.get("/training/models/latest", params={"run": "old"}).json()["model"] is not None
+
+        # A plain reset retires the queue but keeps every run's models.
+        r = client.post("/training/reset").json()
+        assert r["models_deleted"] == 0 and r["games_deleted"] == 1
+        assert client.get("/training/models/latest").json()["model"]["version"] == "old_iter_001"
+
+
+def test_client_scopes_state_keys_and_params():
+    from razzle.training.api_client import TrainingAPIClient
+    c = TrainingAPIClient(base_url="http://x", run="phoenix5")
+    assert c._state_key("trainer_state") == "phoenix5.trainer_state"
+    assert c._run_params() == {"run": "phoenix5"}
+    legacy = TrainingAPIClient(base_url="http://x", run="")
+    assert legacy._state_key("trainer_state") == "trainer_state" and legacy._run_params() == {}

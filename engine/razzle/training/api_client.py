@@ -71,6 +71,7 @@ class TrainingAPIClient:
         timeout: float = 30.0,
         max_retries: int = 3,
         api_key: Optional[str] = None,
+        run: Optional[str] = None,
     ):
         """
         Initialize the API client.
@@ -80,8 +81,12 @@ class TrainingAPIClient:
             timeout: Request timeout in seconds
             max_retries: Number of retries for failed requests
             api_key: Training API key (default: from TRAINING_API_KEY env var)
+            run: Training run to scope to (the trainer's --run-name): its latest
+                model, pending games, metrics and trainer state. None = the
+                server's current run (workers) and the unscoped state keys.
         """
         self.base_url = base_url or os.environ.get("RAZZLE_API_URL", "http://localhost:8000")
+        self.run = run or None
         self.timeout = timeout
 
         # Setup session with retries
@@ -99,6 +104,13 @@ class TrainingAPIClient:
         key = api_key or os.environ.get("TRAINING_API_KEY", "")
         if key:
             self.session.headers["X-API-Key"] = key
+
+    def _run_params(self) -> dict:
+        return {"run": self.run} if self.run else {}
+
+    def _state_key(self, key: str) -> str:
+        """Trainer state is stored per run as "<run>.<key>"."""
+        return f"{self.run}.{key}" if self.run else key
 
     def _url(self, path: str) -> str:
         """Build full URL for a path."""
@@ -164,6 +176,7 @@ class TrainingAPIClient:
         """
         response = self.session.get(
             self._url("/training/models/latest"),
+            params=self._run_params(),
             timeout=self.timeout,
         )
         response.raise_for_status()
@@ -232,6 +245,7 @@ class TrainingAPIClient:
                 "status": "pending",
                 "limit": limit,
                 "mark_used": str(mark_used).lower(),
+                **self._run_params(),
             },
             timeout=self.timeout,
         )
@@ -324,6 +338,7 @@ class TrainingAPIClient:
         """
         response = self.session.get(
             self._url("/training/dashboard"),
+            params=self._run_params(),
             timeout=self.timeout,
         )
         response.raise_for_status()
@@ -362,6 +377,7 @@ class TrainingAPIClient:
                 json={
                     "iteration": iteration,
                     "metrics": metrics,
+                    **self._run_params(),
                 },
                 timeout=self.timeout,
             )
@@ -383,7 +399,7 @@ class TrainingAPIClient:
         """
         response = self.session.get(
             self._url("/training/metrics"),
-            params={"limit": limit, "offset": offset},
+            params={"limit": limit, "offset": offset, **self._run_params()},
             timeout=self.timeout,
         )
         response.raise_for_status()
@@ -399,6 +415,7 @@ class TrainingAPIClient:
         """
         response = self.session.get(
             self._url("/training/metrics/latest"),
+            params=self._run_params(),
             timeout=self.timeout,
         )
         response.raise_for_status()
@@ -425,6 +442,7 @@ class TrainingAPIClient:
             total_games_trained: Total games trained so far
             compress: Whether to gzip-compress before upload (False for already-compressed files like .npz)
         """
+        key = self._state_key(key)
         with open(file_path, "rb") as f:
             raw_data = f.read()
 
@@ -464,6 +482,7 @@ class TrainingAPIClient:
         Returns:
             Path to the downloaded file, or None if not found (404)
         """
+        key = self._state_key(key)
         try:
             response = self.session.get(
                 self._url(f"/training/state/{key}/download"),
@@ -495,6 +514,7 @@ class TrainingAPIClient:
         Returns:
             Dict with state info, or None if not found
         """
+        key = self._state_key(key)
         response = self.session.get(
             self._url(f"/training/state/{key}"),
             timeout=self.timeout,

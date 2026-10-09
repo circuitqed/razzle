@@ -281,6 +281,19 @@ def init_db(db_path: Path = None) -> None:
         """)
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_trainer_state_key ON trainer_state(key)")
 
+        # Training runs: models and metrics carry the run they belong to (the
+        # version prefix before "_iter_"), so runs coexist without resets.
+        for table in ("training_models", "training_metrics"):
+            try:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN run_name TEXT")
+            except sqlite3.OperationalError:
+                pass  # Column already exists
+        for table, col in (("training_models", "version"), ("training_metrics", "model_version")):
+            for row in conn.execute(f"SELECT id, {col} FROM {table} WHERE run_name IS NULL").fetchall():
+                conn.execute(f"UPDATE {table} SET run_name = ? WHERE id = ?", (_run_name(row[1]), row[0]))
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_training_models_run ON training_models(run_name, iteration)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_training_metrics_run ON training_metrics(run_name, iteration)")
+
         # Players table - unified humans and AI models with ELO ratings
         conn.execute("""
             CREATE TABLE IF NOT EXISTS players (
@@ -1726,6 +1739,7 @@ def save_training_game(
 def get_pending_training_games(
     limit: int = 100,
     mark_used: bool = True,
+    run: Optional[str] = None,
     db_path: Path = None
 ) -> tuple[list[dict], int]:
     """
@@ -1734,6 +1748,7 @@ def get_pending_training_games(
     Args:
         limit: Maximum number of games to return
         mark_used: If True, atomically mark returned games as 'used'
+        run: Only games played by this run's models (None = any run)
 
     Returns:
         Tuple of (list of games, total pending count)
@@ -1743,17 +1758,21 @@ def get_pending_training_games(
 
     with get_connection(db_path) as conn:
         _ensure_selfplay_schema(conn)
+        where, args = "status = 'pending'", []
+        if run is not None:
+            where += " AND run_name = ?"
+            args.append(run)
         total_pending = conn.execute(
-            "SELECT COUNT(*) as count FROM selfplay_games WHERE status = 'pending'"
+            f"SELECT COUNT(*) as count FROM selfplay_games WHERE {where}", args
         ).fetchone()["count"]
 
-        rows = conn.execute("""
+        rows = conn.execute(f"""
             SELECT id, worker_id, data, result, model_version, created_at
             FROM selfplay_games
-            WHERE status = 'pending'
+            WHERE {where}
             ORDER BY id ASC
             LIMIT ?
-        """, (limit,)).fetchall()
+        """, (*args, limit)).fetchall()
 
         games = []
         game_ids = []
@@ -1855,20 +1874,59 @@ def get_training_games_stats(db_path: Path = None) -> dict:
         }
 
 
-def get_total_games_trained(db_path: Path = None) -> int:
-    """Get the total number of games trained across all iterations.
+def get_total_games_trained(run: Optional[str] = None, db_path: Path = None) -> int:
+    """Get the total number of games a run has trained on (default: the current run).
 
     Computed from the training_metrics table which stores num_games per iteration.
     This is the authoritative source, surviving trainer restarts.
     """
     if db_path is None:
         db_path = DEFAULT_DB_PATH
+    if run is None:
+        run = get_current_training_run(db_path)
 
     with get_connection(db_path) as conn:
         row = conn.execute(
-            "SELECT COALESCE(SUM(num_games), 0) as total FROM training_metrics"
+            "SELECT COALESCE(SUM(num_games), 0) as total FROM training_metrics WHERE run_name = ?",
+            (run,),
         ).fetchone()
         return row["total"]
+
+
+def get_current_training_run(db_path: Path = None) -> str:
+    """The run of the most recently uploaded model ("" if none).
+
+    Uploading <run>_iter_000 makes <run> current: workers then play its
+    latest model, and the dashboard shows its history.
+    """
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+
+    with get_connection(db_path) as conn:
+        row = conn.execute(
+            "SELECT run_name FROM training_models ORDER BY created_at DESC, id DESC LIMIT 1"
+        ).fetchone()
+        return (row["run_name"] or "") if row else ""
+
+
+def list_training_runs(db_path: Path = None) -> list[dict]:
+    """Every run with stored models, most recently active first."""
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+
+    with get_connection(db_path) as conn:
+        rows = conn.execute("""
+            SELECT run_name, COUNT(*) AS models, MAX(iteration) AS latest_iteration,
+                   MIN(created_at) AS started_at, MAX(created_at) AS updated_at
+            FROM training_models GROUP BY run_name ORDER BY MAX(created_at) DESC
+        """).fetchall()
+        return [{
+            "run_name": row["run_name"] or "",
+            "models": row["models"],
+            "latest_iteration": row["latest_iteration"],
+            "started_at": row["started_at"],
+            "updated_at": row["updated_at"],
+        } for row in rows]
 
 
 def save_training_model(
@@ -1893,28 +1951,32 @@ def save_training_model(
     with get_connection(db_path) as conn:
         cursor = conn.execute("""
             INSERT INTO training_models
-                (version, iteration, games_trained_on, final_loss, final_policy_loss, final_value_loss, file_path, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (version, iteration, games_trained_on, final_loss, final_policy_loss, final_value_loss, file_path, created_at, run_name)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(version) DO UPDATE SET
                 games_trained_on = excluded.games_trained_on,
                 final_loss = excluded.final_loss,
                 final_policy_loss = excluded.final_policy_loss,
                 final_value_loss = excluded.final_value_loss,
                 file_path = excluded.file_path
-        """, (version, iteration, games_trained_on, final_loss, final_policy_loss, final_value_loss, file_path, now))
+        """, (version, iteration, games_trained_on, final_loss, final_policy_loss, final_value_loss, file_path, now,
+              _run_name(version)))
         conn.commit()
         return cursor.lastrowid
 
 
-def get_latest_training_model(db_path: Path = None) -> Optional[dict]:
-    """Get the most recent training model."""
+def get_latest_training_model(run: Optional[str] = None, db_path: Path = None) -> Optional[dict]:
+    """Get a run's highest-iteration model (default: the current run)."""
     if db_path is None:
         db_path = DEFAULT_DB_PATH
+    if run is None:
+        run = get_current_training_run(db_path)
 
     with get_connection(db_path) as conn:
         row = conn.execute("""
-            SELECT * FROM training_models ORDER BY iteration DESC LIMIT 1
-        """).fetchone()
+            SELECT * FROM training_models WHERE COALESCE(run_name, '') = ?
+            ORDER BY iteration DESC, id DESC LIMIT 1
+        """, (run,)).fetchone()
 
         if row is None:
             return None
@@ -1958,15 +2020,21 @@ def get_training_model_by_version(version: str, db_path: Path = None) -> Optiona
         }
 
 
-def list_training_models(limit: int = 50, db_path: Path = None) -> list[dict]:
-    """List training models, most recent first."""
+def list_training_models(limit: int = 50, run: Optional[str] = None, db_path: Path = None) -> list[dict]:
+    """List a run's models, highest iteration first (run=None: every run, newest first)."""
     if db_path is None:
         db_path = DEFAULT_DB_PATH
 
     with get_connection(db_path) as conn:
-        rows = conn.execute("""
-            SELECT * FROM training_models ORDER BY iteration DESC LIMIT ?
-        """, (limit,)).fetchall()
+        if run is None:
+            rows = conn.execute("""
+                SELECT * FROM training_models ORDER BY created_at DESC, id DESC LIMIT ?
+            """, (limit,)).fetchall()
+        else:
+            rows = conn.execute("""
+                SELECT * FROM training_models WHERE COALESCE(run_name, '') = ?
+                ORDER BY iteration DESC LIMIT ?
+            """, (run, limit)).fetchall()
 
         return [{
             "id": row["id"],
@@ -1981,65 +2049,70 @@ def list_training_models(limit: int = 50, db_path: Path = None) -> list[dict]:
         } for row in rows]
 
 
-def clear_training_data(db_path: Path = None) -> dict:
-    """Reset training state between runs.
+def clear_training_data(run: Optional[str] = None, db_path: Path = None) -> dict:
+    """Reset training state before a run.
 
-    Retires the pending self-play queue (status -> 'archived'; games are kept),
-    and removes model/metric/trainer-state records. Model .pt files and
-    self-play games stay on disk: earlier resets that deleted them lost
-    irreplaceable models and games.
+    run=None: retires the whole pending self-play queue (status -> 'archived';
+    games are kept) and the unscoped trainer state. Model and metric records
+    are kept: they're each run's history, and the next run becomes current
+    when its <run>_iter_000 is uploaded.
+
+    run=X: restarts run X. Retires X's pending games and removes X's model,
+    metric and trainer-state records (state keys "X.<key>").
+
+    Model .pt files and self-play games always stay on disk: earlier resets
+    that deleted them lost irreplaceable models and games.
     """
     if db_path is None:
         db_path = DEFAULT_DB_PATH
 
     with get_connection(db_path.parent / "training.db") as tconn:
         _ensure_selfplay_schema(tconn)
-        games_count = tconn.execute(
-            "UPDATE selfplay_games SET status = 'archived' WHERE status = 'pending'").rowcount
+        if run is None:
+            games_count = tconn.execute(
+                "UPDATE selfplay_games SET status = 'archived' WHERE status = 'pending'").rowcount
+        else:
+            games_count = tconn.execute(
+                "UPDATE selfplay_games SET status = 'archived' WHERE status = 'pending' AND run_name = ?",
+                (run,)).rowcount
         tconn.commit()
 
     with get_connection(db_path) as conn:
-        # Get counts before deletion
-        models_count = conn.execute("SELECT COUNT(*) FROM training_models").fetchone()[0]
-        metrics_count = conn.execute("SELECT COUNT(*) FROM training_metrics").fetchone()[0]
+        models_count = metrics_count = 0
+        if run is not None:
+            models_count = conn.execute(
+                "DELETE FROM training_models WHERE COALESCE(run_name, '') = ?", (run,)).rowcount
+            metrics_count = conn.execute(
+                "DELETE FROM training_metrics WHERE COALESCE(run_name, '') = ?", (run,)).rowcount
+            prefix = run + "."
+            state_where, state_args = "substr(key, 1, ?) = ?", (len(prefix), prefix)
+        else:
+            state_where, state_args = "instr(key, '.') = 0", ()
 
-        # Self-play games are never deleted here (they're the valuable part):
-        # a reset only retires the pending queue, below.
-
-        # Delete all training models from DB
-        conn.execute("DELETE FROM training_models")
-
-        # Delete all training metrics
-        conn.execute("DELETE FROM training_metrics")
-
-        # Delete trainer state records
-        trainer_state_count = conn.execute("SELECT COUNT(*) FROM trainer_state").fetchone()[0]
-        state_rows = conn.execute("SELECT file_path FROM trainer_state").fetchall()
+        state_rows = conn.execute(
+            f"SELECT file_path FROM trainer_state WHERE {state_where}", state_args).fetchall()
         state_files = [row["file_path"] for row in state_rows]
-        conn.execute("DELETE FROM trainer_state")
-
+        conn.execute(f"DELETE FROM trainer_state WHERE {state_where}", state_args)
         conn.commit()
 
-        # Model files are kept on disk (only DB records are removed).
-        deleted_files = 0
+    # Trainer state files are scratch (optimizer + replay window); remove them.
+    deleted_files = 0
+    for file_path in state_files:
+        try:
+            path = Path(file_path)
+            if path.exists():
+                path.unlink()
+                deleted_files += 1
+        except Exception:
+            pass
 
-        # Delete trainer state files from disk
-        for file_path in state_files:
-            try:
-                path = Path(file_path)
-                if path.exists():
-                    path.unlink()
-                    deleted_files += 1
-            except Exception:
-                pass
-
-        return {
-            "games_deleted": games_count,   # pending games retired to 'archived' (not deleted)
-            "models_deleted": models_count,
-            "metrics_deleted": metrics_count,
-            "trainer_states_deleted": trainer_state_count,
-            "files_deleted": deleted_files,
-        }
+    return {
+        "games_deleted": games_count,   # pending games retired to 'archived' (not deleted)
+        "models_deleted": models_count,
+        "metrics_deleted": metrics_count,
+        "trainer_states_deleted": len(state_files),
+        "files_deleted": deleted_files,
+    }
 
 
 def migrate_legacy_training_games(src_db: Path = None, dst_db: Path = None,
@@ -2160,6 +2233,7 @@ def delete_trainer_state_records(db_path: Path = None) -> int:
 def save_training_metrics(
     iteration: int,
     metrics: dict,
+    run: Optional[str] = None,
     db_path: Path = None
 ) -> int:
     """
@@ -2175,10 +2249,13 @@ def save_training_metrics(
     if db_path is None:
         db_path = DEFAULT_DB_PATH
     now = datetime.utcnow().isoformat() + 'Z'
+    if run is None:
+        version = metrics.get('model_version')
+        run = _run_name(version) if version and "_iter_" in version else get_current_training_run(db_path)
 
     with get_connection(db_path) as conn:
         cursor = conn.execute("""
-            INSERT INTO training_metrics (
+            INSERT INTO training_metrics (run_name, 
                 iteration, timestamp,
                 policy_top1_accuracy, policy_top3_accuracy, policy_entropy,
                 policy_legal_mass, policy_ebf, policy_confidence,
@@ -2188,9 +2265,9 @@ def save_training_metrics(
                 num_games, num_examples, avg_game_length,
                 learning_rate, model_version, train_time_sec
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
-            iteration, now,
+            run, iteration, now,
             metrics.get('policy_top1_accuracy'),
             metrics.get('policy_top3_accuracy'),
             metrics.get('policy_entropy'),
@@ -2223,6 +2300,7 @@ def save_training_metrics(
 def get_training_metrics(
     limit: int = 100,
     offset: int = 0,
+    run: Optional[str] = None,
     db_path: Path = None
 ) -> tuple[list[dict], int]:
     """
@@ -2231,23 +2309,28 @@ def get_training_metrics(
     Args:
         limit: Maximum number of records to return
         offset: Number of records to skip
+        run: Training run (default: the current run)
 
     Returns:
         Tuple of (list of metrics dicts, total count)
     """
     if db_path is None:
         db_path = DEFAULT_DB_PATH
+    if run is None:
+        run = get_current_training_run(db_path)
 
     with get_connection(db_path) as conn:
         # Get total count
-        total = conn.execute("SELECT COUNT(*) FROM training_metrics").fetchone()[0]
+        total = conn.execute(
+            "SELECT COUNT(*) FROM training_metrics WHERE COALESCE(run_name, '') = ?", (run,)
+        ).fetchone()[0]
 
         # Fetch metrics
         rows = conn.execute("""
-            SELECT * FROM training_metrics
+            SELECT * FROM training_metrics WHERE COALESCE(run_name, '') = ?
             ORDER BY iteration ASC
             LIMIT ? OFFSET ?
-        """, (limit, offset)).fetchall()
+        """, (run, limit, offset)).fetchall()
 
         metrics = []
         for row in rows:
@@ -2284,15 +2367,18 @@ def get_training_metrics(
         return metrics, total
 
 
-def get_latest_training_metrics(db_path: Path = None) -> Optional[dict]:
-    """Get the most recent training metrics."""
+def get_latest_training_metrics(run: Optional[str] = None, db_path: Path = None) -> Optional[dict]:
+    """Get a run's most recent training metrics (default: the current run)."""
     if db_path is None:
         db_path = DEFAULT_DB_PATH
+    if run is None:
+        run = get_current_training_run(db_path)
 
     with get_connection(db_path) as conn:
         row = conn.execute("""
-            SELECT * FROM training_metrics ORDER BY iteration DESC LIMIT 1
-        """).fetchone()
+            SELECT * FROM training_metrics WHERE COALESCE(run_name, '') = ?
+            ORDER BY iteration DESC LIMIT 1
+        """, (run,)).fetchone()
 
         if row is None:
             return None
