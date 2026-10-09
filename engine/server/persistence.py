@@ -1540,7 +1540,7 @@ def list_games(
         rows = conn.execute(
             f"""SELECT g.game_id, g.player1_type, g.player2_type, g.player1_user_id, g.player2_user_id,
                        g.state_json, g.moves_json, g.created_at, g.updated_at, g.ai_model_version,
-                       g.ai_simulations,
+                       g.ai_simulations, g.resigned_by,
                        u1.username as player1_username, u2.username as player2_username
                 FROM games g
                 LEFT JOIN users u1 ON g.player1_user_id = u1.user_id
@@ -1557,9 +1557,11 @@ def list_games(
             moves_json = row["moves_json"] if row["moves_json"] else "[]"
             moves = json.loads(moves_json)
 
-            # Determine game status and winner from state
-            game_status = "finished" if state.is_terminal() else "playing"
-            game_winner = state.get_winner()
+            # Determine game status and winner from state (a resignation ends
+            # the game without a terminal position, as in get_game_record)
+            resigned_by = row["resigned_by"]
+            game_status = "finished" if (state.is_terminal() or resigned_by is not None) else "playing"
+            game_winner = (1 - resigned_by) if resigned_by is not None else state.get_winner()
 
             # Skip games with no moves (never started) - backup check
             if len(moves) == 0:

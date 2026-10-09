@@ -450,11 +450,13 @@ export default function Board({
       bgColor = isLight ? '#f7e896' : '#c9b458';
     }
 
-    // Goal zones (rows 0 and 7)
-    if (row === 0) {
-      bgColor = (isLegalDest || isDragDest) ? '#60a5fa' : (isLastMoveFrom || isLastMoveTo) ? '#93c5fd' : '#93c5fd';
-    } else if (row === BOARD_ROWS - 1) {
-      bgColor = (isLegalDest || isDragDest) ? '#f87171' : (isLastMoveFrom || isLastMoveTo) ? '#fca5a5' : '#fca5a5';
+    // Goal zones (rows 0 and 7): zone colour, but keep the selection and
+    // last-move highlights visible (most first moves start on a home row).
+    if ((row === 0 || row === BOARD_ROWS - 1) && !isSelected && !isDragging) {
+      const blue = row === 0;
+      bgColor = (isLegalDest || isDragDest) ? (blue ? '#60a5fa' : '#f87171')
+        : (isLastMoveFrom || isLastMoveTo) ? '#e9d67a'
+        : (blue ? '#93c5fd' : '#fca5a5');
     }
 
     return (
@@ -536,7 +538,6 @@ export default function Board({
       <svg
         ref={svgRef}
         width="100%"
-        height="auto"
         viewBox={`${-LABEL_PAD_LEFT} 0 ${BOARD_WIDTH + LABEL_PAD_LEFT} ${BOARD_HEIGHT + LABEL_PAD_BOTTOM}`}
         className={fluid ? 'w-full' : 'w-full sm:w-[400px]'}
         preserveAspectRatio="xMidYMid meet"
@@ -544,7 +545,7 @@ export default function Board({
         onPointerUp={handlePointerUp}
         onPointerLeave={handlePointerUp}
         onPointerCancel={handlePointerCancel}
-        style={{ touchAction: 'none' }}
+        style={{ height: 'auto', touchAction: 'none' }}
       >
         {squares}
 

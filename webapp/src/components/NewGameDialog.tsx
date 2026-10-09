@@ -471,7 +471,7 @@ export default function NewGameDialog({
                       : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
                   }`}
                 >
-                  Auto — {getLevelLabel(selectedLevel)}
+                  Auto · {getLevelLabel(selectedLevel)}
                 </button>
                 <button
                   onClick={() => setDifficulty('custom')}

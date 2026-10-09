@@ -1,38 +1,81 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
   <rect width="1200" height="630" fill="#111827"/>
-
-  <!-- Subtle grid pattern -->
-  <defs>
-    <pattern id="grid" width="60" height="60" patternUnits="userSpaceOnUse">
-      <rect width="60" height="60" fill="none" stroke="#1f2937" stroke-width="0.5"/>
-    </pattern>
-  </defs>
-  <rect width="1200" height="630" fill="url(#grid)" opacity="0.5"/>
-
-  <!-- Knight piece (stylized chess knight) -->
-  <g transform="translate(600, 240)" opacity="0.15">
-    <circle cx="0" cy="0" r="120" fill="#3b82f6"/>
-  </g>
-  <g transform="translate(600, 200)">
-    <!-- Knight silhouette -->
-    <path d="M-30 60 L-30 20 C-30-10-20-30 0-50 C10-60 25-65 30-60 L35-50 C35-50 25-40 20-30 C40-25 50-10 50 20 L50 60 Z"
-          fill="#3b82f6" opacity="0.9"/>
-    <!-- Eye -->
-    <circle cx="10" cy="-35" r="4" fill="#111827"/>
-    <!-- Ball -->
-    <circle cx="70" cy="40" r="18" fill="#ef4444" opacity="0.9"/>
-    <circle cx="64" cy="34" r="4" fill="#fca5a5" opacity="0.5"/>
-  </g>
-
-  <!-- Title -->
-  <text x="600" y="350" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-size="72" font-weight="bold" fill="white">KnightBall</text>
-
-  <!-- Tagline -->
-  <text x="600" y="400" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-size="24" fill="#9ca3af">A strategy board game with chess knights and a ball</text>
-
-  <!-- Subtitle -->
-  <text x="600" y="440" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-size="20" fill="#6b7280">Play against AI or challenge friends online</text>
-
-  <!-- URL -->
-  <text x="600" y="580" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-size="20" fill="#4b5563">knightball.org</text>
+  <!-- A mid-game KnightBall position, drawn like the in-game board -->
+  <rect x="112" y="67" width="436" height="496" rx="10" fill="#1f2937"/>
+  <rect x="120" y="75" width="60" height="60" fill="#fca5a5" stroke="#374151" stroke-width="1"/>
+  <rect x="180" y="75" width="60" height="60" fill="#fca5a5" stroke="#374151" stroke-width="1"/>
+  <rect x="240" y="75" width="60" height="60" fill="#fca5a5" stroke="#374151" stroke-width="1"/>
+  <rect x="300" y="75" width="60" height="60" fill="#fca5a5" stroke="#374151" stroke-width="1"/>
+  <rect x="360" y="75" width="60" height="60" fill="#fca5a5" stroke="#374151" stroke-width="1"/>
+  <rect x="420" y="75" width="60" height="60" fill="#fca5a5" stroke="#374151" stroke-width="1"/>
+  <rect x="480" y="75" width="60" height="60" fill="#fca5a5" stroke="#374151" stroke-width="1"/>
+  <rect x="120" y="135" width="60" height="60" fill="#b58863" stroke="#374151" stroke-width="1"/>
+  <rect x="180" y="135" width="60" height="60" fill="#f0d9b5" stroke="#374151" stroke-width="1"/>
+  <rect x="240" y="135" width="60" height="60" fill="#b58863" stroke="#374151" stroke-width="1"/>
+  <rect x="300" y="135" width="60" height="60" fill="#f0d9b5" stroke="#374151" stroke-width="1"/>
+  <rect x="360" y="135" width="60" height="60" fill="#b58863" stroke="#374151" stroke-width="1"/>
+  <rect x="420" y="135" width="60" height="60" fill="#f0d9b5" stroke="#374151" stroke-width="1"/>
+  <rect x="480" y="135" width="60" height="60" fill="#b58863" stroke="#374151" stroke-width="1"/>
+  <rect x="120" y="195" width="60" height="60" fill="#f0d9b5" stroke="#374151" stroke-width="1"/>
+  <rect x="180" y="195" width="60" height="60" fill="#b58863" stroke="#374151" stroke-width="1"/>
+  <rect x="240" y="195" width="60" height="60" fill="#f0d9b5" stroke="#374151" stroke-width="1"/>
+  <rect x="300" y="195" width="60" height="60" fill="#b58863" stroke="#374151" stroke-width="1"/>
+  <rect x="360" y="195" width="60" height="60" fill="#f0d9b5" stroke="#374151" stroke-width="1"/>
+  <rect x="420" y="195" width="60" height="60" fill="#b58863" stroke="#374151" stroke-width="1"/>
+  <rect x="480" y="195" width="60" height="60" fill="#f0d9b5" stroke="#374151" stroke-width="1"/>
+  <rect x="120" y="255" width="60" height="60" fill="#b58863" stroke="#374151" stroke-width="1"/>
+  <rect x="180" y="255" width="60" height="60" fill="#f0d9b5" stroke="#374151" stroke-width="1"/>
+  <rect x="240" y="255" width="60" height="60" fill="#b58863" stroke="#374151" stroke-width="1"/>
+  <rect x="300" y="255" width="60" height="60" fill="#f0d9b5" stroke="#374151" stroke-width="1"/>
+  <rect x="360" y="255" width="60" height="60" fill="#b58863" stroke="#374151" stroke-width="1"/>
+  <rect x="420" y="255" width="60" height="60" fill="#f0d9b5" stroke="#374151" stroke-width="1"/>
+  <rect x="480" y="255" width="60" height="60" fill="#b58863" stroke="#374151" stroke-width="1"/>
+  <rect x="120" y="315" width="60" height="60" fill="#f0d9b5" stroke="#374151" stroke-width="1"/>
+  <rect x="180" y="315" width="60" height="60" fill="#b58863" stroke="#374151" stroke-width="1"/>
+  <rect x="240" y="315" width="60" height="60" fill="#f0d9b5" stroke="#374151" stroke-width="1"/>
+  <rect x="300" y="315" width="60" height="60" fill="#b58863" stroke="#374151" stroke-width="1"/>
+  <rect x="360" y="315" width="60" height="60" fill="#f0d9b5" stroke="#374151" stroke-width="1"/>
+  <rect x="420" y="315" width="60" height="60" fill="#b58863" stroke="#374151" stroke-width="1"/>
+  <rect x="480" y="315" width="60" height="60" fill="#f0d9b5" stroke="#374151" stroke-width="1"/>
+  <rect x="120" y="375" width="60" height="60" fill="#b58863" stroke="#374151" stroke-width="1"/>
+  <rect x="180" y="375" width="60" height="60" fill="#f0d9b5" stroke="#374151" stroke-width="1"/>
+  <rect x="240" y="375" width="60" height="60" fill="#b58863" stroke="#374151" stroke-width="1"/>
+  <rect x="300" y="375" width="60" height="60" fill="#f0d9b5" stroke="#374151" stroke-width="1"/>
+  <rect x="360" y="375" width="60" height="60" fill="#b58863" stroke="#374151" stroke-width="1"/>
+  <rect x="420" y="375" width="60" height="60" fill="#f0d9b5" stroke="#374151" stroke-width="1"/>
+  <rect x="480" y="375" width="60" height="60" fill="#b58863" stroke="#374151" stroke-width="1"/>
+  <rect x="120" y="435" width="60" height="60" fill="#f0d9b5" stroke="#374151" stroke-width="1"/>
+  <rect x="180" y="435" width="60" height="60" fill="#b58863" stroke="#374151" stroke-width="1"/>
+  <rect x="240" y="435" width="60" height="60" fill="#f0d9b5" stroke="#374151" stroke-width="1"/>
+  <rect x="300" y="435" width="60" height="60" fill="#b58863" stroke="#374151" stroke-width="1"/>
+  <rect x="360" y="435" width="60" height="60" fill="#f0d9b5" stroke="#374151" stroke-width="1"/>
+  <rect x="420" y="435" width="60" height="60" fill="#b58863" stroke="#374151" stroke-width="1"/>
+  <rect x="480" y="435" width="60" height="60" fill="#f0d9b5" stroke="#374151" stroke-width="1"/>
+  <rect x="120" y="495" width="60" height="60" fill="#93c5fd" stroke="#374151" stroke-width="1"/>
+  <rect x="180" y="495" width="60" height="60" fill="#93c5fd" stroke="#374151" stroke-width="1"/>
+  <rect x="240" y="495" width="60" height="60" fill="#93c5fd" stroke="#374151" stroke-width="1"/>
+  <rect x="300" y="495" width="60" height="60" fill="#93c5fd" stroke="#374151" stroke-width="1"/>
+  <rect x="360" y="495" width="60" height="60" fill="#93c5fd" stroke="#374151" stroke-width="1"/>
+  <rect x="420" y="495" width="60" height="60" fill="#93c5fd" stroke="#374151" stroke-width="1"/>
+  <rect x="480" y="495" width="60" height="60" fill="#93c5fd" stroke="#374151" stroke-width="1"/>
+  <polygon points="210.0,84.6 230.4,105.0 210.0,125.4 189.6,105.0" fill="#ef4444" stroke="#1f2937" stroke-width="2.5"/>
+  <polygon points="390.0,84.6 410.4,105.0 390.0,125.4 369.6,105.0" fill="#ef4444" stroke="#1f2937" stroke-width="2.5"/>
+  <polygon points="450.0,84.6 470.4,105.0 450.0,125.4 429.6,105.0" fill="#ef4444" stroke="#1f2937" stroke-width="2.5"/>
+  <polygon points="330.0,204.6 350.4,225.0 330.0,245.4 309.6,225.0" fill="#ef4444" stroke="#1f2937" stroke-width="2.5"/>
+  <circle cx="330.0" cy="225.0" r="9.0" fill="#fbbf24" stroke="#92400e" stroke-width="2"/>
+  <polygon points="270.0,264.6 290.4,285.0 270.0,305.4 249.6,285.0" fill="#ef4444" stroke="#1f2937" stroke-width="2.5"/>
+  <polygon points="510.0,204.6 530.4,225.0 510.0,245.4 489.6,225.0" fill="#ef4444" stroke="#1f2937" stroke-width="2.5"/>
+  <polygon points="210.0,504.6 230.4,525.0 210.0,545.4 189.6,525.0" fill="#3b82f6" stroke="#1f2937" stroke-width="2.5"/>
+  <polygon points="450.0,504.6 470.4,525.0 450.0,545.4 429.6,525.0" fill="#3b82f6" stroke="#1f2937" stroke-width="2.5"/>
+  <polygon points="270.0,384.6 290.4,405.0 270.0,425.4 249.6,405.0" fill="#3b82f6" stroke="#1f2937" stroke-width="2.5"/>
+  <polygon points="390.0,324.6 410.4,345.0 390.0,365.4 369.6,345.0" fill="#3b82f6" stroke="#1f2937" stroke-width="2.5"/>
+  <circle cx="390.0" cy="345.0" r="9.0" fill="#fbbf24" stroke="#92400e" stroke-width="2"/>
+  <polygon points="150.0,384.6 170.4,405.0 150.0,425.4 129.6,405.0" fill="#3b82f6" stroke="#1f2937" stroke-width="2.5"/>
+  <polygon points="330.0,444.6 350.4,465.0 330.0,485.4 309.6,465.0" fill="#3b82f6" stroke="#1f2937" stroke-width="2.5"/>
+  <text x="640" y="250" font-family="system-ui, -apple-system, Segoe UI, sans-serif" font-size="84" font-weight="800" fill="white">KnightBall</text>
+  <text x="640" y="310" font-family="system-ui, -apple-system, Segoe UI, sans-serif" font-size="30" fill="#d1d5db">Knights move like chess.</text>
+  <text x="640" y="352" font-family="system-ui, -apple-system, Segoe UI, sans-serif" font-size="30" fill="#d1d5db">The ball moves by passing.</text>
+  <text x="640" y="420" font-family="system-ui, -apple-system, Segoe UI, sans-serif" font-size="24" fill="#9ca3af">Play the AI from beginner to grandmaster,</text>
+  <text x="640" y="454" font-family="system-ui, -apple-system, Segoe UI, sans-serif" font-size="24" fill="#9ca3af">or challenge friends online.</text>
+  <text x="640" y="545" font-family="system-ui, -apple-system, Segoe UI, sans-serif" font-size="24" font-weight="600" fill="#60a5fa">knightball.org</text>
 </svg>

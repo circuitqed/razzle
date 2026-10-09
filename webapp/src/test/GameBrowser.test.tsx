@@ -110,7 +110,7 @@ describe('GameBrowser', () => {
 
     await waitFor(() => {
       // Shows model filename (not full path) for AI games
-      expect(screen.getByText('Human vs model_v1 - 800 sims')).toBeInTheDocument()
+      expect(screen.getByText('Human vs model_v1 · 800 sims')).toBeInTheDocument()
     })
 
     // Shows usernames for human vs human games

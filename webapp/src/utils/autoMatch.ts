@@ -153,3 +153,11 @@ export function getTierSettings(level: number): TierSettings {
 export function getLevelLabel(level: number): string {
   return getTierSettings(level).label;
 }
+
+/** The ladder level that plays as (model, sims), or null if it isn't one (custom games, old models). */
+export function levelForConfig(model: string | null | undefined, sims: number): number | null {
+  if (!model) return null;
+  const file = model.split('/').pop()!.replace(/\.(pt|onnx)$/, '');
+  const i = TIERS.findIndex((t) => t.model.replace(/\.pt$/, '') === file && t.sims === sims);
+  return i < 0 ? null : i + 1;
+}

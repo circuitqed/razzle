@@ -103,6 +103,15 @@ class TestGameListing:
         for game in data['games']:
             assert game['status'] == 'playing'
 
+    def test_list_games_resigned_is_finished(self, client, sample_games):
+        """A resigned game is listed as finished, won by the other player."""
+        persistence.update_game_result("game001", winner=1, resigned_by=0)
+        data = client.get('/games?status=finished').json()
+        assert [g['game_id'] for g in data['games']] == ["game001"]
+        assert data['games'][0]['winner'] == 1
+        playing = client.get('/games?status=playing').json()
+        assert "game001" not in [g['game_id'] for g in playing['games']]
+
 
 class TestGameFull:
     """Tests for getting full game data."""

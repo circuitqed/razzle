@@ -40,11 +40,11 @@ export default function EvaluationMeter({ value, flipped = false, playerColor = 
     ? 'bg-gradient-to-b from-blue-600 via-gray-500 to-red-600'
     : 'bg-gradient-to-b from-red-600 via-gray-500 to-blue-600';
 
-  // Eval percentage display
+  // Shown as the human's winning chances, (value + 1) / 2: "+42%" read as a
+  // 42% chance when it meant 71%.
   const evalText = useMemo(() => {
     if (value === null) return null;
-    const pct = (value * 100).toFixed(0);
-    const text = `${value > 0 ? '+' : ''}${pct}%`;
+    const text = `${Math.round((value + 1) * 50)}%`;
     const isBlueWinning = (value > 0 && playerColor === 0) || (value < 0 && playerColor === 1);
     const colorClass = value === 0
       ? 'text-gray-400'
@@ -58,7 +58,7 @@ export default function EvaluationMeter({ value, flipped = false, playerColor = 
       <div
         className={`relative w-3 ${gradientClass} rounded-full overflow-hidden`}
         style={{ flex: '400 0 0' }}
-        title={value !== null ? `Evaluation: ${value > 0 ? '+' : ''}${(value * 100).toFixed(0)}%` : 'No evaluation yet'}
+        title={value !== null ? `Your winning chances (AI's estimate): ${Math.round((value + 1) * 50)}%` : 'No evaluation yet'}
       >
         {/* Darkened overlay on the losing side */}
         {topWinning && (

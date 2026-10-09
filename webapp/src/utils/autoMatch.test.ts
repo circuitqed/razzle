@@ -77,3 +77,13 @@ describe('calibrated ladder', () => {
     for (const t of TIERS.filter(t => !t.desktopOnly)) expect(bundled.has(t.model.replace(/\.pt$/, ''))).toBe(true);
   });
 });
+
+describe('levelForConfig', () => {
+  it('maps a ladder (model, sims) to its level, ignoring path and extension', async () => {
+    const { levelForConfig, TIERS } = await import('./autoMatch');
+    expect(levelForConfig('/app/models/distill_v2_16x2.pt', 1)).toBe(1);
+    expect(levelForConfig(TIERS[19].model.replace('.pt', '.onnx'), TIERS[19].sims)).toBe(20);
+    expect(levelForConfig('distill_v2_16x2.pt', 3)).toBeNull();
+    expect(levelForConfig(null, 1)).toBeNull();
+  });
+});

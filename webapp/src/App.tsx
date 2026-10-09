@@ -401,9 +401,8 @@ function AppContent() {
     if (!gameState || gameState.winner === null) return null;
     const colorClass = gameState.winner === 0 ? 'text-blue-400' : 'text-red-400';
     if (settings.mode === 'ai') {
-      const text = gameState.winner === playerColor
-        ? 'You Win!'
-        : `${opponentName} Wins!`;
+      // Short: the AI's name and level are already shown above the board.
+      const text = gameState.winner === playerColor ? 'You win!' : 'AI wins';
       return { text, colorClass };
     }
     const text = gameState.winner === 0 ? 'Blue Wins!' : 'Red Wins!';
@@ -720,7 +719,7 @@ function AppContent() {
           topName={topName}
           bottomName={bottomName}
           cancelPass={cancelPass}
-          evaluation={settings.mode === 'ai' ? evaluation : undefined}
+          evaluation={settings.mode === 'ai' && gameState?.status !== 'finished' ? evaluation : undefined}
           playerColor={playerColor}
           aiThinking={aiThinking}
           statusLine={

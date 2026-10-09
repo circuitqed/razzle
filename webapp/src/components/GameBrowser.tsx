@@ -5,6 +5,7 @@ import { useAuth } from '../contexts/AuthContext';
 import { getPlayers } from '../api/leaderboard';
 import type { PlayerProfile } from '../types';
 import { useDialogA11y } from '../hooks/useDialogA11y';
+import { levelForConfig } from '../utils/autoMatch';
 
 interface GameBrowserProps {
   isOpen: boolean;
@@ -130,7 +131,7 @@ export default function GameBrowser({ isOpen, onClose, onSelectGame }: GameBrows
   };
 
   const getResultText = (game: GameSummary) => {
-    if (game.status === 'playing') return 'In Progress';
+    if (game.status === 'playing') return 'In progress';
     if (game.winner === null) return 'Draw';
     return game.winner === 0 ? 'Blue Won' : 'Red Won';
   };
@@ -143,13 +144,15 @@ export default function GameBrowser({ isOpen, onClose, onSelectGame }: GameBrows
 
   const getPlayersText = (game: GameSummary) => {
     const getAIName = () => {
+      const level = levelForConfig(game.ai_model_version, game.ai_simulations);
+      if (level != null) return `AI Level ${level}`;
       let name = 'AI';
       if (game.ai_model_version) {
         const filename = game.ai_model_version.split('/').pop() || '';
         name = filename.replace('.pt', '') || 'AI';
       }
       if (game.ai_simulations > 0) {
-        return `${name} - ${game.ai_simulations} sims`;
+        return `${name} · ${game.ai_simulations} sim${game.ai_simulations === 1 ? '' : 's'}`;
       }
       return name;
     };
@@ -298,18 +301,22 @@ export default function GameBrowser({ isOpen, onClose, onSelectGame }: GameBrows
             <table className="w-full text-sm">
               <thead className="text-gray-400 border-b border-gray-700">
                 <tr>
-                  <th className="text-left py-2 px-2">ID</th>
+                  <th className="hidden sm:table-cell text-left py-2 px-2">ID</th>
                   <th className="text-left py-2 px-2">Date</th>
                   <th className="text-left py-2 px-2">Players</th>
                   <th className="text-left py-2 px-2">Result</th>
-                  <th className="text-center py-2 px-2">Turns</th>
-                  <th className="text-right py-2 px-2">Actions</th>
+                  <th className="hidden sm:table-cell text-center py-2 px-2">Turns</th>
+                  <th className="hidden sm:table-cell text-right py-2 px-2">Actions</th>
                 </tr>
               </thead>
               <tbody>
                 {games.map((game) => (
-                  <tr key={game.game_id} className="border-b border-gray-700 hover:bg-gray-700/50">
-                    <td className="py-2 px-2">
+                  <tr
+                    key={game.game_id}
+                    onClick={() => onSelectGame(game.game_id)}
+                    className="border-b border-gray-700 hover:bg-gray-700/50 cursor-pointer"
+                  >
+                    <td className="hidden sm:table-cell py-2 px-2">
                       <code className="text-xs text-gray-400 bg-gray-700 px-1.5 py-0.5 rounded font-mono">
                         {game.game_id.slice(0, 8)}
                       </code>
@@ -320,15 +327,15 @@ export default function GameBrowser({ isOpen, onClose, onSelectGame }: GameBrows
                     <td className="py-2 px-2 text-gray-300">
                       {getPlayersText(game)}
                     </td>
-                    <td className={`py-2 px-2 ${getResultColor(game)}`}>
+                    <td className={`py-2 px-2 whitespace-nowrap ${getResultColor(game)}`}>
                       {getResultText(game)}
                     </td>
-                    <td className="py-2 px-2 text-center text-gray-300">
+                    <td className="hidden sm:table-cell py-2 px-2 text-center text-gray-300">
                       {game.ply}
                     </td>
-                    <td className="py-2 px-2 text-right">
+                    <td className="hidden sm:table-cell py-2 px-2 text-right">
                       <button
-                        onClick={() => onSelectGame(game.game_id)}
+                        onClick={(e) => { e.stopPropagation(); onSelectGame(game.game_id); }}
                         className="px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-xs transition-colors"
                       >
                         View

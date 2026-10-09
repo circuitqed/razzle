@@ -1,7 +1,7 @@
 {
   "name": "KnightBall",
   "short_name": "KnightBall",
-  "description": "A strategy board game — play against AI or challenge friends online.",
+  "description": "A strategy board game \u2014 play against AI or challenge friends online.",
   "start_url": "/",
   "display": "standalone",
   "theme_color": "#111827",
@@ -11,6 +11,18 @@
       "src": "/favicon.svg",
       "sizes": "any",
       "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
       "purpose": "any maskable"
     }
   ]

@@ -21,9 +21,10 @@ export default function Tutorial({ onComplete, onSkip }: TutorialProps) {
   const isLastStep = tut.currentStep === tut.totalSteps - 1;
 
   return (
-    <div ref={dialogRef} role="dialog" aria-modal="true" className="fixed inset-0 z-50 bg-black/80 flex flex-col items-center justify-center p-4">
-      {/* Instruction panel — fixed height to prevent board shifting */}
-      <div className="max-w-md w-full text-center mb-3 h-20 flex flex-col justify-center">
+    <div ref={dialogRef} role="dialog" aria-modal="true" className="fixed inset-0 z-50 bg-gray-950/95 backdrop-blur-sm flex flex-col items-center justify-center p-4">
+      {/* Instruction panel — fixed height to prevent board shifting; tall enough
+          for the longest step's text on a phone (title + 3 lines + 2-line hint). */}
+      <div className="max-w-md w-full text-center mb-3 h-32 sm:h-24 flex flex-col justify-end">
         <h2 className="text-lg sm:text-xl font-bold text-white mb-0.5">
           {tut.stepTitle}
         </h2>
