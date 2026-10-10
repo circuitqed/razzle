@@ -2,17 +2,13 @@ default_platform(:ios)
 
 # Load MATCH_PASSWORD from the macOS login Keychain if not already in env.
 # The ios-certificates repo has a single encryption passphrase shared by all
-# com.lazybrains apps (InkGlass, Roster, Cypherly); fall back through the
-# known keychain entry names.
+# com.lazybrains apps (InkGlass, Roster, Cypherly).
 if ENV["MATCH_PASSWORD"].nil?
   require "open3"
-  ["match_knightball_passphrase", "match_inkglass_passphrase", "match_roster_passphrase"].each do |entry|
-    out, status = Open3.capture2("security", "find-generic-password", "-s", entry, "-w")
-    if status.success? && !out.strip.empty?
-      ENV["MATCH_PASSWORD"] = out.strip
-      break
-    end
-  end
+  # Only knightball's entry: the InkGlass and Roster entries hold passphrases
+  # that no longer decrypt the shared certificates repo (checked Oct 10).
+  out, status = Open3.capture2("security", "find-generic-password", "-s", "match_knightball_passphrase", "-w")
+  ENV["MATCH_PASSWORD"] = out.strip if status.success? && !out.strip.empty?
 end
 
 # App Store Connect API key. Identifiers are not secrets; the secret is the .p8.
