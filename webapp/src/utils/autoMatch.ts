@@ -41,9 +41,9 @@ export const TIERS: TierSettings[] = [
   { model: 'distill_v2_16x2.pt',  sims: 1,    rating: 815,  label: 'Level 1 — Beginner' },
   { model: 'distill_v2_16x2.pt',  sims: 8,    rating: 880,  label: 'Level 2 — Beginner' },
   { model: 'distill_v2_16x2.pt',  sims: 32,   rating: 975,  label: 'Level 3 — Beginner' },
-  { model: 'distill_v2_24x3.pt',  sims: 1,    rating: 1035, label: 'Level 4 — Beginner' },
+  { model: 'distill_v2_24x3.pt',  sims: 4,    rating: 1070, label: 'Level 4 — Beginner' },  // 1 sim (no lookahead) missed one-move threats
   { model: 'distill_v2_24x3.pt',  sims: 16,   rating: 1115, label: 'Level 5 — Easy' },
-  { model: 'distill_v2_32x4.pt',  sims: 1,    rating: 1180, label: 'Level 6 — Easy' },
+  { model: 'distill_v2_32x4.pt',  sims: 4,    rating: 1200, label: 'Level 6 — Easy' },
   { model: 'distill_v2_32x4.pt',  sims: 16,   rating: 1255, label: 'Level 7 — Easy' },
   { model: 'distill_v2_32x4.pt',  sims: 32,   rating: 1330, label: 'Level 8 — Intermediate' },
   { model: 'distill_v2_32x4.pt',  sims: 48,   rating: 1410, label: 'Level 9 — Intermediate' },  // interp.
