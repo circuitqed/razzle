@@ -20,7 +20,23 @@ ASC_KEY = app_store_connect_api_key(
   in_house: false
 )
 
+# Local signing keychain on the mini (see ~/dev/SETUP_LOG.md, 2026-10-09): holds a
+# distribution identity whose key was generated on the mini, unlocked from a
+# mode-600 password file, so local builds need no match passphrase, no login
+# keychain and no GUI prompt. Used whenever it exists and we're not on CI.
+SIGNING_KEYCHAIN = File.expand_path("~/Library/Keychains/lazybrains-signing.keychain-db")
+SIGNING_KEYCHAIN_PASSWORD_FILE = File.expand_path("~/.config/lazybrains-signing/keychain-password")
+SIGNING_PROFILE = "KnightBall App Store (signing keychain)"
+MATCH_PROFILE = "match AppStore com.lazybrains.knightball"
+
+def use_signing_keychain?
+  !FastlaneCore::Helper.ci? && File.exist?(SIGNING_KEYCHAIN) && File.exist?(SIGNING_KEYCHAIN_PASSWORD_FILE)
+end
+
 before_all do
+  if use_signing_keychain?
+    sh(%Q{security unlock-keychain -p "$(cat '#{SIGNING_KEYCHAIN_PASSWORD_FILE}')" '#{SIGNING_KEYCHAIN}'}, log: false)
+  end
   # With CI set (GHA runner, or a headless local session), use a disposable
   # keychain so codesign never needs GUI Keychain prompts.
   if is_ci
@@ -31,7 +47,8 @@ end
 
 def _restore_login_keychain
   sh(%q{security default-keychain -s "$HOME/Library/Keychains/login.keychain-db" 2>/dev/null || true})
-  sh(%q{security list-keychains -s "$HOME/Library/Keychains/login.keychain-db" /Library/Keychains/System.keychain 2>/dev/null || true})
+  extra = File.exist?(SIGNING_KEYCHAIN) ? " '#{SIGNING_KEYCHAIN}'" : ""
+  sh(%Q{security list-keychains -s "$HOME/Library/Keychains/login.keychain-db"#{extra} /Library/Keychains/System.keychain 2>/dev/null || true})
   sh("security delete-keychain fastlane_tmp_keychain 2>/dev/null || true")
 end
 
@@ -201,13 +218,16 @@ end
     build_number = ENV["BUILD_NUMBER"] || sh("git rev-list --count HEAD").strip
     UI.message("Using CURRENT_PROJECT_VERSION=#{build_number}")
 
-    match(type: "appstore", api_key: ASC_KEY, readonly: false)
+    local_keychain = use_signing_keychain?
+    profile = local_keychain ? SIGNING_PROFILE : MATCH_PROFILE
+    match(type: "appstore", api_key: ASC_KEY, readonly: false) unless local_keychain
+    UI.message("Signing with #{local_keychain ? 'local signing keychain' : 'match'}: #{profile}")
     update_code_signing_settings(
       path: "App.xcodeproj",
       use_automatic_signing: false,
       team_id: "5J862PN572",
       code_sign_identity: "Apple Distribution",
-      profile_name: "match AppStore com.lazybrains.knightball",
+      profile_name: profile,
       bundle_identifier: "com.lazybrains.knightball",
       targets: ["App"],
       build_configurations: ["Release"]
@@ -224,7 +244,7 @@ end
         signingStyle: "manual",
         teamID: "5J862PN572",
         provisioningProfiles: {
-          "com.lazybrains.knightball" => "match AppStore com.lazybrains.knightball"
+          "com.lazybrains.knightball" => profile
         }
       }
     )
