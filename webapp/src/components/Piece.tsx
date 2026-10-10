@@ -13,6 +13,15 @@ const COLORS = {
   1: { base: '#ef4444', line: '#b91c1c' },
 } as const;
 
+// Lines parallel to the diamond's upper-left edge, 7 apart, running from the
+// lower-left edge to the upper-right edge. Plain geometry rather than an SVG
+// <pattern>: WebKit sometimes drops url(#id) fills after a re-render, leaving
+// the piece empty.
+const HATCH_LINES = [5, 12, 19].map((d) => {
+  const t = d / (17 * Math.SQRT2);
+  return [8 + 17 * t, 25 + 17 * t, 25 + 17 * t, 8 + 17 * t];
+});
+
 /**
  * A knight: a diamond. Solid with a light top facet when it can receive a
  * pass; lined (thin darker diagonal lines, no facet) when it can't yet,
@@ -23,31 +32,24 @@ export default function Piece({ player, hasBall, isSelected, isIneligible, mustP
   const c = COLORS[player];
   const strokeColor = isSelected ? '#fbbf24' : '#1f2937';
   const strokeWidth = isSelected ? 3 : 1.5;
-  // Identical per player, so repeating the id across pieces is harmless.
-  const hatchId = `kb-hatch-${player}`;
 
   return (
     <g>
-      {isIneligible && (
-        <defs>
-          <pattern id={hatchId} width="7" height="7" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
-            <rect width="7" height="7" fill={c.base} />
-            <rect width="1.6" height="7" fill={c.line} />
-          </pattern>
-        </defs>
-      )}
       {/* Silhouette: same outline for both states, so pieces line up */}
+      <polygon points="25,8 42,25 25,42 8,25" fill={c.base} />
+      {isIneligible
+        ? HATCH_LINES.map(([x1, y1, x2, y2], i) => (
+            <line key={i} x1={x1} y1={y1} x2={x2} y2={y2} stroke={c.line} strokeWidth={1.6} />
+          ))
+        : // Solid: a light facet on the upper half gives it some depth
+          <polygon points="25,10.5 39.5,25 10.5,25" fill="#ffffff" opacity={0.22} />}
       <polygon
         points="25,8 42,25 25,42 8,25"
-        fill={isIneligible ? `url(#${hatchId})` : c.base}
+        fill="none"
         stroke={strokeColor}
         strokeWidth={strokeWidth}
         strokeLinejoin="round"
       />
-      {!isIneligible && (
-        // Solid: a light facet on the upper half gives it some depth
-        <polygon points="25,10.5 39.5,25 10.5,25" fill="#ffffff" opacity={0.22} />
-      )}
 
       {/* Ball indicator */}
       {hasBall && (

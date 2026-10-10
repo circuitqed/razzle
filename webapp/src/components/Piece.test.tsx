@@ -35,24 +35,26 @@ describe('Piece component', () => {
 
   it('shows selection highlight when selected', () => {
     const { container } = renderSvg(<Piece player={0} hasBall={false} isSelected={true} />)
-    const polygon = container.querySelector('polygon')
+    const polygon = container.querySelector('polygon[fill="none"]')
     expect(polygon).toHaveAttribute('stroke', '#fbbf24') // Yellow highlight
     expect(polygon).toHaveAttribute('stroke-width', '3')
   })
 
   it('has normal stroke when not selected', () => {
     const { container } = renderSvg(<Piece player={0} hasBall={false} isSelected={false} />)
-    const polygon = container.querySelector('polygon')
+    const polygon = container.querySelector('polygon[fill="none"]')
     expect(polygon).toHaveAttribute('stroke', '#1f2937')
     expect(polygon).toHaveAttribute('stroke-width', '1.5')
   })
 
   it('draws an ineligible piece hatched, with no facet', () => {
     const { container } = renderSvg(<Piece player={0} hasBall={false} isIneligible={true} />)
+    // Body + outline only; the hatch is plain lines, with no url(#id) fill to lose
     const polygons = container.querySelectorAll('polygon')
-    expect(polygons).toHaveLength(1)
-    expect(polygons[0]).toHaveAttribute('fill', 'url(#kb-hatch-0)')
-    expect(container.querySelector('pattern#kb-hatch-0')).toBeInTheDocument()
+    expect(polygons).toHaveLength(2)
+    expect(polygons[0]).toHaveAttribute('fill', '#3b82f6')
+    expect(container.querySelectorAll('line')).toHaveLength(3)
+    expect(container.querySelector('pattern')).toBeNull()
   })
 
   it('draws an eligible piece solid with a facet', () => {
