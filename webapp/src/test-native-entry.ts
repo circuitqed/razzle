@@ -30,9 +30,12 @@
  *  backend   — prod REST/WS integration: health, models, game CRUD, undo,
  *              resign, server-AI posture, worker-context CORS, anon identity
  *              (X-Anon-Id) persistence, WSS auth
- *  ladder    — OPT-IN (groups=ladder): app levels (?levels=1,10,20) from the
- *              BUNDLED models (full sims, no time cap, as in the app), AI
- *              vs random mover as P0 and P1; reports ms/move and sims/sec
+ *  ladder    — OPT-IN (groups=ladder): first, for every bundled model, a
+ *              1-sim worker search must play the net's argmax prior (skip
+ *              with ?lowsims=0); then app levels (?levels=1,10,20) from the
+ *              BUNDLED models (full sims, no time cap, as in the app), AI vs
+ *              random mover as P0 and P1, must win in ≤ 120 plies; reports
+ *              ms/move and sims/sec
  *
  * Query params:
  *   ?groups=env,rules,...   run a subset (default: all)
@@ -49,7 +52,7 @@ import {
 } from './engine/state';
 import type { EngineState } from './engine/state';
 import { getLegalMoves, getPassMoves, getKnightMoves, mustPass, decodeMove } from './engine/moves';
-import { END_TURN_MOVE } from './engine/bitboard';
+import { END_TURN_MOVE, END_TURN_ACTION } from './engine/bitboard';
 import { createModelFromOnnx } from './engine/inference';
 import { createGPUModelFromOnnx } from './engine/webglForwardPass';
 import { stateToTensor } from './engine/tensor';
@@ -1113,10 +1116,51 @@ function ladderSearch(worker: Worker, state: EngineState, numSimulations: number
   });
 }
 
+
+// 1-sim search through the real ai.worker must play the network's top prior.
+// Catches the a3167f3 bug class: low-sim searches ignored the priors and took
+// the lowest-numbered legal move (levels 1, 4, 6 shuffled a knight all game).
+async function ladderLowSimsCheck() {
+  const versions = [...new Set(TIERS.filter((t) => !t.desktopOnly).map((t) => t.model.replace(/\.pt$/, '')))];
+  const positions = generatePositions(32);
+  for (const version of versions) {
+    const info = await getBundledModelInfo(version);
+    if (!info) { check(`1 sim: ${version} is bundled`, false); continue; }
+    const buffer = await fetchLocal(info.url);
+    if (!buffer) { check(`1 sim: ${version} readable`, false); continue; }
+    const evaluator = new GPUEvaluator(createGPUModelFromOnnx(buffer, document.createElement('canvas')));
+    const worker = createAIWorker();
+    const loaded = await loadModel(worker, info.url, info.version);
+    if (!loaded.success) { check(`1 sim: ${version} worker load`, false, loaded.error); worker.terminate(); continue; }
+    let checked = 0, ties = 0, lowest = 0;
+    const mismatches: string[] = [];
+    for (const state of positions) {
+      const legal = getLegalMoves(state);
+      if (legal.length < 2) continue;
+      const { policy } = await evaluator.evaluate(state);
+      const prior = (m: number) => (m === END_TURN_MOVE ? policy[END_TURN_ACTION] : policy[m]);
+      const ranked = [...legal].sort((a, b) => prior(b) - prior(a));
+      // Near-ties can legitimately flip between main-thread and worker GPU passes.
+      if (prior(ranked[0]) - prior(ranked[1]) < 1e-4) { ties++; continue; }
+      const r = await workerSearch(worker, state, 1);
+      if (!r.success) { mismatches.push(`search failed: ${r.error}`); break; }
+      checked++;
+      if (r.bestMove === Math.min(...legal) && ranked[0] !== r.bestMove) lowest++;
+      if (r.bestMove !== ranked[0]) mismatches.push(`got ${r.bestMove} want ${ranked[0]}`);
+    }
+    worker.terminate();
+    check(`1 sim: ${version} plays the argmax prior`, mismatches.length === 0 && checked >= 20,
+      `${checked - mismatches.length}/${checked} match, ${ties} near-ties skipped` +
+      (lowest ? `, ${lowest} lowest-legal-move picks` : '') +
+      (mismatches.length ? `; first: ${mismatches.slice(0, 3).join(', ')}` : ''));
+  }
+}
+
 async function groupLadder() {
   p('', undefined);
   p('=== ladder: bundled v2 models at app levels (full sims) ===', 'info');
   const levels = (params.get('levels') ?? '1,10,20').split(',').map((s) => parseInt(s, 10));
+  if (params.get('lowsims') !== '0') await ladderLowSimsCheck();
   for (const level of levels) {
     const tier = TIERS[level - 1];
     const version = tier.model.replace(/\.pt$/, '');
@@ -1157,6 +1201,9 @@ async function groupLadder() {
         `sims/move=${(sims / ms.length).toFixed(0)} ${(sims / (total / 1000)).toFixed(1)} sims/sec`, 'dim');
       check(`L${level} as P${aiPlayer}: legal moves only`, illegal === 0, `${illegal} illegal`);
       check(`L${level} as P${aiPlayer}: beats random mover`, getWinner(state) === aiPlayer, `winner=${getWinner(state)}`);
+      // A degenerate policy can still beat a random mover, just slowly: L1 took 247
+      // plies before a3167f3. Healthy levels win in ~20-50.
+      check(`L${level} as P${aiPlayer}: wins in ≤ 120 plies`, plies <= 120, `${plies} plies`);
     }
     worker.terminate();
   }
