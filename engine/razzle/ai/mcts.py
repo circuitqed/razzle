@@ -270,9 +270,11 @@ class MCTS:
         # This ensures we find forced wins even if network priors are wrong
         if self.config.pass_quiescence and root.state.has_passed:
             value = self._quiescence_search(root, depth=0)
-            # Seed root's value with the quiescence-corrected value
-            root.visit_count = 1
-            root.value_sum = value
+        # The root's own evaluation is its first visit (quiescence-corrected when
+        # mid-pass). Without it the first simulation has no exploration term,
+        # ignores the priors and takes the first legal move.
+        root.visit_count = 1
+        root.value_sum = value
 
         if add_noise and self.config.dirichlet_epsilon > 0:
             root.add_dirichlet_noise(
@@ -439,7 +441,7 @@ class MCTS:
                     policy[action_to_index(action)] = visits[i] / visits_sum
         elif root.children:
             # Greedy (temperature = 0)
-            best_action = max(root.children.keys(), key=lambda a: root.children[a].visit_count)
+            best_action = max(root.children.keys(), key=lambda a: (root.children[a].visit_count, root.children[a].prior))
             policy[action_to_index(best_action)] = 1.0
 
         return policy
@@ -453,8 +455,8 @@ class MCTS:
         visits = np.array([root.children[a].visit_count for a in actions], dtype=np.float32)
 
         if self.config.temperature == 0:
-            # Greedy - pick highest visit count
-            return actions[np.argmax(visits)]
+            # Greedy - pick highest visit count; ties go to the higher prior
+            return max(actions, key=lambda a: (root.children[a].visit_count, root.children[a].prior))
         else:
             # Sample proportional to visit counts (with temperature)
             if visits.sum() == 0:
@@ -507,9 +509,11 @@ class MCTS:
         # This ensures we find forced wins even if network priors are wrong
         if self.config.pass_quiescence and root.state.has_passed:
             value = self._quiescence_search(root, depth=0)
-            # Seed root's value with the quiescence-corrected value
-            root.visit_count = 1
-            root.value_sum = value
+        # The root's own evaluation is its first visit (quiescence-corrected when
+        # mid-pass). Without it the first simulation has no exploration term,
+        # ignores the priors and takes the first legal move.
+        root.visit_count = 1
+        root.value_sum = value
 
         if add_noise and self.config.dirichlet_epsilon > 0:
             root.add_dirichlet_noise(
@@ -721,9 +725,11 @@ class MCTS:
         # This ensures we find forced wins even if network priors are wrong
         if self.config.pass_quiescence and root.state.has_passed:
             value = self._quiescence_search(root, depth=0)
-            # Seed root's value with the quiescence-corrected value
-            root.visit_count = 1
-            root.value_sum = value
+        # The root's own evaluation is its first visit (quiescence-corrected when
+        # mid-pass). Without it the first simulation has no exploration term,
+        # ignores the priors and takes the first legal move.
+        root.visit_count = 1
+        root.value_sum = value
 
         if add_noise and self.config.dirichlet_epsilon > 0:
             root.add_dirichlet_noise(

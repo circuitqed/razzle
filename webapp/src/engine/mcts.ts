@@ -218,10 +218,14 @@ export async function search(
     }
   }
 
-  // Pass quiescence for root
+  // The root's own evaluation counts as its first visit. Without it the first
+  // simulation sees sqrt(0) exploration, ignores the priors and takes the
+  // first legal move, which at 1-4 sims decides the move outright.
   let initialValue = rootValue;
   if (!reused && cfg.passQuiescence && root.state.hasPassed) {
     initialValue = await quiescenceSearch(root, evaluator, cfg, 0);
+  }
+  if (!reused) {
     root.visitCount = 1;
     root.valueSum = initialValue;
   }
@@ -299,9 +303,12 @@ function getBestMoveFromRoot(root: MCTSNode): { move: number; value: number } {
   let bestValue = 0;
   const rootPlayer = root.state.currentPlayer;
 
+  let bestPrior = -1;
   for (const [action, child] of root.children) {
-    if (child.visitCount > bestVisits) {
+    // Ties (common at low sims) go to the move the network prefers
+    if (child.visitCount > bestVisits || (child.visitCount === bestVisits && child.prior > bestPrior)) {
       bestVisits = child.visitCount;
+      bestPrior = child.prior;
       bestMove = action;
       // Convert to root player's perspective
       const q = nodeValue(child);
