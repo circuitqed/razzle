@@ -114,6 +114,9 @@ function historyFromMoves(moves: number[]): { records: MoveRecord[]; lastMove: L
   return { records, lastMove };
 }
 
+/** Shortest time an AI turn takes on screen, however fast the search. */
+const MIN_AI_TURN_MS = 700;
+
 export function useGame(options: UseGameOptions = {}): UseGameReturn {
   const { vsAI = true, aiSimulations = 256, aiModel, playerColor = 0, aiLevel } = options;
 
@@ -276,6 +279,7 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
     const isStale = () => gen !== gameGenRef.current;
 
     setAiThinking(true);
+    const turnStart = performance.now();
     try {
       let aiMoveCount = 0;
       let rejectedRetries = 0;
@@ -366,6 +370,14 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
       }
 
       if (isStale()) return;
+
+      // Low levels answer in a few ms; a short pause reads as the AI replying
+      // rather than the board jumping. Strength is unaffected.
+      const wait = MIN_AI_TURN_MS - (performance.now() - turnStart);
+      if (wait > 0) {
+        await new Promise((r) => setTimeout(r, wait));
+        if (isStale()) return;
+      }
 
       // Apply the full AI turn at once
       setGameState(currentState);
