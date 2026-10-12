@@ -114,6 +114,8 @@ function AppContent() {
 
   // Auto-match level toast
   const [levelToast, setLevelToast] = useState<string | null>(null);
+  // How the finished auto-match game moved the level; shown until the next game
+  const [levelResult, setLevelResult] = useState<{ gameId: string; won: boolean; level: number } | null>(null);
 
   // Auth modals
   const [showLoginModal, setShowLoginModal] = useState(false);
@@ -271,6 +273,7 @@ function AppContent() {
       const newLevel = adjustAfterGame(won);
       if (user) void syncAIProgress();
       if (newLevel !== oldLevel) {
+        setLevelResult({ gameId: gameState.game_id, won, level: newLevel });
         const label = getLevelLabel(newLevel);
         if (won) {
           setLevelToast(`Level up! Now at ${label}`);
@@ -728,6 +731,11 @@ function AppContent() {
               {gameState?.status === 'finished' && winnerDisplay && (
                 <span className={`text-xl font-bold ${winnerDisplay.colorClass}`}>{winnerDisplay.text}</span>
               )}
+              {gameState?.status === 'finished' && levelResult?.gameId === gameState.game_id && (
+                <span className={`text-sm font-medium ${levelResult.won ? 'text-green-400' : 'text-gray-400'}`}>
+                  {levelResult.won ? 'Level up! ' : ''}Next: {getLevelLabel(levelResult.level)}
+                </span>
+              )}
               {gameState?.status === 'finished' && !user && settings.mode === 'ai' && (
                 <button
                   onClick={() => setShowRegisterModal(true)}
@@ -762,7 +770,11 @@ function AppContent() {
                     disabled={isLoading}
                     className="px-2.5 py-2 sm:px-4 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 rounded font-medium transition-colors text-sm sm:text-base"
                   >
-                    {settings.mode === 'ai' ? 'Rematch' : 'Play Again'}
+                    {settings.mode !== 'ai'
+                      ? 'Play Again'
+                      : levelResult?.gameId === gameState.game_id
+                        ? `Play Level ${levelResult.level}`
+                        : 'Rematch'}
                   </button>
                   <button
                     onClick={handleNewGameClick}
