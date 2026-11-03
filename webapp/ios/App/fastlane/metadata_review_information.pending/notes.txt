@@ -3,7 +3,7 @@ KnightBall is a two-player abstract strategy board game (original rules, not a c
 Quick verification path:
 1. Tap "Play Now" - a game vs the on-device AI starts immediately, no account needed. Pieces move like chess knights; drag or tap a blue piece, then a highlighted square.
 2. Offline play: games against the AI work fully offline (try Airplane Mode). The neural-network AI runs on-device (WebGL + tree search) and all 20 difficulty levels ship inside the app.
-3. Sign-in (Login button, top right) is optional: email/username + password (use the demo account above), or "Email me a sign-in link" (one-time magic link). There is no third-party sign-in.
+3. Sign-in (Login button, top right) is optional: email/username + password (use the demo account above), or "Email me a sign-in code" (a one-time 6-digit code by email, typed into the app). There is no third-party sign-in.
 4. Online multiplayer (requires network): signed in or anonymous, Menu > New Game > Online.
 5. Account deletion (guideline 5.1.1(v)): user menu (avatar, top right) > Delete Account.
 

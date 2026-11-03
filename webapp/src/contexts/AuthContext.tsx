@@ -21,6 +21,7 @@ interface AuthContextType {
   deleteAccount: () => Promise<void>;
   verifyMagicLink: (token: string) => Promise<void>;
   requestMagicLink: (email: string) => Promise<void>;
+  verifyMagicCode: (email: string, code: string) => Promise<void>;
   refreshUser: () => Promise<void>;
 }
 
@@ -118,6 +119,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     await authApi.requestMagicLink(email);
   }, []);
 
+  const verifyMagicCode = useCallback(async (email: string, code: string) => {
+    const response = await authApi.verifyMagicCode(email, code);
+    setUser(response.user);
+  }, []);
+
   // Native OAuth return: the system-browser flow deep-links back with
   // knightball://auth?ticket=<one-time>; exchange it for a session.
   useEffect(() => {
@@ -163,6 +169,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         deleteAccount,
         verifyMagicLink,
         requestMagicLink,
+        verifyMagicCode,
         refreshUser,
       }}
     >

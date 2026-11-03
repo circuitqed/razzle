@@ -244,3 +244,62 @@ class TestPasswordHashing:
         user = persistence.authenticate_user('verifytest2', 'wrongpassword', db_path=temp_db)
 
         assert user is None
+
+
+class TestMagicCode:
+    """6-digit sign-in code from the sign-in email (the app's path; the link
+    can open in Mail's own browser instead of the app)."""
+
+    @pytest.fixture
+    def sent(self, client, monkeypatch):
+        import server.main as main
+        mails = []
+
+        async def fake_send(to, subject, html):
+            mails.append({'to': to, 'subject': subject, 'html': html})
+            return True
+        monkeypatch.setattr(main, 'send_email_via_resend', fake_send)
+        main._magic_code_failures.clear()
+        r = client.post('/auth/register/email', json={
+            'username': 'coder', 'password': 'password123', 'email': 'coder@example.com'})
+        assert r.status_code == 200
+        client.cookies.clear()
+        return mails
+
+    def _request_code(self, client, sent):
+        assert client.post('/auth/magic-link/request', json={'email': 'coder@example.com'}).status_code == 200
+        import re
+        return re.search(r'code: (\d{6})', sent[-1]['subject']).group(1)
+
+    def test_code_signs_in_once(self, client, sent):
+        code = self._request_code(client, sent)
+        assert code in sent[-1]['html']
+        r = client.post('/auth/magic-link/verify-code', json={'email': 'coder@example.com', 'code': code})
+        assert r.status_code == 200
+        assert r.json()['user']['username'] == 'coder'
+        assert 'knightball_auth' in r.cookies
+        again = client.post('/auth/magic-link/verify-code', json={'email': 'coder@example.com', 'code': code})
+        assert again.status_code == 400
+
+    def test_new_request_retires_old_code(self, client, sent):
+        old = self._request_code(client, sent)
+        new = self._request_code(client, sent)
+        if old != new:
+            r = client.post('/auth/magic-link/verify-code', json={'email': 'coder@example.com', 'code': old})
+            assert r.status_code == 400
+        r = client.post('/auth/magic-link/verify-code', json={'email': 'coder@example.com', 'code': new})
+        assert r.status_code == 200
+
+    def test_five_wrong_codes_retire_the_code(self, client, sent):
+        code = self._request_code(client, sent)
+        wrong = f"{(int(code) + 1) % 10**6:06d}"
+        for _ in range(5):
+            r = client.post('/auth/magic-link/verify-code', json={'email': 'coder@example.com', 'code': wrong})
+            assert r.status_code == 400
+        auth_limiter._hits.clear()
+        r = client.post('/auth/magic-link/verify-code', json={'email': 'coder@example.com', 'code': code})
+        assert r.status_code == 400
+
+    def test_unknown_email_is_rejected(self, client, sent):
+        r = client.post('/auth/magic-link/verify-code', json={'email': 'nobody@example.com', 'code': '123456'})
+        assert r.status_code == 400

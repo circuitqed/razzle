@@ -11,13 +11,14 @@ interface LoginModalProps {
 
 export default function LoginModal({ isOpen, onClose, onSwitchToRegister, onForgotPassword }: LoginModalProps) {
   const dialogRef = useDialogA11y(onClose);
-  const { loginWithEmail, requestMagicLink, isAuthenticated } = useAuth();
+  const { loginWithEmail, requestMagicLink, verifyMagicCode, isAuthenticated } = useAuth();
   const [emailOrUsername, setEmailOrUsername] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [magicSent, setMagicSent] = useState(false);
   const [magicLoading, setMagicLoading] = useState(false);
+  const [code, setCode] = useState('');
 
   // Reset form when modal opens
   useEffect(() => {
@@ -27,6 +28,7 @@ export default function LoginModal({ isOpen, onClose, onSwitchToRegister, onForg
       setError(null);
       setMagicSent(false);
       setMagicLoading(false);
+      setCode('');
     }
   }, [isOpen]);
 
@@ -42,6 +44,21 @@ export default function LoginModal({ isOpen, onClose, onSwitchToRegister, onForg
       setMagicSent(true);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not send the link.');
+    } finally {
+      setMagicLoading(false);
+    }
+  };
+
+  // The code is the reliable path in the app: on a fresh install, tapping the
+  // email link can open Mail's own browser and sign that in instead.
+  const handleCode = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(null);
+    setMagicLoading(true);
+    try {
+      await verifyMagicCode(emailOrUsername.trim(), code);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not sign in with that code.');
     } finally {
       setMagicLoading(false);
     }
@@ -135,9 +152,29 @@ export default function LoginModal({ isOpen, onClose, onSwitchToRegister, onForg
         {/* Passwordless alternative — works the same on web and in the app */}
         <div className="mt-4 pt-4 border-t border-gray-700">
           {magicSent ? (
-            <p className="text-sm text-green-300 text-center">
-              Check your email for a sign-in link. It works on this device or your phone.
-            </p>
+            <form onSubmit={handleCode} className="space-y-2">
+              <p className="text-sm text-green-300 text-center">
+                We emailed you a 6-digit code. Enter it here, or tap the link in the email.
+              </p>
+              <div className="flex gap-2">
+                <input
+                  value={code}
+                  onChange={(e) => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                  inputMode="numeric"
+                  autoComplete="one-time-code"
+                  placeholder="123456"
+                  aria-label="Sign-in code"
+                  className="flex-1 min-w-0 px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white text-center tracking-[0.3em] focus:outline-none focus:border-blue-500"
+                />
+                <button
+                  type="submit"
+                  disabled={code.length !== 6 || magicLoading}
+                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 text-white rounded font-medium transition-colors"
+                >
+                  {magicLoading ? '…' : 'Sign in'}
+                </button>
+              </div>
+            </form>
           ) : (
             <button
               type="button"
@@ -145,7 +182,7 @@ export default function LoginModal({ isOpen, onClose, onSwitchToRegister, onForg
               disabled={magicLoading}
               className="w-full px-4 py-2 text-sm bg-gray-700 hover:bg-gray-600 disabled:bg-gray-800 text-white rounded transition-colors"
             >
-              {magicLoading ? 'Sending…' : 'Email me a sign-in link instead'}
+              {magicLoading ? 'Sending…' : 'Email me a sign-in code instead'}
             </button>
           )}
         </div>

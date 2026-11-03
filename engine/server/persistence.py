@@ -1471,6 +1471,45 @@ def create_auth_token(
     return token
 
 
+def create_auth_code(
+    user_id: str,
+    token_type: str,
+    expires_minutes: int = 15,
+    db_path: Path = None
+) -> str:
+    """Create a 6-digit one-time code, stored as "<user_id>:<code>" so codes only
+    need to be unique per user. Returns the code."""
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+    code = f"{secrets.randbelow(10**6):06d}"
+    now = datetime.utcnow()
+    expires = now + timedelta(minutes=expires_minutes)
+    with get_connection(db_path) as conn:
+        # One live code per user: a new request retires the old one
+        conn.execute(
+            "UPDATE auth_tokens SET used = 1 WHERE user_id = ? AND token_type = ? AND used = 0",
+            (user_id, token_type),
+        )
+        conn.execute("""
+            INSERT OR REPLACE INTO auth_tokens (token, user_id, token_type, created_at, expires_at)
+            VALUES (?, ?, ?, ?, ?)
+        """, (f"{user_id}:{code}", user_id, token_type, now.isoformat() + 'Z', expires.isoformat() + 'Z'))
+        conn.commit()
+    return code
+
+
+def retire_auth_codes(user_id: str, token_type: str, db_path: Path = None) -> None:
+    """Invalidate a user's live codes (too many wrong guesses)."""
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+    with get_connection(db_path) as conn:
+        conn.execute(
+            "UPDATE auth_tokens SET used = 1 WHERE user_id = ? AND token_type = ? AND used = 0",
+            (user_id, token_type),
+        )
+        conn.commit()
+
+
 def validate_auth_token(
     token: str,
     token_type: str,

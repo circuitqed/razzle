@@ -230,6 +230,14 @@ export async function verifyMagicLink(token: string): Promise<AuthResponse> {
   });
 }
 
+/** Sign in with the 6-digit code from the sign-in email. */
+export async function verifyMagicCode(email: string, code: string): Promise<AuthResponse> {
+  return request('/auth/magic-link/verify-code', {
+    method: 'POST',
+    body: JSON.stringify({ email, code }),
+  });
+}
+
 /** Permanently delete the authenticated account (guideline 5.1.1(v)). */
 export async function deleteAccount(): Promise<{ message: string }> {
   const result = await request<{ message: string }>('/auth/account', { method: 'DELETE' });

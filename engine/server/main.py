@@ -278,6 +278,11 @@ class MagicLinkVerifyRequest(BaseModel):
     token: str
 
 
+class MagicCodeVerifyRequest(BaseModel):
+    email: str = Field(..., min_length=5, max_length=255)
+    code: str = Field(..., min_length=6, max_length=6)
+
+
 class AppTicketExchangeRequest(BaseModel):
     ticket: str
     code_verifier: Optional[str] = None  # PKCE verifier matching the flow's challenge
@@ -2223,11 +2228,22 @@ async def magic_link_request(request: MagicLinkRequest, req: Request = None):
         # Cap link requests per account to limit inbox spam.
         if persistence.count_recent_tokens(user["user_id"], "magic_link", hours=1) < 5:
             token = persistence.create_auth_token(user["user_id"], "magic_link", expires_hours=1)
+            # The code is what the app relies on: tapping the link opens Mail's own
+            # browser on a fresh install (Universal Links not yet trusted), which
+            # signs in that browser, not the app.
+            code = persistence.create_auth_code(user["user_id"], "magic_code", expires_minutes=15)
+            _magic_code_failures.pop(user["user_id"], None)
             link = f"{FRONTEND_URL}/auth/magic?token={token}"
             await send_email_via_resend(
                 to=request.email,
-                subject="Your KnightBall sign-in link",
-                html=f'<p>Tap to sign in to KnightBall:</p><p><a href="{link}">Sign in</a></p><p>This link expires in 1 hour and can be used once. If you didn\'t request it, ignore this email.</p>',
+                subject=f"KnightBall sign-in code: {code}",
+                html=(
+                    f'<p>Your KnightBall sign-in code:</p>'
+                    f'<p style="font-size:28px;font-weight:bold;letter-spacing:4px">{code}</p>'
+                    f'<p>Type it where you asked to sign in. It expires in 15 minutes.</p>'
+                    f'<p>Or <a href="{link}">tap here to sign in</a> on this device (expires in 1 hour).</p>'
+                    f'<p>If you didn\'t request this, ignore this email.</p>'
+                ),
             )
     return {"message": "If an account exists with that email, a sign-in link has been sent."}
 
@@ -2241,6 +2257,39 @@ async def magic_link_verify(request: MagicLinkVerifyRequest, response: Response,
     user = persistence.get_user_by_id(user_id)
     if not user:
         raise HTTPException(status_code=404, detail="Account not found")
+    _set_auth_cookie(response, user_id)
+    return AuthResponse(
+        user=UserResponse(**user),
+        message="Signed in",
+        token=_native_token(req, user_id),
+    )
+
+
+# Wrong-code count per user; at the limit the live code is retired, so a code
+# can't be brute-forced (1e6 values, 5 guesses).
+_magic_code_failures: dict[str, int] = {}
+MAGIC_CODE_MAX_FAILURES = 5
+
+
+@app.post("/auth/magic-link/verify-code", response_model=AuthResponse)
+async def magic_code_verify(request: MagicCodeVerifyRequest, response: Response, req: Request = None):
+    """Sign in with the 6-digit code from the sign-in email (single-use)."""
+    if req and not auth_limiter.check(get_client_ip(req)):
+        raise HTTPException(status_code=429, detail="Too many requests. Try again later.")
+    bad = HTTPException(status_code=400, detail="Wrong or expired code")
+    user = persistence.get_user_by_email(request.email)
+    if not user or not request.code.isdigit():
+        raise bad
+    user_id = user["user_id"]
+    if not persistence.validate_auth_token(f"{user_id}:{request.code}", "magic_code"):
+        n = _magic_code_failures.get(user_id, 0) + 1
+        if n >= MAGIC_CODE_MAX_FAILURES:
+            persistence.retire_auth_codes(user_id, "magic_code")
+            _magic_code_failures.pop(user_id, None)
+            raise HTTPException(status_code=400, detail="Too many wrong codes. Request a new one.")
+        _magic_code_failures[user_id] = n
+        raise bad
+    _magic_code_failures.pop(user_id, None)
     _set_auth_cookie(response, user_id)
     return AuthResponse(
         user=UserResponse(**user),
