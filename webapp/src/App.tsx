@@ -37,6 +37,7 @@ import * as onlineApi from './api/online';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { useOnlineStatus } from './hooks/useOnlineStatus';
 import { HistoryIcon, BugIcon, LearnIcon, RulesIcon, SoundOnIcon, SoundOffIcon, FlipIcon } from './components/icons';
+import LogoMark from './components/LogoMark';
 import LandingPage from './components/LandingPage';
 import Tutorial from './components/Tutorial';
 
@@ -655,7 +656,12 @@ function AppContent() {
       <EmailVerificationBanner />
 
       {/* Header bar */}
-      <header className="flex items-center justify-end px-2 sm:px-4 py-1 shrink-0">
+      <header className="flex items-center justify-between px-2 sm:px-4 py-1 shrink-0">
+        <div className="flex items-center gap-2 pl-1 min-w-0">
+          <LogoMark className="w-7 h-7 shrink-0" />
+          {/* The wordmark needs room the phone header lacks when signed out */}
+          <span className="hidden sm:inline text-lg font-semibold tracking-tight text-white">KnightBall</span>
+        </div>
         <div className="flex items-center gap-1">
           {!online && (
             <span
